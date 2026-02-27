@@ -12,6 +12,7 @@ from openhands.integrations.azure_devops.azure_devops_service import (
     AzureDevOpsServiceImpl,
 )
 from openhands.integrations.bitbucket.bitbucket_service import BitBucketServiceImpl
+from openhands.integrations.gitcode.gitcode_service import GitCodeServiceImpl
 from openhands.integrations.github.github_service import GithubServiceImpl
 from openhands.integrations.gitlab.gitlab_service import GitLabServiceImpl
 from openhands.integrations.provider import ProviderToken
@@ -57,7 +58,7 @@ async def save_pr_metadata(
     )
 
     pull_pattern = r'pull/(\d+)'
-    merge_request_pattern = r'merge_requests/(\d+)'
+    merge_request_pattern = r'(?:-\/)?merge_requests/(\d+)'
 
     # Check if the tool_result contains the PR number
     pr_number = None
@@ -146,6 +147,90 @@ async def create_pr(
         raise ToolError(str(error))
 
     return response
+
+
+@mcp_server.tool()
+async def create_gitcode_pr(
+    repo_name: Annotated[
+        str, Field(description='GitCode repository ({{owner}}/{{repo}})')
+    ],
+    source_branch: Annotated[str, Field(description='Source branch on repo')],
+    target_branch: Annotated[str, Field(description='Target branch on repo')],
+    title: Annotated[str, Field(description='PR Title')],
+    body: Annotated[str | None, Field(description='PR body')],
+    draft: Annotated[bool, Field(description='Whether PR opened is a draft')] = True,
+    labels: Annotated[
+        list[str] | None,
+        Field(
+            description='Optional labels to apply to the PR. If labels are provided, they must be selected from the repository’s existing labels. Do not invent new ones. If the repository’s labels are not known, fetch them first.'
+        ),
+    ] = None,
+) -> str:
+    """Open a PR in GitCode"""
+    logger.info('Calling OpenHands MCP create_gitcode_pr')
+
+    request = get_http_request()
+    headers = request.headers
+    conversation_id = headers.get('X-OpenHands-ServerConversation-ID', None)
+
+    provider_tokens = await get_provider_tokens(request)
+    access_token = await get_access_token(request)
+    user_id = await get_user_id(request)
+
+    gitcode_token = (
+        provider_tokens.get(ProviderType.GITCODE, ProviderToken())
+        if provider_tokens
+        else ProviderToken()
+    )
+
+    token = gitcode_token.token.get_secret_value() if gitcode_token.token else ''
+    if not token.strip():
+        raise ToolError(
+            'Missing GitCode token. Please configure the `gitcode` provider token before calling create_gitcode_pr.'
+        )
+
+    gitcode_service = GitCodeServiceImpl(
+        user_id=gitcode_token.user_id,
+        external_auth_id=user_id,
+        external_auth_token=access_token,
+        token=gitcode_token.token,
+        base_domain=gitcode_token.host,
+    )
+
+    try:
+        body = await get_conversation_link(gitcode_service, conversation_id, body or '')
+    except Exception as e:
+        logger.warning(f'Failed to append conversation link: {e}')
+
+    payload = {
+        'repository': repo_name,
+        'head': source_branch,
+        'base': target_branch,
+        'title': title,
+        'body': body or '',
+        'draft': draft,
+    }
+    if labels:
+        payload['labels'] = labels
+
+    try:
+        response = await gitcode_service.create_pull_request(payload)
+        # GitCode instances may return GitHub-style `html_url`/`url` or
+        # GitLab-style `web_url` for newly created PR/MR resources.
+        pr_url = (
+            response.get('html_url') or response.get('url') or response.get('web_url')
+        )
+        if not pr_url:
+            raise ToolError(f'GitCode create_pull_request returned no URL: {response}')
+
+        if conversation_id:
+            await save_pr_metadata(user_id, conversation_id, pr_url)
+
+    except Exception as e:
+        error = f'Error creating GitCode pull request: {e}'
+        raise ToolError(str(error))
+
+    return str(pr_url)
 
 
 @mcp_server.tool()

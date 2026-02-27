@@ -20,6 +20,7 @@ class TokenResponse(BaseModel):
 class ProviderType(Enum):
     GITHUB = 'github'
     GITLAB = 'gitlab'
+    GITCODE = 'gitcode'
     BITBUCKET = 'bitbucket'
     FORGEJO = 'forgejo'
     AZURE_DEVOPS = 'azure_devops'
@@ -67,6 +68,16 @@ class SuggestedTask(BaseModel):
                 'ciSystem': 'CI pipelines',
                 'ciProvider': 'GitLab',
                 'requestVerb': 'merge request',
+            }
+        elif self.git_provider == ProviderType.GITCODE:
+            return {
+                'requestType': 'Pull Request',
+                'requestTypeShort': 'PR',
+                'apiName': 'GitCode API',
+                'tokenEnvVar': 'GITCODE_TOKEN',
+                'ciSystem': 'CI pipelines',
+                'ciProvider': 'GitCode',
+                'requestVerb': 'pull request',
             }
         elif self.git_provider == ProviderType.BITBUCKET:
             return {

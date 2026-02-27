@@ -112,6 +112,12 @@ def get_provider_tokens():
         gitlab_token = SecretStr(os.environ['GITLAB_TOKEN'])
         provider_tokens[ProviderType.GITLAB] = ProviderToken(token=gitlab_token)
 
+    if 'GITCODE_TOKEN' in os.environ:
+        gitcode_token = SecretStr(os.environ['GITCODE_TOKEN'])
+        provider_tokens[ProviderType.GITCODE] = ProviderToken(
+            token=gitcode_token, host='gitcode.com'
+        )
+
     if 'BITBUCKET_TOKEN' in os.environ:
         bitbucket_token = SecretStr(os.environ['BITBUCKET_TOKEN'])
         provider_tokens[ProviderType.BITBUCKET] = ProviderToken(token=bitbucket_token)
