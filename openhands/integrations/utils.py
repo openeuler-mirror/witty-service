@@ -6,6 +6,7 @@ from openhands.integrations.azure_devops.azure_devops_service import (
 )
 from openhands.integrations.bitbucket.bitbucket_service import BitBucketService
 from openhands.integrations.forgejo.forgejo_service import ForgejoService
+from openhands.integrations.gitcode.gitcode_service import GitCodeService
 from openhands.integrations.github.github_service import GitHubService
 from openhands.integrations.gitlab.gitlab_service import GitLabService
 from openhands.integrations.provider import ProviderType
@@ -39,6 +40,15 @@ async def validate_provider_token(
         return ProviderType.GITHUB
     except Exception as e:
         github_error = e
+
+    gitcode_error = None
+    # Try GitCode (AtomGit) next
+    try:
+        gitcode_service = GitCodeService(token=token, base_domain=base_domain)
+        await gitcode_service.get_user()
+        return ProviderType.GITCODE
+    except Exception as e:
+        gitcode_error = e
 
     # Try GitLab next
     gitlab_error = None
@@ -79,7 +89,7 @@ async def validate_provider_token(
         azure_devops_error = e
 
     logger.debug(
-        f'Failed to validate token: {github_error} \n {gitlab_error} \n {forgejo_error} \n {bitbucket_error} \n {azure_devops_error}'
+        f'Failed to validate token: {github_error} \n {gitcode_error} \n {gitlab_error} \n {forgejo_error} \n {bitbucket_error} \n {azure_devops_error}'
     )
 
     return None
