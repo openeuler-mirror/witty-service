@@ -62,6 +62,8 @@ const renderGitSettingsScreen = () => {
           GITHUB$HOST_LABEL: "GitHub Host",
           GITLAB$TOKEN_LABEL: "GitLab Token",
           GITLAB$HOST_LABEL: "GitLab Host",
+          GITCODE$TOKEN_LABEL: "GitCode Token",
+          GITCODE$HOST_LABEL: "GitCode Host",
           BITBUCKET$TOKEN_LABEL: "Bitbucket Token",
           BITBUCKET$HOST_LABEL: "Bitbucket Host",
           SETTINGS$GITLAB: "GitLab",
@@ -306,6 +308,7 @@ describe("Form submission", () => {
     expect(saveProvidersSpy).toHaveBeenCalledWith({
       github: { token: "test-token", host: "" },
       gitlab: { token: "", host: "" },
+      gitcode: { token: "", host: "" },
       bitbucket: { token: "", host: "" },
       azure_devops: { token: "", host: "" },
       forgejo: { token: "", host: "" },
@@ -329,6 +332,7 @@ describe("Form submission", () => {
     expect(saveProvidersSpy).toHaveBeenCalledWith({
       github: { token: "", host: "" },
       gitlab: { token: "test-token", host: "" },
+      gitcode: { token: "", host: "" },
       bitbucket: { token: "", host: "" },
       azure_devops: { token: "", host: "" },
       forgejo: { token: "", host: "" },
@@ -352,6 +356,7 @@ describe("Form submission", () => {
     expect(saveProvidersSpy).toHaveBeenCalledWith({
       github: { token: "", host: "" },
       gitlab: { token: "", host: "" },
+      gitcode: { token: "", host: "" },
       bitbucket: { token: "test-token", host: "" },
       azure_devops: { token: "", host: "" },
       forgejo: { token: "", host: "" },
@@ -377,6 +382,7 @@ describe("Form submission", () => {
     expect(saveProvidersSpy).toHaveBeenCalledWith({
       github: { token: "", host: "" },
       gitlab: { token: "", host: "" },
+      gitcode: { token: "", host: "" },
       bitbucket: { token: "", host: "" },
       azure_devops: { token: "test-token", host: "" },
       forgejo: { token: "", host: "" },

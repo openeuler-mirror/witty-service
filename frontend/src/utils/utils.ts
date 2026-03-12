@@ -197,6 +197,8 @@ export const shouldUseInstallationRepos = (
       return true;
     case "gitlab":
       return false;
+    case "gitcode":
+      return false;
     case "azure_devops":
       return false;
     case "github":
@@ -212,6 +214,8 @@ export const getGitProviderBaseUrl = (gitProvider: Provider): string => {
       return "https://github.com";
     case "gitlab":
       return "https://gitlab.com";
+    case "gitcode":
+      return "https://gitcode.com";
     case "bitbucket":
       return "https://bitbucket.org";
     case "azure_devops":
@@ -232,6 +236,7 @@ export const getGitProviderBaseUrl = (gitProvider: Provider): string => {
  */
 export const getProviderName = (gitProvider: Provider) => {
   if (gitProvider === "gitlab") return "GitLab";
+  if (gitProvider === "gitcode") return "GitCode";
   if (gitProvider === "bitbucket") return "Bitbucket";
   if (gitProvider === "azure_devops") return "Azure DevOps";
   if (gitProvider === "forgejo") return "Forgejo";
@@ -241,7 +246,7 @@ export const getProviderName = (gitProvider: Provider) => {
 /**
  * Get the name of the PR
  * @param isGitLab Whether the git provider is GitLab
- * @returns The name of the PR
+ * @returns The name of the PR, GitHub and GitCode is “pull request”
  */
 export const getPR = (isGitLab: boolean) =>
   isGitLab ? "merge request" : "pull request";
@@ -264,6 +269,7 @@ export const getPRShort = (isGitLab: boolean) => (isGitLab ? "MR" : "PR");
  * constructPullRequestUrl(123, "github", "owner/repo") // "https://github.com/owner/repo/pull/123"
  * constructPullRequestUrl(456, "gitlab", "owner/repo") // "https://gitlab.com/owner/repo/-/merge_requests/456"
  * constructPullRequestUrl(789, "bitbucket", "owner/repo") // "https://bitbucket.org/owner/repo/pull-requests/789"
+ * constructPullRequestUrl(111, "gitcode", "owner/repo") // "https://gitcode.com/owner/repo/pull/111"
  */
 export const constructPullRequestUrl = (
   prNumber: number,
@@ -279,6 +285,8 @@ export const constructPullRequestUrl = (
       return `${baseUrl}/${repositoryName}/pull/${prNumber}`;
     case "gitlab":
       return `${baseUrl}/${repositoryName}/-/merge_requests/${prNumber}`;
+    case "gitcode":
+      return `${baseUrl}/${repositoryName}/pull/${prNumber}`;
     case "bitbucket":
       return `${baseUrl}/${repositoryName}/pull-requests/${prNumber}`;
     case "azure_devops": {
@@ -324,6 +332,8 @@ export const constructMicroagentUrl = (
       return `${baseUrl}/${repositoryName}/src/branch/main/${microagentPath}`;
     case "gitlab":
       return `${baseUrl}/${repositoryName}/-/blob/main/${microagentPath}`;
+    case "gitcode":
+      return `${baseUrl}/${repositoryName}/blob/main/${microagentPath}`;
     case "bitbucket":
       return `${baseUrl}/${repositoryName}/src/main/${microagentPath}`;
     case "azure_devops": {
@@ -368,6 +378,7 @@ export const extractRepositoryInfo = (
  * @example
  * constructRepositoryUrl("github", "owner/repo") // "https://github.com/owner/repo"
  * constructRepositoryUrl("gitlab", "owner/repo") // "https://gitlab.com/owner/repo"
+ * constructRepositoryUrl("gitcode", "owner/repo") // "https://gitcode.com/owner/repo"
  * constructRepositoryUrl("bitbucket", "owner/repo") // "https://bitbucket.org/owner/repo"
  */
 export const constructRepositoryUrl = (
@@ -388,6 +399,7 @@ export const constructRepositoryUrl = (
  * @example
  * constructBranchUrl("github", "owner/repo", "main") // "https://github.com/owner/repo/tree/main"
  * constructBranchUrl("gitlab", "owner/repo", "develop") // "https://gitlab.com/owner/repo/-/tree/develop"
+ * constructBranchUrl("gitcode", "owner/repo", "develop") // "https://gitcode.com/owner/repo/tree/develop"
  * constructBranchUrl("bitbucket", "owner/repo", "feature") // "https://bitbucket.org/owner/repo/src/feature"
  */
 export const constructBranchUrl = (
@@ -404,6 +416,8 @@ export const constructBranchUrl = (
       return `${baseUrl}/${repositoryName}/src/branch/${branchName}`;
     case "gitlab":
       return `${baseUrl}/${repositoryName}/-/tree/${branchName}`;
+    case "gitcode":
+      return `${baseUrl}/${repositoryName}/tree/${branchName}`;
     case "bitbucket":
       return `${baseUrl}/${repositoryName}/src/${branchName}`;
     case "azure_devops": {
@@ -634,6 +648,7 @@ export const shouldIncludeRepository = (
 export const getOpenHandsQuery = (provider: Provider | null): string => {
   const providerRepositorySuffix: Record<string, string> = {
     gitlab: "openhands-config",
+    gitcode: "openhands-config",
     azure_devops: "openhands-config",
     default: ".openhands",
   } as const;

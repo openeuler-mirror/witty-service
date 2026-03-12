@@ -142,6 +142,7 @@ Enterprise uses Alembic for database migrations. When making schema changes:
 The enterprise codebase includes integrations for:
 - **GitHub** - PR management, webhooks, app installations
 - **GitLab** - Similar to GitHub but for GitLab instances
+- **GitCode** - Similar to GitHub but for GitCode instances
 - **Jira** - Issue tracking and project management
 - **Linear** - Modern issue tracking
 - **Slack** - Team communication and notifications

@@ -22,6 +22,12 @@ describe("parse-pr-url", () => {
       ]);
     });
 
+    it("should extract GitCode PR URLs", () => {
+      const text = "Check out this PR: https://gitcode.com/owner/repo/pull/123";
+      const urls = extractPRUrls(text);
+      expect(urls).toEqual(["https://gitcode.com/owner/repo/pull/123"]);
+    });
+
     it("should extract Bitbucket PR URLs", () => {
       const text =
         "PR link: https://bitbucket.org/owner/repo/pull-requests/789";

@@ -8,6 +8,8 @@ const PR_URL_PATTERNS = [
   /https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/gi,
   // GitLab: https://gitlab.com/owner/repo/-/merge_requests/123
   /https?:\/\/gitlab\.com\/[^/\s]+\/[^/\s]+\/-\/merge_requests\/\d+/gi,
+  // GitCode: https://gitcode.com/owner/repo/pull/123
+  /https?:\/\/gitcode\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/gi,
   // GitLab self-hosted: https://gitlab.example.com/owner/repo/-/merge_requests/123
   /https?:\/\/[^/\s]*gitlab[^/\s]*\/[^/\s]+\/[^/\s]+\/-\/merge_requests\/\d+/gi,
   // Bitbucket: https://bitbucket.org/owner/repo/pull-requests/123
