@@ -1,0 +1,76 @@
+"""Agent module for Agent Middleware Service."""
+
+from openhands.app_server.agent.logging_config import (
+    configure_agentd_logging,
+    get_agentd_log_dir,
+)
+
+configure_agentd_logging()
+
+from openhands.app_server.agent.models import (
+    AdapterStartRequest,
+    AdapterStartResponse,
+    AdapterStatusResponse,
+    AdapterType,
+    AgentEvent,
+    AgentInfo,
+    AgentStatus,
+    CreateAgentRequest,
+    ErrorDetail,
+    ErrorResponse,
+    EventType,
+    ModelOverride,
+    SandboxConfig,
+    SendMessageRequest,
+    SessionInfo,
+    SessionStatus,
+    UpdateAgentRequest,
+)
+from openhands.app_server.agent.errors import (
+    AgentError,
+    AgentNotFoundError,
+    AgentNotRunningError,
+    AgentPausedError,
+    AdapterError,
+    ForbiddenError,
+    InternalError,
+    SandboxError,
+    SessionNotActiveError,
+    SessionNotFoundError,
+    UnauthorizedError,
+    ValidationError,
+)
+
+__all__ = [
+    "configure_agentd_logging",
+    "get_agentd_log_dir",
+    "AdapterStartRequest",
+    "AdapterStartResponse",
+    "AdapterStatusResponse",
+    "AdapterType",
+    "AgentEvent",
+    "AgentInfo",
+    "AgentStatus",
+    "CreateAgentRequest",
+    "ErrorDetail",
+    "ErrorResponse",
+    "EventType",
+    "ModelOverride",
+    "SandboxConfig",
+    "SendMessageRequest",
+    "SessionInfo",
+    "SessionStatus",
+    "UpdateAgentRequest",
+    "AgentError",
+    "AgentNotFoundError",
+    "AgentNotRunningError",
+    "AgentPausedError",
+    "AdapterError",
+    "ForbiddenError",
+    "InternalError",
+    "SandboxError",
+    "SessionNotActiveError",
+    "SessionNotFoundError",
+    "UnauthorizedError",
+    "ValidationError",
+]
