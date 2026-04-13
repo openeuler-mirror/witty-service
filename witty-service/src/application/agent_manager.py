@@ -308,7 +308,9 @@ class AgentManager:
         self._ensure_transition(agent, AgentStatus.running)
 
         if agent.status == AgentStatus.paused:
-            return self._resume_from_paused(agent_id)
+            return asyncio.get_event_loop().run_until_complete(
+                self._resume_from_paused(agent_id)
+            )
         elif agent.status == AgentStatus.deleted:
             return asyncio.get_event_loop().run_until_complete(
                 self._resume_from_deleted(agent_id)
