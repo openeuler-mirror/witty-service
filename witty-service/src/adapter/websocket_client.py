@@ -67,14 +67,27 @@ class WebSocketClient:
             async for raw in self._ws:
                 try:
                     data = json.loads(raw)
-                    yield InboundEvent(
-                        type=data["type"],
-                        session_id=data["session_id"],
-                        runtime_type=data["runtime_type"],
-                        event_id=data["event_id"],
-                        ts_ms=data["ts_ms"],
-                        payload=data.get("payload", {}),
-                    )
+                    event_type = data.get("type", "")
+
+                    # client.error events may not have standard envelope fields
+                    if event_type == "client.error":
+                        yield InboundEvent(
+                            type=event_type,
+                            session_id=data.get("session_id", ""),
+                            runtime_type=data.get("runtime_type", "unknown"),
+                            event_id=data.get("event_id", ""),
+                            ts_ms=data.get("ts_ms", 0),
+                            payload=data.get("payload", {}),
+                        )
+                    else:
+                        yield InboundEvent(
+                            type=data["type"],
+                            session_id=data["session_id"],
+                            runtime_type=data["runtime_type"],
+                            event_id=data["event_id"],
+                            ts_ms=data["ts_ms"],
+                            payload=data.get("payload", {}),
+                        )
                 except (json.JSONDecodeError, KeyError) as exc:
                     raise AdaptorReceiveError(
                         message="Failed to parse WebSocket message",

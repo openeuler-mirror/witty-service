@@ -48,9 +48,11 @@ curl -s http://127.0.0.1:8000/healthz
 
 ```json
 {
-  "code": "ERROR_CODE",
-  "message": "error message",
-  "details": {}
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "error message",
+    "details": {}
+  }
 }
 ```
 
@@ -82,20 +84,18 @@ curl -s http://127.0.0.1:8000/healthz
 #### 1. `POST /api/v1/agents`
 
 - 接口描述：创建新 Agent
-- 输入：
+- 输入（CreateAgentRequest）：
 
-```json
-{
-  "name": "my-agent",
-  "sandbox_type": "docker",
-  "adapter_type": "openclaw",
-  "idle_timeout_seconds": 3600,
-  "sandbox_id": null,
-  "has_scheduled_tasks": false
-}
-```
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | Agent 名称，最小长度 1 |
+| `sandbox_type` | string | 是 | 沙箱类型：`docker`、`local_process`、`e2b` |
+| `adapter_type` | string | 是 | 适配器类型：如 `openclaw` |
+| `idle_timeout_seconds` | integer | 是 | 空闲超时时间（秒），必须大于 0 |
+| `sandbox_id` | string | 否 | 沙箱 ID |
+| `has_scheduled_tasks` | boolean | 否 | 是否有定时任务，默认 `false` |
 
-- 输出 `201`：
+- 输出 `201`（AgentResponse）：
 
 ```json
 {
@@ -114,39 +114,153 @@ curl -s http://127.0.0.1:8000/healthz
 }
 ```
 
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | Agent 唯一标识 |
+| `name` | string | Agent 名称 |
+| `sandbox_type` | string | 沙箱类型 |
+| `adapter_type` | string | 适配器类型 |
+| `status` | string | Agent 状态：`running`、`paused`、`stopped` |
+| `sandbox_id` | string \| null | 沙箱 ID |
+| `workspace_path` | string | 工作区路径 |
+| `idle_timeout_seconds` | integer | 空闲超时时间 |
+| `has_scheduled_tasks` | boolean | 是否有定时任务 |
+| `created_at` | datetime | 创建时间 |
+| `updated_at` | datetime | 更新时间 |
+| `default_session_id` | string \| null | 默认会话 ID |
+
 #### 2. `GET /api/v1/agents`
 
 - 接口描述：列出所有 Agent
+- 输入：无
+- 输出 `200`：`list[AgentResponse]`
+
+```json
+[
+  {
+    "id": "agent-uuid-1",
+    "name": "my-agent",
+    "sandbox_type": "docker",
+    "adapter_type": "openclaw",
+    "status": "running",
+    "sandbox_id": null,
+    "workspace_path": "/path/to/workspace",
+    "idle_timeout_seconds": 3600,
+    "has_scheduled_tasks": false,
+    "created_at": "2026-04-10T12:00:00",
+    "updated_at": "2026-04-10T12:00:00",
+    "default_session_id": "session-uuid"
+  }
+]
+```
 
 #### 3. `GET /api/v1/agents/{agent_id}`
 
 - 接口描述：获取 Agent 详情
+- 输入：
+
+| 字段 | 类型 | 位置 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | path | Agent 唯一标识 |
+
+- 输出 `200`：`AgentResponse`
+
+```json
+{
+  "id": "agent-uuid",
+  "name": "my-agent",
+  "sandbox_type": "docker",
+  "adapter_type": "openclaw",
+  "status": "running",
+  "sandbox_id": null,
+  "workspace_path": "/path/to/workspace",
+  "idle_timeout_seconds": 3600,
+  "has_scheduled_tasks": false,
+  "created_at": "2026-04-10T12:00:00",
+  "updated_at": "2026-04-10T12:00:00",
+  "default_session_id": "session-uuid"
+}
+```
 
 #### 4. `DELETE /api/v1/agents/{agent_id}`
 
-- 接口描述：删除 Agent
-- 输出 `204`
+- 接口描述：删除 Agent及其所有关联的沙箱资源、会话和消息记录
+- 输入：
+
+| 字段 | 类型 | 位置 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | path | Agent 唯一标识 |
+
+- 输出 `204`：无返回内容
 
 #### 5. `POST /api/v1/agents/{agent_id}/pause`
 
-- 接口描述：暂停 Agent
-- 输出 `200`：返回更新后的 Agent
+- 接口描述：暂停 Agent，保留沙箱状态和所有资源
+- 输入：
+
+| 字段 | 类型 | 位置 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | path | Agent 唯一标识 |
+
+- 输出 `200`：`AgentResponse`（status 变为 `paused`）
+
+```json
+{
+  "id": "agent-uuid",
+  "name": "my-agent",
+  "sandbox_type": "docker",
+  "adapter_type": "openclaw",
+  "status": "paused",
+  "sandbox_id": "container-id",
+  "workspace_path": "/path/to/workspace",
+  "idle_timeout_seconds": 3600,
+  "has_scheduled_tasks": false,
+  "created_at": "2026-04-10T12:00:00",
+  "updated_at": "2026-04-10T12:30:00",
+  "default_session_id": "session-uuid"
+}
+```
 
 #### 6. `POST /api/v1/agents/{agent_id}/resume`
 
-- 接口描述：恢复 Agent
-- 输出 `200`：返回更新后的 Agent
+- 接口描述：恢复已暂停的 Agent
+- 输入：
+
+| 字段 | 类型 | 位置 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | path | Agent 唯一标识 |
+
+- 输出 `200`：`AgentResponse`（status 变为 `running`）
+
+```json
+{
+  "id": "agent-uuid",
+  "name": "my-agent",
+  "sandbox_type": "docker",
+  "adapter_type": "openclaw",
+  "status": "running",
+  "sandbox_id": "container-id",
+  "workspace_path": "/path/to/workspace",
+  "idle_timeout_seconds": 3600,
+  "has_scheduled_tasks": false,
+  "created_at": "2026-04-10T12:00:00",
+  "updated_at": "2026-04-10T12:35:00",
+  "default_session_id": "session-uuid"
+}
+```
 
 ### 3.4 Session 接口
 
 #### 1. `GET /api/v1/agents/{agent_id}/sessions`
 
 - 接口描述：列出 Agent 的所有会话
+- 输出 `200`：`list[SessionResponse]`
 
 #### 2. `POST /api/v1/agents/{agent_id}/sessions`
 
 - 接口描述：创建新会话
-- 输出 `201`：
+- 输入：空对象 `{}`
+- 输出 `201`（SessionResponse）：
 
 ```json
 {
@@ -158,21 +272,34 @@ curl -s http://127.0.0.1:8000/healthz
 }
 ```
 
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | 会话唯一标识 |
+| `agent_id` | string | 所属 Agent ID |
+| `status` | string | 会话状态：`active`、`closed` |
+| `created_at` | datetime | 创建时间 |
+| `updated_at` | datetime | 更新时间 |
+
 #### 3. `GET /api/v1/agents/{agent_id}/sessions/{session_id}`
 
 - 接口描述：获取会话详情
+- 输出 `200`：`SessionResponse`
 
 #### 4. `DELETE /api/v1/agents/{agent_id}/sessions/{session_id}`
 
 - 接口描述：删除会话
-- 输出 `204`
+- 输出 `204`：无返回内容
 
 ### 3.5 消息接口
 
 #### `POST /api/v1/agents/{agent_id}/sessions/{session_id}/messages`
 
 - 接口描述：witty-service 对外通过 REST 发送消息并返回非流式聚合结果；内部到 `witty-agent-server` 的消息通道仍是 WebSocket
-- 输入：
+- 输入（SendMessageRequest）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `content` | string | 是 | 消息内容，最小长度 1 |
 
 ```json
 {
@@ -180,7 +307,7 @@ curl -s http://127.0.0.1:8000/healthz
 }
 ```
 
-- 输出 `200`（`MessageEventsResponse`）：
+- 输出 `200`（MessageEventsResponse）：
 
 ```json
 {
@@ -214,13 +341,20 @@ curl -s http://127.0.0.1:8000/healthz
 }
 ```
 
-- 说明：
-  - 顶层 `sandbox_type` 表示 Agent 的沙箱类型，取值来自 agent 配置的 sandbox backend，例如 `docker`、`local_process`、`e2b`。
-  - `events[]` 内不再包含 `sandbox_type`；事件对象保持上游 envelope 结构，字段会保留上游 runtime 的 `runtime_type`，例如 `openclaw`、`opencode`。
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `sandbox_type` | string | Agent 的沙箱类型，取值来自 agent 配置的 sandbox backend，例如 `docker`、`local_process`、`e2b` |
+| `events` | array | 事件数组，每个事件包含 type、session_id、event_id、ts_ms、runtime_type、payload |
 
 #### `POST /api/v1/agents/{agent_id}/sessions/{session_id}/messages/stream`
 
 - 接口描述：witty-service 对外通过 REST 提供 SSE 流式返回；内部到 `witty-agent-server` 的消息通道仍是 WebSocket
+- 输入（SendMessageRequest）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `content` | string | 是 | 消息内容，最小长度 1 |
+
 - 响应类型：`text/event-stream`
 - 每条 SSE `data:` 的格式：
 
@@ -248,67 +382,149 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 
 ### 3.7 常见错误码
 
-| code | HTTP | 说明 |
-|------|------|------|
+| code | HTTP 状态码 | 说明 |
+|------|-------------|------|
 | `INVALID_AGENT_TRANSITION` | 409 | Agent 状态转换不合法 |
+| `AGENT_NOT_FOUND` | 404 | Agent 不存在 |
 | `SESSION_NOT_FOUND` | 404 | 会话不存在 |
-| `AGENT_NOT_RUNNING` | 400 | Agent 未运行 |
-| `SANDBOX_UNAVAILABLE` | 503 | sandbox 不可用 |
-| `INVALID_MESSAGE_PAYLOAD` | 400 | 消息体不合法 |
-| `UNSUPPORTED_CLIENT_EVENT` | 400 | 不支持的客户端事件 |
-| `REQUEST_VALIDATION_ERROR` | 422 | 请求验证失败 |
+| `SESSION_AGENT_MISMATCH` | 400 | Session 与 Agent 不匹配 |
+| `AGENT_NOT_RUNNING` | 409 | Agent 未运行（可能处于 paused 或 stopped 状态） |
+| `SANDBOX_STATE_NOT_FOUND` | 404 | 沙箱状态不存在 |
+| `AGENT_CREATE_FAILED` | 500 | Agent 创建失败 |
+| `AGENT_PAUSE_FAILED` | 500 | Agent 暂停失败 |
+| `AGENT_RESUME_FAILED` | 500 | Agent 恢复失败 |
+| `AGENT_DELETE_FAILED` | 500 | Agent 删除失败 |
 
-## 4. 手工 E2E 流程
+**HTTP 状态码映射规则：**
+- 以 `_NOT_FOUND` 结尾 → `404`
+- 以 `_NOT_SUPPORTED` 或 `_MISMATCH` 结尾 → `400`
+- 以 `INVALID_` 开头 → `409`
+- 以 `_FAILED` 结尾 → `500`
+- 其他 → `400`
 
-### 4.1 创建 Agent
+## 4. 手工 E2E 流程（按沙箱场景）
+
+### 4.1 Docker 场景
+
+创建 Agent（`sandbox_type=docker`）：
 
 ```bash
-curl -s -X POST http://127.0.0.1:8000/api/v1/agents \
-  -H 'content-type: application/json' \
-  -d '{
-    "name": "test-agent",
-    "sandbox_type": "docker",
-    "adapter_type": "openclaw",
-    "idle_timeout_seconds": 3600
-  }'
+AGENT_ID=$(
+  curl -s -X POST http://127.0.0.1:8000/api/v1/agents \
+    -H 'content-type: application/json' \
+    -H 'authorization: Bearer YOUR_TOKEN' \
+    -d '{
+      "name": "e2e-docker-agent",
+      "sandbox_type": "docker",
+      "adapter_type": "openclaw",
+      "idle_timeout_seconds": 3600
+    }' | jq -r '.id'
+)
 ```
 
-### 4.2 创建 Session
+创建 Session：
 
 ```bash
-AGENT_ID="your-agent-id"
 SESSION_ID=$(
   curl -s -X POST "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}/sessions" \
     -H 'content-type: application/json' \
+    -H 'authorization: Bearer YOUR_TOKEN' \
     -d '{}' | jq -r '.id'
 )
 ```
 
-### 4.3 发送消息
+非流式消息接口（`/messages`）：
 
 ```bash
-AGENT_ID="your-agent-id"
-SESSION_ID="your-session-id"
-
 curl -s -X POST "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}/sessions/${SESSION_ID}/messages" \
   -H 'content-type: application/json' \
-  -d '{"content": "say hi"}' | jq
+  -H 'authorization: Bearer YOUR_TOKEN' \
+  -d '{"content": "say hi from docker"}' | jq
 ```
 
-### 4.4 暂停/恢复 Agent
+流式消息接口（`/messages/stream`）：
 
 ```bash
-# 暂停
-curl -s -X POST "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}/pause"
-
-# 恢复
-curl -s -X POST "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}/resume"
+curl -N -X POST "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}/sessions/${SESSION_ID}/messages/stream" \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer YOUR_TOKEN' \
+  -d '{"content": "stream hi from docker"}'
 ```
 
-### 4.5 删除 Agent
+清理：
 
 ```bash
-curl -s -X DELETE "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}"
+curl -s -X DELETE "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}" \
+  -H 'authorization: Bearer YOUR_TOKEN'
+```
+
+### 4.2 Local Process 场景
+
+先配置本地 `witty-agent-server` 代码目录：
+
+```bash
+export WITTY_AGENT_SERVER_APP_DIR=/path/to/witty-agent-server
+```
+
+创建 Agent（`sandbox_type=local_process`）：
+
+```bash
+AGENT_ID=$(
+  curl -s -X POST http://127.0.0.1:8000/api/v1/agents \
+    -H 'content-type: application/json' \
+    -H 'authorization: Bearer YOUR_TOKEN' \
+    -d '{
+      "name": "e2e-local-agent",
+      "sandbox_type": "local_process",
+      "adapter_type": "openclaw",
+      "idle_timeout_seconds": 3600
+    }' | jq -r '.id'
+)
+```
+
+创建 Session：
+
+```bash
+SESSION_ID=$(
+  curl -s -X POST "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}/sessions" \
+    -H 'content-type: application/json' \
+    -H 'authorization: Bearer YOUR_TOKEN' \
+    -d '{}' | jq -r '.id'
+)
+```
+
+非流式消息接口（`/messages`）：
+
+```bash
+curl -s -X POST "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}/sessions/${SESSION_ID}/messages" \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer YOUR_TOKEN' \
+  -d '{"content": "say hi from local"}' | jq
+```
+
+流式消息接口（`/messages/stream`）：
+
+```bash
+curl -N -X POST "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}/sessions/${SESSION_ID}/messages/stream" \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer YOUR_TOKEN' \
+  -d '{"content": "stream hi from local"}'
+```
+
+可选状态操作：
+
+```bash
+curl -s -X POST "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}/pause" \
+  -H 'authorization: Bearer YOUR_TOKEN'
+curl -s -X POST "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}/resume" \
+  -H 'authorization: Bearer YOUR_TOKEN'
+```
+
+清理：
+
+```bash
+curl -s -X DELETE "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}" \
+  -H 'authorization: Bearer YOUR_TOKEN'
 ```
 
 ## 5. Sandbox 类型与配置
@@ -333,18 +549,6 @@ curl -s -X DELETE "http://127.0.0.1:8000/api/v1/agents/${AGENT_ID}"
 | `WITTY_DOCKER_CONTAINER_WORKSPACE_PATH` | 容器内工作区路径 | `/witty-workspace` |
 | `WITTY_DOCKER_STOP_TIMEOUT` | 容器停止超时（秒） | `10` |
 
-**示例：**
-```bash
-curl -s -X POST http://127.0.0.1:8000/api/v1/agents \
-  -H 'content-type: application/json' \
-  -d '{
-    "name": "my-agent",
-    "sandbox_type": "docker",
-    "adapter_type": "openclaw",
-    "idle_timeout_seconds": 3600
-  }'
-```
-
 **注意事项：**
 - `workspace_path` 必须为绝对路径
 - 工作区目录必须存在
@@ -360,20 +564,6 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/agents \
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `WITTY_AGENT_SERVER_APP_DIR` | `witty-agent-server` 代码目录（必填） | 空 |
-
-**示例：**
-```bash
-export WITTY_AGENT_SERVER_APP_DIR=/path/to/witty-agent-server
-
-curl -s -X POST http://127.0.0.1:8000/api/v1/agents \
-  -H 'content-type: application/json' \
-  -d '{
-    "name": "my-agent",
-    "sandbox_type": "local_process",
-    "adapter_type": "openclaw",
-    "idle_timeout_seconds": 3600
-  }'
-```
 
 **注意事项：**
 - `WITTY_AGENT_SERVER_APP_DIR` 必须指向有效的 `witty-agent-server` 代码目录
@@ -399,7 +589,21 @@ E2B 云沙箱运行时。**当前未实现**，调用会返回 `SANDBOX_NOT_SUPP
 
 witty-service 通过 WebSocket 连接至 `base_url` 与 adaptor service 通信。
 
-## 6. 自动化测试
+## 6. 认证
+
+所有 `/api/v1/agents/*` 接口需要 Bearer Token 认证：
+
+```bash
+-H 'authorization: Bearer YOUR_TOKEN'
+```
+
+环境变量：
+
+| 变量名 | 说明 |
+|--------|------|
+| `AUTH_TOKEN` | API 认证 token |
+
+## 7. 自动化测试
 
 ```bash
 uv run pytest tests/unit/ -q
@@ -412,14 +616,16 @@ uv run pytest tests/e2e/ -q
 uv run pytest tests/ -q
 ```
 
-## 7. 故障排查
+## 8. 故障排查
 
-- `AGENT_NOT_RUNNING`：Agent 未启动或已暂停，先调用 `/resume`
+- `AGENT_NOT_FOUND`：Agent 不存在，检查 agent_id 是否正确
 - `SESSION_NOT_FOUND`：会话不存在，检查 session_id 是否正确
-- `SANDBOX_UNAVAILABLE`：sandbox 不可用，检查 adaptor service 是否正常运行
+- `SESSION_AGENT_MISMATCH`：Session 与 Agent 不匹配，确认 session 属于正确的 Agent
+- `AGENT_NOT_RUNNING`：Agent 未运行（可能处于 paused 或 stopped 状态），先调用 `/resume`
+- `AGENT_CREATE_FAILED`：Agent 创建失败，检查 sandbox 配置是否正确
 - 消息发送无响应：确认 adaptor service 的 WebSocket 连接正常
 
-## 8. 环境变量
+## 9. 环境变量
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|

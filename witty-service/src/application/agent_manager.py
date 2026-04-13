@@ -109,14 +109,6 @@ class SandboxBackend(Protocol):
     def cleanup(self, handle: SandboxHandle | str, **kwargs: Any) -> None: ...
 
 
-class AdapterClient(Protocol):
-    def start(self, *, reload: bool = False) -> dict[str, Any]: ...
-
-    def stop(self) -> dict[str, Any]: ...
-
-    def send_message_stream(self, session_id: str, message: str) -> Any: ...
-
-
 class AgentManager:
     def __init__(
         self,
@@ -125,14 +117,12 @@ class AgentManager:
         session_manager: SessionManager,
         workspace_store: WorkspaceStore,
         sandbox_backend: SandboxBackend,
-        adapter_client_factory: Callable[[str], AdapterClient],
         ws_client_pool: WebSocketClientPool | None = None,
     ) -> None:
         self._repository = repository
         self._session_manager = session_manager
         self._workspace_store = workspace_store
         self._sandbox_backend = sandbox_backend
-        self._adapter_client_factory = adapter_client_factory
         self._ws_client_pool = ws_client_pool or WebSocketClientPool()
 
     def create_agent(self, request: AgentCreateRequest) -> AgentCreateResult:
@@ -145,7 +135,7 @@ class AgentManager:
                 request=request,
                 workspace_path=workspace_path,
             )
-            sandbox_handle = self._sandbox_backend.start(
+            sandbox_handle = self._sandbox_backend.start( 
                 agent_id=agent_id,
                 workspace_path=workspace_path,
             )
@@ -156,7 +146,6 @@ class AgentManager:
                 adapter_base_url=adapter_endpoint.base_url,
                 adapter_ready=True,
             )
-            self._adapter_client_factory(adapter_endpoint.base_url).start(reload=False)
             default_session = self._session_manager.create_session(agent_id)
             running_agent = self._repository.update_agent_status(
                 agent_id,
@@ -198,7 +187,6 @@ class AgentManager:
         sandbox_state = self._get_sandbox_state(agent_id)
         sandbox_cleaned = False
         try:
-            self._adapter_client(sandbox_state.agent_id).stop()
             self._sandbox_backend.cleanup(sandbox_state.handle)
             sandbox_cleaned = True
             self._repository.save_sandbox_state(
@@ -247,7 +235,6 @@ class AgentManager:
                 adapter_ready=True,
                 last_error=None,
             )
-            self._adapter_client_factory(adapter_base_url).start(reload=False)
             return self._repository.update_agent_status(agent_id, AgentStatus.running)
         except Exception as exc:
             if sandbox_handle is not None:
@@ -302,8 +289,21 @@ class AgentManager:
 
         events: list[dict[str, Any]] = []
         async for event in ws_client.recv():
-            events.append(dict(event))
-            if event["type"] == "message.completed":
+            event_dict = dict(event)
+
+            # Handle client.error events from witty-agent-server
+            if event_dict["type"] == "client.error":
+                error_payload = event_dict.get("payload", {})
+                error_code = error_payload.get("code", "UNKNOWN_ERROR")
+                error_message = error_payload.get("message", "Unknown error from adaptor")
+                raise DomainError(
+                    code=error_code,
+                    message=error_message,
+                    details={"session_id": session_id, "agent_id": agent_id},
+                )
+
+            events.append(event_dict)
+            if event_dict["type"] == "message.completed":
                 break
 
         return {
@@ -337,11 +337,24 @@ class AgentManager:
         ws_client = await self._prepare_ws_message_client(agent_id, session_id, content)
 
         async for event in ws_client.recv():
+            event_dict = dict(event)
+
+            # Handle client.error events from witty-agent-server
+            if event_dict["type"] == "client.error":
+                error_payload = event_dict.get("payload", {})
+                error_code = error_payload.get("code", "UNKNOWN_ERROR")
+                error_message = error_payload.get("message", "Unknown error from adaptor")
+                raise DomainError(
+                    code=error_code,
+                    message=error_message,
+                    details={"session_id": session_id, "agent_id": agent_id},
+                )
+
             yield {
                 "sandbox_type": agent.sandbox_type,
-                "event": dict(event),
+                "event": event_dict,
             }
-            if event["type"] == "message.completed":
+            if event_dict["type"] == "message.completed":
                 break
 
     def delete_agent(self, agent_id: str) -> None:
@@ -351,12 +364,6 @@ class AgentManager:
         if agent.status in {AgentStatus.running, AgentStatus.paused} and sandbox_state is None:
             raise sandbox_not_found(sandbox_type=agent.sandbox_type, sandbox_id=agent_id)
         cleanup_errors: list[dict[str, str]] = []
-        if agent.status is AgentStatus.running:
-            self._collect_error(
-                cleanup_errors,
-                "adapter_stop",
-                lambda: self._adapter_client(agent_id).stop(),
-            )
 
         if sandbox_state is not None:
             self._collect_error(
@@ -413,10 +420,6 @@ class AgentManager:
                 details={"agent_id": agent_id},
             )
         return agent
-
-    def _adapter_client(self, agent_id: str) -> AdapterClient:
-        sandbox_state = self._get_sandbox_state(agent_id)
-        return self._adapter_client_factory(sandbox_state.adapter_base_url)
 
     def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoint:
         sandbox_state = self._get_sandbox_state(agent_id)
