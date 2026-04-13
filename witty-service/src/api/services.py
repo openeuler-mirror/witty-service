@@ -55,11 +55,20 @@ class ServiceContainer:
         return self.get_agent_manager_for_sandbox(agent.sandbox_type)
 
 
+def _ensure_dir_exists(database_url: str) -> None:
+    if database_url.startswith("sqlite:///"):
+        db_path = database_url.replace("sqlite:///", "")
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+
+
 def build_default_services() -> ServiceContainer:
     _default_db_path = os.path.expanduser("~/witty-service/db/witty_service.sqlite3")
     database_url = os.getenv("WITTY_DATABASE_URL", f"sqlite:///{_default_db_path}")
     workspace_base = os.getenv("WITTY_WORKSPACE_BASE", "~/witty-service/agent-workspaces")
 
+    _ensure_dir_exists(database_url)
     engine = create_sqlite_engine(database_url)
     init_db(engine)
 
