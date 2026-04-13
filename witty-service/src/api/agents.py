@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+from typing import Any, AsyncIterator
+
 from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi.responses import StreamingResponse
 
 from src.api.auth import require_bearer_auth
 from src.api.schemas import (
@@ -134,15 +138,49 @@ def delete_session(
     "/{agent_id}/sessions/{session_id}/messages",
     response_model=MessageEventsResponse,
 )
-def send_message(
+async def send_message(
     agent_id: str,
     session_id: str,
     payload: SendMessageRequest,
     services: ServiceContainer = Depends(get_services),
 ) -> MessageEventsResponse:
     manager = services.get_agent_manager_for_agent(agent_id)
-    events = manager.send_message(agent_id=agent_id, session_id=session_id, content=payload.content)
-    return MessageEventsResponse(events=events)
+    result = await manager.send_message(agent_id=agent_id, session_id=session_id, content=payload.content)
+    return MessageEventsResponse.model_validate(result)
+
+
+@router.post(
+    "/{agent_id}/sessions/{session_id}/messages/stream",
+    response_class=StreamingResponse,
+)
+async def send_message_stream(
+    agent_id: str,
+    session_id: str,
+    payload: SendMessageRequest,
+    services: ServiceContainer = Depends(get_services),
+) -> StreamingResponse:
+    manager = services.get_agent_manager_for_agent(agent_id)
+    event_stream = manager.send_message_stream(
+        agent_id=agent_id,
+        session_id=session_id,
+        content=payload.content,
+    )
+    first_event = await _prefetch_first_event(event_stream)
+
+    async def stream() -> AsyncIterator[str]:
+        if first_event is None:
+            return
+
+        yield _format_sse_data(first_event)
+        if first_event["event"]["type"] == "message.completed":
+            return
+
+        async for event in event_stream:
+            yield _format_sse_data(event)
+            if event["event"]["type"] == "message.completed":
+                break
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 def _to_agent_response(agent: AgentRecord, default_session_id: str | None) -> AgentResponse:
@@ -160,3 +198,16 @@ def _to_agent_response(agent: AgentRecord, default_session_id: str | None) -> Ag
         updated_at=agent.updated_at,
         default_session_id=default_session_id,
     )
+
+
+def _format_sse_data(event: dict[str, Any]) -> str:
+    return f"data: {json.dumps(event)}\n\n"
+
+
+async def _prefetch_first_event(
+    event_stream: AsyncIterator[dict[str, Any]],
+) -> dict[str, Any] | None:
+    try:
+        return await anext(event_stream)
+    except StopAsyncIteration:
+        return None

@@ -9,7 +9,7 @@
 当前接口基线：
 - Agent 生命周期：`/api/v1/agents/*`
 - Session：`/api/v1/agents/{agent_id}/sessions/*`
-- WebSocket 消息：`/api/v1/agents/{agent_id}/sessions/{session_id}/messages`
+- 消息接口：`/api/v1/agents/{agent_id}/sessions/{session_id}/messages`、`/api/v1/agents/{agent_id}/sessions/{session_id}/messages/stream`
 - 健康检查：`/healthz`
 
 ## 1. 前置准备
@@ -75,6 +75,7 @@ curl -s http://127.0.0.1:8000/healthz
 | `/api/v1/agents/{agent_id}/sessions/{session_id}` | `GET` | 获取会话详情 |
 | `/api/v1/agents/{agent_id}/sessions/{session_id}` | `DELETE` | 删除会话 |
 | `/api/v1/agents/{agent_id}/sessions/{session_id}/messages` | `POST` | 发送消息 |
+| `/api/v1/agents/{agent_id}/sessions/{session_id}/messages/stream` | `POST` | 发送消息并以 SSE 流返回 |
 
 ### 3.3 Agent 生命周期接口
 
@@ -170,7 +171,7 @@ curl -s http://127.0.0.1:8000/healthz
 
 #### `POST /api/v1/agents/{agent_id}/sessions/{session_id}/messages`
 
-- 接口描述：通过 WebSocket 向 adaptor service 发送消息并接收事件流
+- 接口描述：witty-service 对外通过 REST 发送消息并返回非流式聚合结果；内部到 `witty-agent-server` 的消息通道仍是 WebSocket
 - 输入：
 
 ```json
@@ -183,34 +184,54 @@ curl -s http://127.0.0.1:8000/healthz
 
 ```json
 {
+  "sandbox_type": "local_process",
   "events": [
     {
       "type": "message.delta",
       "session_id": "session-id",
-      "sandbox_type": "openclaw",
       "event_id": "uuid",
       "ts_ms": 1775650000123,
+      "runtime_type": "openclaw",
       "payload": {"delta": "当"}
     },
     {
       "type": "message.delta",
       "session_id": "session-id",
-      "sandbox_type": "openclaw",
       "event_id": "uuid",
       "ts_ms": 1775650000123,
+      "runtime_type": "openclaw",
       "payload": {"delta": "前环境"}
     },
     {
       "type": "message.completed",
       "session_id": "session-id",
-      "sandbox_type": "openclaw",
       "event_id": "uuid",
       "ts_ms": 1775650000123,
+      "runtime_type": "openclaw",
       "payload": {"text": "当前工作环境..."}
     }
   ]
 }
 ```
+
+- 说明：
+  - 顶层 `sandbox_type` 表示 Agent 的沙箱类型，取值来自 agent 配置的 sandbox backend，例如 `docker`、`local_process`、`e2b`。
+  - `events[]` 内不再包含 `sandbox_type`；事件对象保持上游 envelope 结构，字段会保留上游 runtime 的 `runtime_type`，例如 `openclaw`、`opencode`。
+
+#### `POST /api/v1/agents/{agent_id}/sessions/{session_id}/messages/stream`
+
+- 接口描述：witty-service 对外通过 REST 提供 SSE 流式返回；内部到 `witty-agent-server` 的消息通道仍是 WebSocket
+- 响应类型：`text/event-stream`
+- 每条 SSE `data:` 的格式：
+
+```text
+data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_id":"session-id","event_id":"uuid","ts_ms":1775650000123,"runtime_type":"openclaw","payload":{"delta":"当"}}}
+```
+
+- 说明：
+  - SSE 中每条 `data:` 对应一个上游事件。
+  - `sandbox_type` 取自 Agent 的沙箱类型。
+  - `event` 的内容保持上游 envelope 结构，包含来自上游 runtime 的 `runtime_type`，不额外嵌套 `sandbox_type`。
 
 ### 3.6 事件类型
 
@@ -219,11 +240,9 @@ curl -s http://127.0.0.1:8000/healthz
 | `message.delta` | assistant 增量输出 | `delta` |
 | `message.completed` | assistant 输出完成 | `text` |
 | `tool.call.started` | 工具调用开始 | `tool_name`, `tool_call_id`, `arguments`, `stage` |
-| `tool.call.delta` | 工具过程输出 | `tool_name`, `tool_call_id`, `content`, `is_error`, `stage` |
-| `tool.call.completed` | 工具调用结束 | `tool_name`, `tool_call_id`, `stage` |
-| `tool.response` | 工具结果 | `name`, `tool_call_id`, `content`, `is_error`, `stage` |
+| `tool.call.response` | 工具调用结果/过程输出 | `tool_name`, `tool_call_id`, `content`, `is_error`, `stage` |
 | `usage.updated` | 用量更新 | `input_tokens`, `output_tokens`, `total_cost` |
-| `session.sandbox.changed` | sandbox session 标识变化 | sandbox 原始字段 |
+| `session.runtime.changed` | runtime session 标识变化 | runtime 原始字段 |
 | `stream.error` | 运行时流异常 | `code`, `message` |
 | `client.error` | 客户端事件错误 | `code`, `message`, `details` |
 
@@ -233,7 +252,7 @@ curl -s http://127.0.0.1:8000/healthz
 |------|------|------|
 | `INVALID_AGENT_TRANSITION` | 409 | Agent 状态转换不合法 |
 | `SESSION_NOT_FOUND` | 404 | 会话不存在 |
-| `AGENT_NOT_RUNNING` | 409 | Agent 未运行 |
+| `AGENT_NOT_RUNNING` | 400 | Agent 未运行 |
 | `SANDBOX_UNAVAILABLE` | 503 | sandbox 不可用 |
 | `INVALID_MESSAGE_PAYLOAD` | 400 | 消息体不合法 |
 | `UNSUPPORTED_CLIENT_EVENT` | 400 | 不支持的客户端事件 |

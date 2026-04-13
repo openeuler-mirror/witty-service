@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -293,140 +294,243 @@ def _create_agent_with_sandbox(manager: AgentManager, request: AgentCreateReques
     return agent, session
 
 
-@pytest.mark.asyncio
-async def test_send_message_via_websocket_client():
+def test_send_message_via_websocket_client():
     """Test that send_message uses WebSocket client to send and receive messages"""
-    manager, request, repository, _, sandbox_backend, ws_client_pool = _make_ws_manager()
 
-    agent, session = _create_agent_with_sandbox(manager, request)
+    async def run() -> None:
+        manager, request, repository, _, sandbox_backend, ws_client_pool = _make_ws_manager()
 
-    # Create mock WS client
-    mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
-    mock_ws_client.set_events([
-        InboundEvent(
-            type="message.delta",
-            session_id=session.id,
-            runtime_type="local_process",
-            event_id="evt-1",
-            ts_ms=1000,
-            payload={"delta": "hello"},
-        ),
-        InboundEvent(
-            type="message.completed",
-            session_id=session.id,
-            runtime_type="local_process",
-            event_id="evt-2",
-            ts_ms=2000,
-            payload={},
-        ),
-    ])
+        agent, session = _create_agent_with_sandbox(manager, request)
 
-    # Patch get_client to return our mock
-    with patch.object(
-        ws_client_pool,
-        "get_client",
-        return_value=mock_ws_client,
-    ):
-        events = await manager.send_message(agent.id, session.id, "hello from user")
+        # Create mock WS client
+        mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
+        mock_ws_client.set_events([
+            InboundEvent(
+                type="message.delta",
+                session_id=session.id,
+                runtime_type="local_process",
+                event_id="evt-1",
+                ts_ms=1000,
+                payload={"delta": "hello"},
+            ),
+            InboundEvent(
+                type="message.completed",
+                session_id=session.id,
+                runtime_type="local_process",
+                event_id="evt-2",
+                ts_ms=2000,
+                payload={},
+            ),
+        ])
 
-    # Verify message was stored in repository
-    assert repository.messages == [
-        {
-            "agent_id": agent.id,
-            "session_id": session.id,
-            "role": "user",
-            "content": "hello from user",
-        }
-    ]
+        # Patch get_client to return our mock
+        with patch.object(
+            ws_client_pool,
+            "get_client",
+            return_value=mock_ws_client,
+        ):
+            events = await manager.send_message(agent.id, session.id, "hello from user")
 
-    # Verify send was called with message.create
-    assert len(mock_ws_client.send_calls) == 1
-    assert mock_ws_client.send_calls[0]["type"] == "message.create"
-    assert mock_ws_client.send_calls[0]["payload"] == {"message": "hello from user"}
+        # Verify message was stored in repository
+        assert repository.messages == [
+            {
+                "agent_id": agent.id,
+                "session_id": session.id,
+                "role": "user",
+                "content": "hello from user",
+            }
+        ]
 
-    # Verify events were returned
-    assert len(events) == 2
-    assert events[0]["type"] == "message.delta"
-    assert events[1]["type"] == "message.completed"
+        # Verify send was called with message.create
+        assert len(mock_ws_client.send_calls) == 1
+        assert mock_ws_client.send_calls[0]["type"] == "message.create"
+        assert mock_ws_client.send_calls[0]["payload"] == {"message": "hello from user"}
+
+        # Verify events were returned
+        assert events["sandbox_type"] == "local_process"
+        assert len(events["events"]) == 2
+        assert events["events"][0]["type"] == "message.delta"
+        assert events["events"][0]["runtime_type"] == "local_process"
+        assert "sandbox_type" not in events["events"][0]
+        assert events["events"][1]["type"] == "message.completed"
+
+    asyncio.run(run())
 
 
-@pytest.mark.asyncio
-async def test_send_message_connects_when_not_connected():
+def test_send_message_connects_when_not_connected():
     """Test that send_message connects WebSocket if not connected"""
-    manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
 
-    agent, session = _create_agent_with_sandbox(manager, request)
+    async def run() -> None:
+        manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
 
-    mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
-    mock_ws_client.set_events([
-        InboundEvent(
-            type="message.completed",
-            session_id=session.id,
-            runtime_type="local_process",
-            event_id="evt-1",
-            ts_ms=1000,
-            payload={},
-        ),
-    ])
+        agent, session = _create_agent_with_sandbox(manager, request)
 
-    with patch.object(
-        ws_client_pool,
-        "get_client",
-        return_value=mock_ws_client,
-    ):
-        await manager.send_message(agent.id, session.id, "hello")
+        mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
+        mock_ws_client.set_events([
+            InboundEvent(
+                type="message.completed",
+                session_id=session.id,
+                runtime_type="local_process",
+                event_id="evt-1",
+                ts_ms=1000,
+                payload={},
+            ),
+        ])
 
-    # Verify connect was called since client wasn't connected
-    assert mock_ws_client.connect_calls == [session.id]
+        with patch.object(
+            ws_client_pool,
+            "get_client",
+            return_value=mock_ws_client,
+        ):
+            await manager.send_message(agent.id, session.id, "hello")
+
+        # Verify connect was called since client wasn't connected
+        assert mock_ws_client.connect_calls == [session.id]
+
+    asyncio.run(run())
 
 
-@pytest.mark.asyncio
-async def test_send_message_auto_resumes_paused_agent():
+def test_send_message_auto_resumes_paused_agent():
     """Test that send_message resumes paused agent before sending via WS"""
-    manager, request, repository, _, sandbox_backend, ws_client_pool = _make_ws_manager()
 
-    agent, session = _create_agent_with_sandbox(manager, request)
-    manager.pause_agent(agent.id)
+    async def run() -> None:
+        manager, request, repository, _, sandbox_backend, ws_client_pool = _make_ws_manager()
 
-    mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
-    mock_ws_client.set_events([
-        InboundEvent(
-            type="message.completed",
-            session_id=session.id,
-            runtime_type="local_process",
-            event_id="evt-1",
-            ts_ms=1000,
-            payload={},
-        ),
-    ])
+        agent, session = _create_agent_with_sandbox(manager, request)
+        manager.pause_agent(agent.id)
 
-    with patch.object(
-        ws_client_pool,
-        "get_client",
-        return_value=mock_ws_client,
-    ):
-        events = await manager.send_message(agent.id, session.id, "hello")
+        mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
+        mock_ws_client.set_events([
+            InboundEvent(
+                type="message.completed",
+                session_id=session.id,
+                runtime_type="local_process",
+                event_id="evt-1",
+                ts_ms=1000,
+                payload={},
+            ),
+        ])
 
-    # Verify agent was resumed
-    assert repository.get_agent(agent.id).status is AgentStatus.running
-    # Verify message was sent via WS
-    assert len(mock_ws_client.send_calls) == 1
+        with patch.object(
+            ws_client_pool,
+            "get_client",
+            return_value=mock_ws_client,
+        ):
+            events = await manager.send_message(agent.id, session.id, "hello")
+
+        # Verify agent was resumed
+        assert repository.get_agent(agent.id).status is AgentStatus.running
+        # Verify message was sent via WS
+        assert len(mock_ws_client.send_calls) == 1
+        assert events["sandbox_type"] == "local_process"
+
+    asyncio.run(run())
 
 
-@pytest.mark.asyncio
-async def test_send_message_rejects_non_running_agent():
+def test_send_message_rejects_non_running_agent():
     """Test that send_message raises error for non-running/non-paused agent"""
-    manager, request, repository, _, _, _ = _make_ws_manager()
 
-    agent, session = _create_agent_with_sandbox(manager, request)
+    async def run() -> None:
+        manager, request, repository, _, _, _ = _make_ws_manager()
 
-    # Manually set status to something other than running/paused
-    repository.update_agent_status(agent.id, AgentStatus.error)
+        agent, session = _create_agent_with_sandbox(manager, request)
 
-    with pytest.raises(DomainError) as exc_info:
-        await manager.send_message(agent.id, session.id, "hello")
+        # Manually set status to something other than running/paused
+        repository.update_agent_status(agent.id, AgentStatus.error)
 
-    assert exc_info.value.code == "AGENT_NOT_RUNNING"
+        with pytest.raises(DomainError) as exc_info:
+            await manager.send_message(agent.id, session.id, "hello")
+
+        assert exc_info.value.code == "AGENT_NOT_RUNNING"
+
+    asyncio.run(run())
+
+
+def test_send_message_stream_via_websocket_client():
+    async def run() -> None:
+        manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
+        agent, session = _create_agent_with_sandbox(manager, request)
+
+        mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
+        mock_ws_client.set_events([
+            InboundEvent(
+                type="message.delta",
+                session_id=session.id,
+                runtime_type="local_process",
+                event_id="evt-1",
+                ts_ms=1000,
+                payload={"delta": "hello"},
+            ),
+            InboundEvent(
+                type="message.completed",
+                session_id=session.id,
+                runtime_type="local_process",
+                event_id="evt-2",
+                ts_ms=2000,
+                payload={},
+            ),
+            InboundEvent(
+                type="message.delta",
+                session_id=session.id,
+                runtime_type="local_process",
+                event_id="evt-3",
+                ts_ms=3000,
+                payload={"delta": "ignored"},
+            ),
+        ])
+
+        with patch.object(
+            ws_client_pool,
+            "get_client",
+            return_value=mock_ws_client,
+        ):
+            events = [event async for event in manager.send_message_stream(agent.id, session.id, "hello")]
+
+        assert repository.messages == [
+            {
+                "agent_id": agent.id,
+                "session_id": session.id,
+                "role": "user",
+                "content": "hello",
+            }
+        ]
+        assert mock_ws_client.send_calls == [
+            {"type": "message.create", "payload": {"message": "hello"}}
+        ]
+        assert [event["event"]["type"] for event in events] == ["message.delta", "message.completed"]
+        assert events[0]["sandbox_type"] == "local_process"
+
+    asyncio.run(run())
+
+
+def test_send_message_stream_connects_when_not_connected():
+    async def run() -> None:
+        manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
+        agent, session = _create_agent_with_sandbox(manager, request)
+
+        mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
+        mock_ws_client.set_events([
+            InboundEvent(
+                type="message.completed",
+                session_id=session.id,
+                runtime_type="local_process",
+                event_id="evt-1",
+                ts_ms=1000,
+                payload={},
+            ),
+        ])
+
+        with patch.object(
+            ws_client_pool,
+            "get_client",
+            return_value=mock_ws_client,
+        ):
+            events = [event async for event in manager.send_message_stream(agent.id, session.id, "hello")]
+
+        assert mock_ws_client.connect_calls == [session.id]
+        assert [event["event"]["type"] for event in events] == ["message.completed"]
+
+    asyncio.run(run())
 
 
 def test_get_adaptor_endpoint_converts_http_to_ws():

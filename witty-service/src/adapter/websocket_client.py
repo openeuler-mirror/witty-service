@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Iterator
+from typing import Any, AsyncIterator
 
 import websockets
 
@@ -57,7 +57,7 @@ class WebSocketClient:
                 details={"error": str(exc)},
             ) from exc
 
-    async def recv(self) -> Iterator[InboundEvent]:
+    async def recv(self) -> AsyncIterator[InboundEvent]:
         if not self._ws or not self._connected:
             raise AdaptorReceiveError(
                 message="Cannot recv - not connected",
@@ -70,7 +70,7 @@ class WebSocketClient:
                     yield InboundEvent(
                         type=data["type"],
                         session_id=data["session_id"],
-                        sandbox_type=data.get("sandbox_type", data.get("runtime_type")),
+                        runtime_type=data["runtime_type"],
                         event_id=data["event_id"],
                         ts_ms=data["ts_ms"],
                         payload=data.get("payload", {}),
@@ -83,6 +83,8 @@ class WebSocketClient:
         except websockets.ConnectionClosed:
             self._connected = False
             return
+        except AdaptorReceiveError:
+            raise
         except Exception as exc:
             raise AdaptorReceiveError(
                 message="WebSocket receive failed",

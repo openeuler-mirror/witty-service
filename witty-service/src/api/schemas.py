@@ -47,4 +47,5 @@ class SessionResponse(BaseModel):
 
 
 class MessageEventsResponse(BaseModel):
+    sandbox_type: str
     events: list[dict[str, Any]]
