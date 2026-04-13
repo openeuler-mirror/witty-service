@@ -80,4 +80,4 @@ def test_local_workspace_store_accepts_legacy_base_path(tmp_path: Path):
 def test_local_workspace_store_defaults_to_service_path():
     store = LocalWorkspaceStore()
 
-    assert store.base_dir == Path("/data/agent-workspaces")
+    assert store.base_dir == Path.home() / "witty-service"
