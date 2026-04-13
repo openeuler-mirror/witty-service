@@ -1,14 +1,15 @@
 from __future__ import annotations
-
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from fastapi.testclient import TestClient
 
 from src.application.agent_manager import AgentCreateRequest, AgentManager
+from src.adapter.websocket_client_pool import AdaptorEndpoint, WebSocketClientPool
+from src.adapter.websocket_protocol import InboundEvent, OutboundMessage
 from src.application.session_manager import SessionManager
 from src.main import create_app
 from src.persistence.repositories import AgentRecord, SessionRecord
@@ -191,33 +192,31 @@ class StreamingAdapterClient:
     def stop(self) -> dict[str, Any]:
         return {"status": "stopped"}
 
-    def send_message_stream(self, session_id: str, message: str):
-        assert session_id == "session-1"
-        assert message == "hello"
-        yield {
-            "type": "message.delta",
-            "session_id": session_id,
-            "runtime_type": "openclaw",
-            "event_id": "evt-1",
-            "ts_ms": 100,
-            "payload": {"delta": "hel"},
-        }
-        yield {
-            "type": "message.completed",
-            "session_id": session_id,
-            "runtime_type": "openclaw",
-            "event_id": "evt-2",
-            "ts_ms": 200,
-            "payload": {},
-        }
-        yield {
-            "type": "message.delta",
-            "session_id": session_id,
-            "runtime_type": "openclaw",
-            "event_id": "evt-3",
-            "ts_ms": 300,
-            "payload": {"delta": "ignored"},
-        }
+
+class MockWebSocketClient:
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+        self.is_connected = False
+        self.connect_calls: list[str] = []
+        self.send_calls: list[OutboundMessage] = []
+        self._events: list[InboundEvent] = []
+
+    async def connect(self, session_id: str) -> None:
+        self.connect_calls.append(session_id)
+        self.is_connected = True
+
+    async def send(self, message: OutboundMessage) -> None:
+        self.send_calls.append(message)
+
+    def set_events(self, events: list[InboundEvent]) -> None:
+        self._events = events
+
+    def recv(self) -> AsyncIterator[InboundEvent]:
+        async def gen():
+            for event in self._events:
+                yield event
+
+        return gen()
 
 
 class FakeServices(ServiceContainer):
@@ -227,7 +226,7 @@ class FakeServices(ServiceContainer):
         self.adapter_client_factory = lambda _: StreamingAdapterClient()
         self.sandbox_backends = {"local_process": FakeSandboxBackend()}
         self.session_manager = SessionManager(repository)
-        self.ws_client_pool = None
+        self.ws_client_pool = WebSocketClientPool()
         self._manager = manager
 
     def get_agent_manager_for_agent(self, agent_id: str) -> AgentManager:
@@ -239,12 +238,14 @@ def test_message_stream_endpoint_ends_after_completed(monkeypatch):
 
     repository = FakeRepository()
     session_manager = SessionManager(repository)
+    ws_client_pool = WebSocketClientPool()
     manager = AgentManager(
         repository=repository,
         session_manager=session_manager,
         workspace_store=FakeWorkspaceStore(),
         sandbox_backend=FakeSandboxBackend(),
         adapter_client_factory=lambda _: StreamingAdapterClient(),
+        ws_client_pool=ws_client_pool,
     )
     result = manager.create_agent(
         AgentCreateRequest(
@@ -256,6 +257,35 @@ def test_message_stream_endpoint_ends_after_completed(monkeypatch):
     )
     agent = result.agent
     session = result.default_session
+    mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
+    mock_ws_client.set_events([
+        InboundEvent(
+            type="message.delta",
+            session_id=session.id,
+            runtime_type="openclaw",
+            event_id="evt-1",
+            ts_ms=100,
+            payload={"delta": "hel"},
+        ),
+        InboundEvent(
+            type="message.completed",
+            session_id=session.id,
+            runtime_type="openclaw",
+            event_id="evt-2",
+            ts_ms=200,
+            payload={},
+        ),
+        InboundEvent(
+            type="message.delta",
+            session_id=session.id,
+            runtime_type="openclaw",
+            event_id="evt-3",
+            ts_ms=300,
+            payload={"delta": "ignored"},
+        ),
+    ])
+
+    ws_client_pool.get_client = lambda agent_id, endpoint, factory: mock_ws_client
 
     client = TestClient(create_app(services=FakeServices(manager, repository)))
 
@@ -275,6 +305,10 @@ def test_message_stream_endpoint_ends_after_completed(monkeypatch):
             "role": "user",
             "content": "hello",
         }
+    ]
+    assert mock_ws_client.connect_calls == [session.id]
+    assert mock_ws_client.send_calls == [
+        {"type": "message.create", "payload": {"message": "hello"}}
     ]
     assert len(chunks) == 2
     first = json.loads(chunks[0].removeprefix("data: "))

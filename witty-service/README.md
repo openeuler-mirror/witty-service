@@ -240,11 +240,9 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 | `message.delta` | assistant 增量输出 | `delta` |
 | `message.completed` | assistant 输出完成 | `text` |
 | `tool.call.started` | 工具调用开始 | `tool_name`, `tool_call_id`, `arguments`, `stage` |
-| `tool.call.delta` | 工具过程输出 | `tool_name`, `tool_call_id`, `content`, `is_error`, `stage` |
-| `tool.call.completed` | 工具调用结束 | `tool_name`, `tool_call_id`, `stage` |
-| `tool.response` | 工具结果 | `name`, `tool_call_id`, `content`, `is_error`, `stage` |
+| `tool.call.response` | 工具调用结果/过程输出 | `tool_name`, `tool_call_id`, `content`, `is_error`, `stage` |
 | `usage.updated` | 用量更新 | `input_tokens`, `output_tokens`, `total_cost` |
-| `session.sandbox.changed` | sandbox session 标识变化 | sandbox 原始字段 |
+| `session.runtime.changed` | runtime session 标识变化 | runtime 原始字段 |
 | `stream.error` | 运行时流异常 | `code`, `message` |
 | `client.error` | 客户端事件错误 | `code`, `message`, `details` |
 
@@ -254,7 +252,7 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 |------|------|------|
 | `INVALID_AGENT_TRANSITION` | 409 | Agent 状态转换不合法 |
 | `SESSION_NOT_FOUND` | 404 | 会话不存在 |
-| `AGENT_NOT_RUNNING` | 409 | Agent 未运行 |
+| `AGENT_NOT_RUNNING` | 400 | Agent 未运行 |
 | `SANDBOX_UNAVAILABLE` | 503 | sandbox 不可用 |
 | `INVALID_MESSAGE_PAYLOAD` | 400 | 消息体不合法 |
 | `UNSUPPORTED_CLIENT_EVENT` | 400 | 不支持的客户端事件 |

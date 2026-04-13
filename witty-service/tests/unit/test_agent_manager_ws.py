@@ -224,29 +224,6 @@ class FakeAdapterClient:
         return iter([{"type": "delta", "delta": "hello"}])
 
 
-class ClosableIterator:
-    def __init__(self, items: list[dict[str, Any]], error: Exception | None = None) -> None:
-        self._items = iter(items)
-        self._error = error
-        self.close_called = 0
-
-    def __iter__(self) -> "ClosableIterator":
-        return self
-
-    def __next__(self) -> dict[str, Any]:
-        try:
-            return next(self._items)
-        except StopIteration:
-            if self._error is not None:
-                error = self._error
-                self._error = None
-                raise error
-            raise
-
-    def close(self) -> None:
-        self.close_called += 1
-
-
 class MockWebSocketClient:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url
@@ -469,77 +446,89 @@ def test_send_message_rejects_non_running_agent():
     asyncio.run(run())
 
 
-def test_send_message_stream_closes_upstream_iterator_after_message_completed():
+def test_send_message_stream_via_websocket_client():
     async def run() -> None:
-        manager, request, repository, _, _, _ = _make_ws_manager()
+        manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
         agent, session = _create_agent_with_sandbox(manager, request)
 
-        upstream = ClosableIterator(
-            [
-                {
-                    "type": "message.delta",
-                    "session_id": session.id,
-                    "runtime_type": "local_process",
-                    "event_id": "evt-1",
-                    "ts_ms": 1000,
-                    "payload": {"delta": "hello"},
-                },
-                {
-                    "type": "message.completed",
-                    "session_id": session.id,
-                    "runtime_type": "local_process",
-                    "event_id": "evt-2",
-                    "ts_ms": 2000,
-                    "payload": {},
-                },
-                {
-                    "type": "message.delta",
-                    "session_id": session.id,
-                    "runtime_type": "local_process",
-                    "event_id": "evt-3",
-                    "ts_ms": 3000,
-                    "payload": {"delta": "ignored"},
-                },
-            ]
-        )
-        adapter_client = MagicMock()
-        adapter_client.send_message_stream.return_value = upstream
-        manager._adapter_client_factory = MagicMock(return_value=adapter_client)
+        mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
+        mock_ws_client.set_events([
+            InboundEvent(
+                type="message.delta",
+                session_id=session.id,
+                runtime_type="local_process",
+                event_id="evt-1",
+                ts_ms=1000,
+                payload={"delta": "hello"},
+            ),
+            InboundEvent(
+                type="message.completed",
+                session_id=session.id,
+                runtime_type="local_process",
+                event_id="evt-2",
+                ts_ms=2000,
+                payload={},
+            ),
+            InboundEvent(
+                type="message.delta",
+                session_id=session.id,
+                runtime_type="local_process",
+                event_id="evt-3",
+                ts_ms=3000,
+                payload={"delta": "ignored"},
+            ),
+        ])
 
-        events = [event async for event in manager.send_message_stream(agent.id, session.id, "hello")]
+        with patch.object(
+            ws_client_pool,
+            "get_client",
+            return_value=mock_ws_client,
+        ):
+            events = [event async for event in manager.send_message_stream(agent.id, session.id, "hello")]
 
+        assert repository.messages == [
+            {
+                "agent_id": agent.id,
+                "session_id": session.id,
+                "role": "user",
+                "content": "hello",
+            }
+        ]
+        assert mock_ws_client.send_calls == [
+            {"type": "message.create", "payload": {"message": "hello"}}
+        ]
         assert [event["event"]["type"] for event in events] == ["message.delta", "message.completed"]
-        assert upstream.close_called == 1
+        assert events[0]["sandbox_type"] == "local_process"
 
     asyncio.run(run())
 
 
-def test_send_message_stream_closes_upstream_iterator_when_iteration_raises():
+def test_send_message_stream_connects_when_not_connected():
     async def run() -> None:
-        manager, request, repository, _, _, _ = _make_ws_manager()
+        manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
         agent, session = _create_agent_with_sandbox(manager, request)
 
-        upstream = ClosableIterator(
-            [
-                {
-                    "type": "message.delta",
-                    "session_id": session.id,
-                    "runtime_type": "local_process",
-                    "event_id": "evt-1",
-                    "ts_ms": 1000,
-                    "payload": {"delta": "hello"},
-                }
-            ],
-            error=RuntimeError("stream exploded"),
-        )
-        adapter_client = MagicMock()
-        adapter_client.send_message_stream.return_value = upstream
-        manager._adapter_client_factory = MagicMock(return_value=adapter_client)
+        mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
+        mock_ws_client.set_events([
+            InboundEvent(
+                type="message.completed",
+                session_id=session.id,
+                runtime_type="local_process",
+                event_id="evt-1",
+                ts_ms=1000,
+                payload={},
+            ),
+        ])
 
-        with pytest.raises(RuntimeError, match="stream exploded"):
-            [event async for event in manager.send_message_stream(agent.id, session.id, "hello")]
+        with patch.object(
+            ws_client_pool,
+            "get_client",
+            return_value=mock_ws_client,
+        ):
+            events = [event async for event in manager.send_message_stream(agent.id, session.id, "hello")]
 
-        assert upstream.close_called == 1
+        assert mock_ws_client.connect_calls == [session.id]
+        assert [event["event"]["type"] for event in events] == ["message.completed"]
 
     asyncio.run(run())
 

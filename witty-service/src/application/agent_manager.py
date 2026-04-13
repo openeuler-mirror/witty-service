@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import asyncio
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Protocol
@@ -300,21 +298,7 @@ class AgentManager:
             role="user",
             content=content,
         )
-
-        ws_client = self._ws_client_pool.get_client(
-            agent_id=agent_id,
-            endpoint=self._get_adaptor_endpoint(agent_id, session_id),
-            factory=lambda url: WebSocketClient(base_url=url),
-        )
-
-        if not ws_client.is_connected:
-            await ws_client.connect(session_id)
-
-        msg: OutboundMessage = {
-            "type": "message.create",
-            "payload": {"message": content},
-        }
-        await ws_client.send(msg)
+        ws_client = await self._prepare_ws_message_client(agent_id, session_id, content)
 
         events: list[dict[str, Any]] = []
         async for event in ws_client.recv():
@@ -350,25 +334,15 @@ class AgentManager:
             role="user",
             content=content,
         )
+        ws_client = await self._prepare_ws_message_client(agent_id, session_id, content)
 
-        upstream_events = iter(self._adapter_client(agent_id).send_message_stream(session_id, content))
-        stream_end = object()
-
-        try:
-            while True:
-                upstream_event = await asyncio.to_thread(next, upstream_events, stream_end)
-                if upstream_event is stream_end:
-                    break
-                yield {
-                    "sandbox_type": agent.sandbox_type,
-                    "event": upstream_event,
-                }
-                if upstream_event["type"] == "message.completed":
-                    break
-        finally:
-            close = getattr(upstream_events, "close", None)
-            if callable(close):
-                await asyncio.to_thread(close)
+        async for event in ws_client.recv():
+            yield {
+                "sandbox_type": agent.sandbox_type,
+                "event": dict(event),
+            }
+            if event["type"] == "message.completed":
+                break
 
     def delete_agent(self, agent_id: str) -> None:
         agent = self._get_agent(agent_id)
@@ -460,6 +434,28 @@ class AgentManager:
             session_id=session_id,
             sandbox_type=self._get_agent(agent_id).sandbox_type,
         )
+
+    async def _prepare_ws_message_client(
+        self,
+        agent_id: str,
+        session_id: str,
+        content: str,
+    ) -> WebSocketClient:
+        ws_client = self._ws_client_pool.get_client(
+            agent_id=agent_id,
+            endpoint=self._get_adaptor_endpoint(agent_id, session_id),
+            factory=lambda url: WebSocketClient(base_url=url),
+        )
+
+        if not ws_client.is_connected:
+            await ws_client.connect(session_id)
+
+        msg: OutboundMessage = {
+            "type": "message.create",
+            "payload": {"message": content},
+        }
+        await ws_client.send(msg)
+        return ws_client
 
     def _get_sandbox_state(self, agent_id: str) -> SandboxState:
         sandbox_state = self._repository.get_sandbox_state(agent_id)
