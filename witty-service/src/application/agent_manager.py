@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import httpx
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Protocol
@@ -187,35 +189,22 @@ class AgentManager:
     def pause_agent(self, agent_id: str) -> AgentRecord:
         agent = self._get_agent(agent_id)
         self._ensure_transition(agent, AgentStatus.paused)
+
         sandbox_state = self._get_sandbox_state(agent_id)
-        sandbox_cleaned = False
+        client: httpx.Client | None = None
         try:
-            self._sandbox_backend.cleanup(sandbox_state.handle)
-            sandbox_cleaned = True
-            self._repository.save_sandbox_state(
-                agent_id,
-                sandbox_payload_json=self._sandbox_handle_payload(sandbox_state.handle),
-                adapter_base_url=sandbox_state.adapter_base_url,
-                adapter_ready=False,
-                last_error=None,
-            )
-            return self._repository.update_agent_status(agent_id, AgentStatus.paused)
-        except Exception as exc:
-            compensation_errors = self._compensate_sandbox_state(
-                agent_id=agent_id,
-                sandbox_handle=sandbox_state.handle,
-                adapter_base_url=sandbox_state.adapter_base_url,
-                adapter_ready=not sandbox_cleaned,
-                last_error=self._error_message(exc),
-                status_on_error=AgentStatus.error,
-            )
-            self._raise_operation_failed(
-                code=AGENT_PAUSE_FAILED,
-                message="Agent pause failed.",
-                agent_id=agent_id,
-                cause=exc,
-                compensation_errors=compensation_errors,
-            )
+            # 调用 witty-agent-server /agent/stop 优雅停止运行时
+            client = httpx.Client(base_url=sandbox_state.adapter_base_url, timeout=30.0)
+            try:
+                client.post("/agent/stop", json={})
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 400:  # 可能已经停止
+                    raise
+        finally:
+            if client is not None:
+                client.close()
+
+        return self._repository.update_agent_status(agent_id, AgentStatus.paused)
 
     def resume_agent(self, agent_id: str) -> AgentRecord:
         agent = self._get_agent(agent_id)
