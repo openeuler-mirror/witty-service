@@ -76,9 +76,9 @@ def get_agent(agent_id: str, services: ServiceContainer = Depends(get_services))
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> Response:
+async def delete_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> Response:
     manager = services.get_agent_manager_for_agent(agent_id)
-    manager.delete_agent(agent_id)
+    await manager.delete_agent(agent_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
