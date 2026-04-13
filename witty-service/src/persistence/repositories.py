@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -190,6 +190,37 @@ class SqliteRepository:
                 .all()
             )
             return [self._to_session_record(row) for row in rows]
+
+    def upsert_session(
+        self,
+        session_id: str,
+        agent_id: str,
+        status: str,
+        context_initialized: bool = False,
+        runtime_type: str | None = None,
+        created_at: datetime | None = None,
+    ) -> SessionRecord:
+        """Upsert session from witty-agent-server"""
+        with self._session_factory() as session:
+            existing = session.get(SessionORM, session_id)
+            now = datetime.now(timezone.utc)
+
+            if existing is None:
+                row = SessionORM(
+                    id=session_id,
+                    agent_id=agent_id,
+                    status=SessionStatus(status),
+                    created_at=created_at or now,
+                    updated_at=now,
+                )
+                session.add(row)
+            else:
+                existing.status = SessionStatus(status)
+                existing.updated_at = now
+
+            session.commit()
+            session.refresh(existing or row)
+            return self._to_session_record(existing or row)
 
     def delete_session(self, session_id: str) -> None:
         with self._session_factory() as session:

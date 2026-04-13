@@ -44,6 +44,8 @@ class SessionResponse(BaseModel):
     id: str
     agent_id: str
     status: str
+    context_initialized: bool = False
+    runtime_type: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -51,3 +53,28 @@ class SessionResponse(BaseModel):
 class MessageEventsResponse(BaseModel):
     sandbox_type: str
     events: list[dict[str, Any]]
+
+
+class SessionEventItem(BaseModel):
+    id: str
+    session_id: str
+    type: str
+    source: str | None = None
+    payload: dict[str, Any]
+    timestamp: datetime
+
+
+class PaginationInfo(BaseModel):
+    offset: int
+    limit: int
+    total: int
+
+
+class SessionEventPage(BaseModel):
+    items: list[SessionEventItem]
+    pagination: PaginationInfo
+
+
+class SessionEventsResponse(BaseModel):
+    items: list[SessionEventItem]
+    pagination: PaginationInfo

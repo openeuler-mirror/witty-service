@@ -12,6 +12,7 @@ from src.api.schemas import (
     CreateAgentRequest,
     MessageEventsResponse,
     SendMessageRequest,
+    SessionEventsResponse,
     SessionResponse,
 )
 from src.api.services import ServiceContainer
@@ -75,9 +76,9 @@ def get_agent(agent_id: str, services: ServiceContainer = Depends(get_services))
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> Response:
+async def delete_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> Response:
     manager = services.get_agent_manager_for_agent(agent_id)
-    manager.delete_agent(agent_id)
+    await manager.delete_agent(agent_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -110,19 +111,41 @@ def list_sessions(agent_id: str, services: ServiceContainer = Depends(get_servic
     response_model=SessionResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def create_session(agent_id: str, services: ServiceContainer = Depends(get_services)) -> SessionResponse:
-    session = services.session_manager.create_session(agent_id)
+async def create_session(agent_id: str, services: ServiceContainer = Depends(get_services)) -> SessionResponse:
+    manager = services.get_agent_manager_for_agent(agent_id)
+    session = await manager.create_session(agent_id)
     return SessionResponse.model_validate(session)
 
 
 @router.get("/{agent_id}/sessions/{session_id}", response_model=SessionResponse)
-def get_session(
+async def get_session(
     agent_id: str,
     session_id: str,
     services: ServiceContainer = Depends(get_services),
 ) -> SessionResponse:
-    session = services.session_manager.get_session(agent_id, session_id)
+    manager = services.get_agent_manager_for_agent(agent_id)
+    session = await manager.get_session(agent_id, session_id)
     return SessionResponse.model_validate(session)
+
+
+@router.get("/{agent_id}/sessions/{session_id}/events")
+async def get_session_events(
+    agent_id: str,
+    session_id: str,
+    offset: int = 0,
+    limit: int = 50,
+    services: ServiceContainer = Depends(get_services),
+) -> SessionEventsResponse:
+    manager = services.get_agent_manager_for_agent(agent_id)
+    adaptor_client = manager._get_adaptor_http_client(agent_id)
+    try:
+        result = await adaptor_client.get(
+            f"/agent/sessions/{session_id}/events",
+            params={"offset": offset, "limit": limit},
+        )
+        return SessionEventsResponse.model_validate(result)
+    finally:
+        await adaptor_client.close()
 
 
 @router.delete("/{agent_id}/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

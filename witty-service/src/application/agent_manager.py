@@ -1,16 +1,21 @@
 from __future__ import annotations
+
+import asyncio
+import httpx
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Protocol
 from uuid import uuid4
 
+from src.adapter.http_client import AdaptorHttpClient
 from src.adapter.websocket_client_pool import AdaptorEndpoint, WebSocketClientPool
 from src.adapter.websocket_protocol import OutboundMessage
 from src.adapter.websocket_client import WebSocketClient
 from src.domain.enums import AgentStatus, can_transition
 from src.domain.errors import DomainError
 from src.persistence.repositories import AgentRecord, SessionRecord
-from src.sandbox.base import SandboxHandle, sandbox_not_found
+from src.sandbox.base import SandboxHandle, SandboxStatus, sandbox_not_found
+from src.storage.runtime_backup import RuntimeBackupStore
 from .session_manager import SessionManager
 
 INVALID_AGENT_TRANSITION = "INVALID_AGENT_TRANSITION"
@@ -21,6 +26,9 @@ AGENT_CREATE_FAILED = "AGENT_CREATE_FAILED"
 AGENT_PAUSE_FAILED = "AGENT_PAUSE_FAILED"
 AGENT_RESUME_FAILED = "AGENT_RESUME_FAILED"
 AGENT_DELETE_FAILED = "AGENT_DELETE_FAILED"
+RUNTIME_BACKUP_NOT_FOUND = "RUNTIME_BACKUP_NOT_FOUND"
+SANDBOX_NOT_READY = "SANDBOX_NOT_READY"
+RUNTIME_START_FAILED = "RUNTIME_START_FAILED"
 
 
 @dataclass(slots=True, frozen=True)
@@ -186,82 +194,132 @@ class AgentManager:
     def pause_agent(self, agent_id: str) -> AgentRecord:
         agent = self._get_agent(agent_id)
         self._ensure_transition(agent, AgentStatus.paused)
+
         sandbox_state = self._get_sandbox_state(agent_id)
-        sandbox_cleaned = False
+        client: httpx.Client | None = None
         try:
-            self._sandbox_backend.cleanup(sandbox_state.handle)
-            sandbox_cleaned = True
-            self._repository.save_sandbox_state(
-                agent_id,
-                sandbox_payload_json=self._sandbox_handle_payload(sandbox_state.handle),
-                adapter_base_url=sandbox_state.adapter_base_url,
-                adapter_ready=False,
-                last_error=None,
+            # 调用 witty-agent-server /agent/stop 优雅停止运行时
+            client = httpx.Client(base_url=sandbox_state.adapter_base_url, timeout=30.0)
+            try:
+                client.post("/agent/stop", json={})
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 400:  # 可能已经停止
+                    raise
+        finally:
+            if client is not None:
+                client.close()
+
+        return self._repository.update_agent_status(agent_id, AgentStatus.paused)
+
+    async def _resume_from_deleted(self, agent_id: str) -> AgentRecord:
+        """从 deleted 状态恢复"""
+        agent = self._get_agent(agent_id)
+
+        # 1. 检查备份
+        backup_store = RuntimeBackupStore()
+        if not backup_store.backup_exists(agent_id, agent.adapter_type):
+            raise DomainError(
+                code=RUNTIME_BACKUP_NOT_FOUND,
+                message="Runtime backup not found.",
+                details={"agent_id": agent_id},
             )
-            return self._repository.update_agent_status(agent_id, AgentStatus.paused)
-        except Exception as exc:
-            compensation_errors = self._compensate_sandbox_state(
-                agent_id=agent_id,
-                sandbox_handle=sandbox_state.handle,
-                adapter_base_url=sandbox_state.adapter_base_url,
-                adapter_ready=not sandbox_cleaned,
-                last_error=self._error_message(exc),
-                status_on_error=AgentStatus.error,
-            )
-            self._raise_operation_failed(
-                code=AGENT_PAUSE_FAILED,
-                message="Agent pause failed.",
-                agent_id=agent_id,
-                cause=exc,
-                compensation_errors=compensation_errors,
-            )
+
+        # 2. 恢复运行时备份
+        backup_store.restore(agent_id, agent.adapter_type)
+
+        # 3. 重新启动沙箱
+        sandbox_handle = self._sandbox_backend.start(
+            agent_id=agent_id,
+            workspace_path=agent.workspace_path,
+        )
+        adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
+
+        # 4. 保存沙箱状态
+        self._repository.save_sandbox_state(
+            agent_id,
+            sandbox_payload_json=self._sandbox_handle_payload(sandbox_handle),
+            adapter_base_url=adapter_endpoint.base_url,
+            adapter_ready=True,
+        )
+
+        # 5. 等待沙箱就绪
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            for _ in range(30):  # 30 秒超时
+                if await adaptor_client.health_check():
+                    break
+                await asyncio.sleep(1)
+            else:
+                raise DomainError(
+                    code=SANDBOX_NOT_READY,
+                    message="Sandbox health check timeout.",
+                    details={"agent_id": agent_id},
+                )
+        finally:
+            await adaptor_client.close()
+
+        # 6. 调用 /agent/start
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            try:
+                await adaptor_client.post("/agent/start", json={})
+            except httpx.HTTPStatusError as exc:
+                raise DomainError(
+                    code=RUNTIME_START_FAILED,
+                    message="Failed to start runtime.",
+                    details={"agent_id": agent_id, "error": str(exc)},
+                ) from exc
+        finally:
+            await adaptor_client.close()
+
+        # 7. 更新状态
+        return self._repository.update_agent_status(agent_id, AgentStatus.running)
+
+    async def _resume_from_paused(self, agent_id: str) -> AgentRecord:
+        """从 paused 状态恢复"""
+        agent = self._get_agent(agent_id)
+
+        # 1. 验证沙箱是否仍在运行
+        sandbox_state = self._get_sandbox_state(agent_id)
+        status = self._sandbox_backend.status(sandbox_state.handle)
+        if status == SandboxStatus.stopped:
+            # 沙箱已停止，降级到 deleted 场景
+            return await self._resume_from_deleted(agent_id)
+
+        # 2. 调用 /agent/start
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            try:
+                await adaptor_client.post("/agent/start", json={})
+            except httpx.HTTPStatusError as exc:
+                raise DomainError(
+                    code=RUNTIME_START_FAILED,
+                    message="Failed to start runtime.",
+                    details={"agent_id": agent_id, "error": str(exc)},
+                ) from exc
+        finally:
+            await adaptor_client.close()
+
+        # 3. 更新状态
+        return self._repository.update_agent_status(agent_id, AgentStatus.running)
 
     def resume_agent(self, agent_id: str) -> AgentRecord:
         agent = self._get_agent(agent_id)
-        self._ensure_transition(agent, AgentStatus.running)
-        previous_sandbox_state = self._get_sandbox_state(agent_id)
-        sandbox_handle: SandboxHandle | None = None
-        adapter_base_url = previous_sandbox_state.adapter_base_url
-        cleanup_errors: list[dict[str, str]] = []
-        try:
-            sandbox_handle = self._sandbox_backend.start(
-                agent_id=agent_id,
-                workspace_path=agent.workspace_path,
+
+        if agent.status == AgentStatus.paused:
+            self._ensure_transition(agent, AgentStatus.running)
+            return asyncio.get_event_loop().run_until_complete(
+                self._resume_from_paused(agent_id)
             )
-            adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
-            adapter_base_url = adapter_endpoint.base_url
-            self._repository.save_sandbox_state(
-                agent_id,
-                sandbox_payload_json=self._sandbox_handle_payload(sandbox_handle),
-                adapter_base_url=adapter_base_url,
-                adapter_ready=True,
-                last_error=None,
+        elif agent.status == AgentStatus.deleted:
+            return asyncio.get_event_loop().run_until_complete(
+                self._resume_from_deleted(agent_id)
             )
-            return self._repository.update_agent_status(agent_id, AgentStatus.running)
-        except Exception as exc:
-            if sandbox_handle is not None:
-                self._collect_error(
-                    cleanup_errors,
-                    "sandbox_cleanup",
-                    lambda: self._sandbox_backend.cleanup(sandbox_handle),
-                )
-            compensation_errors: list[dict[str, str]] = []
-            if not cleanup_errors:
-                compensation_errors = self._compensate_sandbox_state(
-                    agent_id=agent_id,
-                    sandbox_handle=sandbox_handle or previous_sandbox_state.handle,
-                    adapter_base_url=adapter_base_url,
-                    adapter_ready=False,
-                    last_error=self._error_message(exc),
-                    status_on_error=None,
-                )
-            self._raise_operation_failed(
-                code=AGENT_RESUME_FAILED,
-                message="Agent resume failed.",
-                agent_id=agent_id,
-                cause=exc,
-                cleanup_errors=cleanup_errors,
-                compensation_errors=compensation_errors,
+        else:
+            raise DomainError(
+                code=INVALID_AGENT_TRANSITION,
+                message="Cannot resume from current status.",
+                details={"agent_id": agent_id, "status": agent.status.value},
             )
 
     async def send_message(
@@ -269,8 +327,15 @@ class AgentManager:
         agent_id: str,
         session_id: str,
         content: str,
+        adaptor_client: AdaptorHttpClient | None = None,
     ) -> dict[str, Any]:
         agent = self._get_agent(agent_id)
+
+        if adaptor_client is None:
+            adaptor_client = self._get_adaptor_http_client(agent_id)
+            client_closer = adaptor_client.close
+        else:
+            client_closer: Callable[[], Any] = lambda: None
 
         if agent.status is AgentStatus.paused:
             agent = self.resume_agent(agent_id)
@@ -290,23 +355,26 @@ class AgentManager:
         ws_client = await self._prepare_ws_message_client(agent_id, session_id, content)
 
         events: list[dict[str, Any]] = []
-        async for event in ws_client.recv():
-            event_dict = dict(event)
+        try:
+            async for event in ws_client.recv():
+                event_dict = dict(event)
 
-            # Handle client.error events from witty-agent-server
-            if event_dict["type"] == "client.error":
-                error_payload = event_dict.get("payload", {})
-                error_code = error_payload.get("code", "UNKNOWN_ERROR")
-                error_message = error_payload.get("message", "Unknown error from adaptor")
-                raise DomainError(
-                    code=error_code,
-                    message=error_message,
-                    details={"session_id": session_id, "agent_id": agent_id},
-                )
+                # Handle client.error events from witty-agent-server
+                if event_dict["type"] == "client.error":
+                    error_payload = event_dict.get("payload", {})
+                    error_code = error_payload.get("code", "UNKNOWN_ERROR")
+                    error_message = error_payload.get("message", "Unknown error from adaptor")
+                    raise DomainError(
+                        code=error_code,
+                        message=error_message,
+                        details={"session_id": session_id, "agent_id": agent_id},
+                    )
 
-            events.append(event_dict)
-            if event_dict["type"] == "message.completed":
-                break
+                events.append(event_dict)
+                if event_dict["type"] == "message.completed":
+                    break
+        finally:
+            await client_closer()
 
         return {
             "sandbox_type": agent.sandbox_type,
@@ -359,30 +427,80 @@ class AgentManager:
             if event_dict["type"] == "message.completed":
                 break
 
-    def delete_agent(self, agent_id: str) -> None:
+    async def create_session(self, agent_id: str) -> SessionRecord:
+        agent = self._get_agent(agent_id)
+        if agent.status is not AgentStatus.running:
+            raise DomainError(
+                code=AGENT_NOT_RUNNING,
+                message="Agent must be running to create session.",
+                details={"agent_id": agent_id, "status": agent.status.value},
+            )
+
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            session = await self._session_manager.create_session_remote(agent_id, adaptor_client)
+        finally:
+            await adaptor_client.close()
+
+        return session
+
+    async def list_sessions(self, agent_id: str) -> list[SessionRecord]:
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            return await self._session_manager.list_sessions_remote(agent_id, adaptor_client)
+        finally:
+            await adaptor_client.close()
+
+    async def get_session(self, agent_id: str, session_id: str) -> SessionRecord:
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            return await self._session_manager.get_session_remote(agent_id, session_id, adaptor_client)
+        finally:
+            await adaptor_client.close()
+
+    async def delete_session(self, agent_id: str, session_id: str) -> None:
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            await self._session_manager.delete_session_remote(session_id, adaptor_client)
+        finally:
+            await adaptor_client.close()
+
+    async def delete_agent(self, agent_id: str) -> None:
         agent = self._get_agent(agent_id)
         sandbox_state = self._repository.get_sandbox_state(agent_id)
 
-        if agent.status in {AgentStatus.running, AgentStatus.paused} and sandbox_state is None:
-            raise sandbox_not_found(sandbox_type=agent.sandbox_type, sandbox_id=agent_id)
         cleanup_errors: list[dict[str, str]] = []
 
+        # 1. 备份运行时
+        if sandbox_state is not None:
+            self._collect_error(
+                cleanup_errors,
+                "runtime_backup",
+                lambda: self._backup_runtime(agent_id, agent.adapter_type),
+            )
+
+        # 2. 停止运行时
+        if agent.status in {AgentStatus.running, AgentStatus.paused}:
+            try:
+                await self._stop_runtime(agent_id)
+            except Exception as exc:
+                cleanup_errors.append({"stage": "runtime_stop", "error": self._error_message(exc)})
+
+        # 3. 清理沙箱
         if sandbox_state is not None:
             self._collect_error(
                 cleanup_errors,
                 "sandbox_cleanup",
-                lambda: self._sandbox_backend.cleanup(sandbox_state.handle),
+                lambda: self._cleanup_sandbox(agent_id),
             )
 
+        # 4. 保留 workspace 目录（不清除）
+
+        # 5. 更新 agent 状态
         self._collect_error(
             cleanup_errors,
-            "workspace_cleanup",
-            lambda: self._workspace_store.cleanup_workspace(agent_id),
-        )
-        self._collect_error(
-            cleanup_errors,
-            "agent_delete",
-            lambda: self._repository.delete_agent(agent_id),
+            "agent_status",
+            lambda: self._repository.update_agent_status(agent_id, AgentStatus.deleted),
         )
 
         if cleanup_errors:
@@ -472,6 +590,36 @@ class AgentManager:
                 details={"agent_id": agent_id},
             )
         return sandbox_state
+
+    def _get_adaptor_http_client(self, agent_id: str) -> AdaptorHttpClient:
+        """获取到 witty-agent-server 的 HTTP 客户端"""
+        sandbox_state = self._get_sandbox_state(agent_id)
+        return AdaptorHttpClient(base_url=sandbox_state.adapter_base_url)
+
+    def _backup_runtime(self, agent_id: str, runtime_type: str = "openclaw") -> Path | None:
+        """备份运行时文件"""
+        backup_store = RuntimeBackupStore()
+        try:
+            return backup_store.backup(agent_id, runtime_type)
+        except Exception:
+            return None
+
+    def _cleanup_sandbox(self, agent_id: str) -> None:
+        """清理沙箱"""
+        sandbox_state = self._repository.get_sandbox_state(agent_id)
+        if sandbox_state is not None:
+            self._sandbox_backend.cleanup(sandbox_state.handle)
+
+    async def _stop_runtime(self, agent_id: str) -> None:
+        """停止 witty-agent-server 运行时"""
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            try:
+                await adaptor_client.post("/agent/stop", json={})
+            except httpx.HTTPStatusError:
+                pass  # 可能已经停止
+        finally:
+            await adaptor_client.close()
 
     def _compensate_sandbox_state(
         self,

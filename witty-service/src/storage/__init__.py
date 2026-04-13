@@ -1,5 +1,6 @@
 """Workspace storage utilities."""
 
-from .workspace_store import LocalWorkspaceStore, WorkspaceStore
+from src.storage.runtime_backup import RuntimeBackupStore
+from src.storage.workspace_store import LocalWorkspaceStore, WorkspaceStore
 
-__all__ = ["WorkspaceStore", "LocalWorkspaceStore"]
+__all__ = ["WorkspaceStore", "LocalWorkspaceStore", "RuntimeBackupStore"]

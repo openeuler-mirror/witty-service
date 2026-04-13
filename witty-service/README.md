@@ -78,6 +78,7 @@ curl -s http://127.0.0.1:8000/healthz
 | `/api/v1/agents/{agent_id}/sessions/{session_id}` | `DELETE` | 删除会话 |
 | `/api/v1/agents/{agent_id}/sessions/{session_id}/messages` | `POST` | 发送消息 |
 | `/api/v1/agents/{agent_id}/sessions/{session_id}/messages/stream` | `POST` | 发送消息并以 SSE 流返回 |
+| `/api/v1/agents/{agent_id}/sessions/{session_id}/events` | `GET` | 查询会话事件回放 |
 
 ### 3.3 Agent 生命周期接口
 
@@ -189,7 +190,7 @@ curl -s http://127.0.0.1:8000/healthz
 
 #### 4. `DELETE /api/v1/agents/{agent_id}`
 
-- 接口描述：删除 Agent及其所有关联的沙箱资源、会话和消息记录
+- 接口描述：删除 Agent - 备份运行时 → 停止运行时 → 清理沙箱 → 删除本地记录
 - 输入：
 
 | 字段 | 类型 | 位置 | 说明 |
@@ -197,6 +198,13 @@ curl -s http://127.0.0.1:8000/healthz
 | `agent_id` | string | path | Agent 唯一标识 |
 
 - 输出 `204`：无返回内容
+
+- 说明：
+  1. 备份运行时文件到 `~/witty-service/{agent_id}/runtime_backup/`
+  2. 调用 witty-agent-server `/agent/stop`
+  3. 清理沙箱（docker stop/rm 或 kill process）
+  4. 更新 agent 状态为 deleted
+  5. **保留 workspace 目录**（不清除，用于后续 resume）
 
 #### 5. `POST /api/v1/agents/{agent_id}/pause`
 
@@ -228,7 +236,7 @@ curl -s http://127.0.0.1:8000/healthz
 
 #### 6. `POST /api/v1/agents/{agent_id}/resume`
 
-- 接口描述：恢复已暂停的 Agent
+- 接口描述：恢复已暂停的 Agent，根据状态分支处理
 - 输入：
 
 | 字段 | 类型 | 位置 | 说明 |
@@ -236,6 +244,13 @@ curl -s http://127.0.0.1:8000/healthz
 | `agent_id` | string | path | Agent 唯一标识 |
 
 - 输出 `200`：`AgentResponse`（status 变为 `running`）
+
+- 分支逻辑：
+
+| 当前状态 | 恢复流程 |
+|----------|----------|
+| `paused` | 直接调用 `/agent/start` |
+| `deleted` / `stopped` | 1. 恢复运行时备份<br>2. 重新启动沙箱<br>3. 调用 `/agent/start` |
 
 ```json
 {
@@ -258,12 +273,12 @@ curl -s http://127.0.0.1:8000/healthz
 
 #### 1. `GET /api/v1/agents/{agent_id}/sessions`
 
-- 接口描述：列出 Agent 的所有会话
+- 接口描述：列出 Agent 的所有会话（以 witty-agent-server 为主，刷新本地缓存）
 - 输出 `200`：`list[SessionResponse]`
 
 #### 2. `POST /api/v1/agents/{agent_id}/sessions`
 
-- 接口描述：创建新会话
+- 接口描述：创建新会话（透传到 witty-agent-server）
 - 输入：空对象 `{}`
 - 输出 `201`（SessionResponse）：
 
@@ -272,6 +287,8 @@ curl -s http://127.0.0.1:8000/healthz
   "id": "session-uuid",
   "agent_id": "agent-uuid",
   "status": "active",
+  "context_initialized": true,
+  "runtime_type": "openclaw",
   "created_at": "2026-04-10T12:00:00",
   "updated_at": "2026-04-10T12:00:00"
 }
@@ -282,18 +299,53 @@ curl -s http://127.0.0.1:8000/healthz
 | `id` | string | 会话唯一标识 |
 | `agent_id` | string | 所属 Agent ID |
 | `status` | string | 会话状态：`active`、`closed` |
+| `context_initialized` | boolean | witty-agent-server 是否已完成上下文初始化 |
+| `runtime_type` | string | 运行时类型：如 `openclaw` |
 | `created_at` | datetime | 创建时间 |
 | `updated_at` | datetime | 更新时间 |
 
 #### 3. `GET /api/v1/agents/{agent_id}/sessions/{session_id}`
 
-- 接口描述：获取会话详情
+- 接口描述：获取会话详情（优先本地，透传 witty-agent-server）
 - 输出 `200`：`SessionResponse`
 
 #### 4. `DELETE /api/v1/agents/{agent_id}/sessions/{session_id}`
 
-- 接口描述：删除会话
+- 接口描述：删除会话（透传到 witty-agent-server，删除本地记录）
 - 输出 `204`：无返回内容
+
+#### 5. `GET /api/v1/agents/{agent_id}/sessions/{session_id}/events`
+
+- 接口描述：查询会话事件回放（透传到 witty-agent-server）
+- 输入：
+
+| 字段 | 类型 | 位置 | 说明 |
+|------|------|------|------|
+| `session_id` | string | path | 会话 ID |
+| `offset` | integer | query | 分页偏移，默认 0 |
+| `limit` | integer | query | 每页数量，默认 50 |
+
+- 输出 `200`（SessionEventPage）：
+
+```json
+{
+  "items": [
+    {
+      "id": "event-id",
+      "session_id": "session-id",
+      "type": "message.delta",
+      "source": "assistant",
+      "payload": {},
+      "timestamp": "2026-03-31T12:34:56.000000Z"
+    }
+  ],
+  "pagination": {
+    "offset": 0,
+    "limit": 50,
+    "total": 1
+  }
+}
+```
 
 ### 3.5 消息接口
 
@@ -391,7 +443,10 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 |------|-------------|------|
 | `INVALID_AGENT_TRANSITION` | 409 | Agent 状态转换不合法 |
 | `AGENT_NOT_FOUND` | 404 | Agent 不存在 |
-| `SESSION_NOT_FOUND` | 404 | 会话不存在 |
+| `SESSION_NOT_FOUND` | 404 | 会话不存在（两边都查不到） |
+| `SESSION_CREATE_FAILED` | 500 | 透传创建会话失败 |
+| `SESSION_DELETE_FAILED` | 500 | 透传删除会话失败 |
+| `SESSION_LIST_FAILED` | 500 | 透传列出会话失败 |
 | `SESSION_AGENT_MISMATCH` | 400 | Session 与 Agent 不匹配 |
 | `AGENT_NOT_RUNNING` | 409 | Agent 未运行（可能处于 paused 或 stopped 状态） |
 | `SANDBOX_STATE_NOT_FOUND` | 404 | 沙箱状态不存在 |
@@ -399,6 +454,9 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 | `AGENT_PAUSE_FAILED` | 500 | Agent 暂停失败 |
 | `AGENT_RESUME_FAILED` | 500 | Agent 恢复失败 |
 | `AGENT_DELETE_FAILED` | 500 | Agent 删除失败 |
+| `RUNTIME_BACKUP_NOT_FOUND` | 404 | 运行时备份不存在 |
+| `RUNTIME_BACKUP_RESTORE_FAILED` | 500 | 恢复备份失败 |
+| `RUNTIME_START_FAILED` | 500 | 启动运行时失败 |
 
 **HTTP 状态码映射规则：**
 - 以 `_NOT_FOUND` 结尾 → `404`
@@ -626,11 +684,15 @@ uv run pytest tests/ -q
 ## 8. 故障排查
 
 - `AGENT_NOT_FOUND`：Agent 不存在，检查 agent_id 是否正确
-- `SESSION_NOT_FOUND`：会话不存在，检查 session_id 是否正确
+- `SESSION_NOT_FOUND`：会话不存在（两边都查不到），检查 session_id 是否正确
+- `SESSION_CREATE_FAILED`：创建会话失败，透传到 witty-agent-server 失败，检查 witty-agent-server 是否正常运行
+- `SESSION_DELETE_FAILED`：删除会话失败，透传到 witty-agent-server 失败
+- `SESSION_LIST_FAILED`：列出会话失败，透传到 witty-agent-server 失败
 - `SESSION_AGENT_MISMATCH`：Session 与 Agent 不匹配，确认 session 属于正确的 Agent
 - `AGENT_NOT_RUNNING`：Agent 未运行（可能处于 paused 或 stopped 状态），先调用 `/resume`
-- `AGENT_CREATE_FAILED`：Agent 创建失败，检查 sandbox 配置是否正确
-- 消息发送无响应：确认 adaptor service 的 WebSocket 连接正常
+- `RUNTIME_BACKUP_NOT_FOUND`：运行时备份不存在，可能该 Agent 未执行过 delete 操作
+- `RUNTIME_BACKUP_RESTORE_FAILED`：恢复备份失败，检查备份文件是否完整
+- 消息发送无响应：确认 witty-agent-server 的 WebSocket 连接正常
 
 ## 9. 环境变量
 
