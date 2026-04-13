@@ -1,9 +1,13 @@
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 
 from src.config import get_settings
 
 
-def require_bearer_auth(authorization: str | None = Header(default=None)) -> None:
+def require_bearer_auth(request: Request, authorization: str | None = Header(default=None)) -> None:
+    # OPTIONS 预检请求跳过认证
+    if request.method == "OPTIONS":
+        return
+
     settings = get_settings()
     expected_token = settings.auth_token
 
