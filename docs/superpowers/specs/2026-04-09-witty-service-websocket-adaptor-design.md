@@ -52,23 +52,25 @@ flowchart LR
         AM --> WSP
     end
 
-    subgraph S1["Sandbox A（docker / local_process / e2b）"]
-        AS1["witty-agent-server（1个实例）"]
-        RT1["Runtime Adapter（openclaw/opencode/...）"]
+    subgraph S1["Sandbox A (docker/local_process/e2b)"]
+        AS1["witty-agent-server (single instance)"]
+        RT1["Runtime Adapter (openclaw/opencode/...)"]
         AS1 --> RT1
     end
 
-    subgraph S2["Sandbox B（docker / local_process / e2b）"]
-        AS2["witty-agent-server（1个实例）"]
-        RT2["Runtime Adapter（openclaw/opencode/...）"]
+    subgraph S2["Sandbox B (docker/local_process/e2b)"]
+        AS2["witty-agent-server (single instance)"]
+        RT2["Runtime Adapter (openclaw/opencode/...)"]
         AS2 --> RT2
     end
 
     C -->|HTTP| API
-    SB -->|为 agent 选择沙箱| S1
-    SB -->|为 agent 选择沙箱| S2
-    WSP <--> |WS /agent/sessions/{session_id}/ws| AS1
-    WSP <--> |WS /agent/sessions/{session_id}/ws| AS2
+    SB -->|select sandbox by agent| S1
+    SB -->|select sandbox by agent| S2
+    WSP -->|WS /agent/sessions/:session_id/ws| AS1
+    AS1 -->|WS events| WSP
+    WSP -->|WS /agent/sessions/:session_id/ws| AS2
+    AS2 -->|WS events| WSP
 ```
 
 ### 2.2 消息流
@@ -236,7 +238,7 @@ class AdapterEndpoint:
         return f"{scheme}://{host}/agent/sessions/{session_id}/ws"
 ```
 
-### 3.4 AgentManager 集成
+### 3.4 AgentManager 集成（非流式 + SSE 流式）
 
 ```python
 # src/application/agent_manager.py (修改)
@@ -273,7 +275,25 @@ async def send_message(
         if event["type"] == "message.completed":
             break
 
-    return events
+    return {
+        "sandbox_type": agent.sandbox_type,
+        "events": events,
+    }
+
+async def send_message_stream(
+    self,
+    agent_id: str,
+    session_id: str,
+    content: str,
+) -> AsyncIterator[dict[str, Any]]:
+    # ...与 send_message 共享前置校验和 message.create 发送...
+    async for event in ws_client.recv():
+        yield {
+            "sandbox_type": agent.sandbox_type,
+            "event": event,
+        }
+        if event["type"] == "message.completed":
+            break
 
 def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoint:
     """获取 adaptor WebSocket 端点"""
@@ -319,7 +339,7 @@ def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoi
 
 ### 4.2 出站事件（Adaptor → Client）
 
-统一 envelope：
+`witty-service` 接收并透传的上游统一 envelope：
 
 ```json
 {
@@ -332,7 +352,13 @@ def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoi
 }
 ```
 
-### 4.3 事件类型
+约束：
+
+1. `events[]` 内单条事件 envelope 保持上游原样（含 `runtime_type`）。
+2. 事件内不再包含 `sandbox_type`（不兼容移除）。
+3. `sandbox_type` 仅由 witty-service 在 API 响应层补充。
+
+### 4.3 事件类型（与 witty-agent-server 对齐）
 
 | type | 含义 | payload 关键字段 |
 |------|------|------------------|
@@ -360,6 +386,58 @@ def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoi
 
 > **注意**：v2.2 移除了 `exec.approval.*` 事件的映射。runtime 层不再透传审批相关事件。
 
+### 4.5 非流式接口响应（保留）
+
+`POST /api/v1/agents/{agent_id}/sessions/{session_id}/messages`
+
+```json
+{
+  "sandbox_type": "docker",
+  "events": [
+    {
+      "type": "message.delta",
+      "session_id": "session-id",
+      "runtime_type": "openclaw",
+      "event_id": "uuid",
+      "ts_ms": 1775650000123,
+      "payload": {
+        "delta": "hello"
+      }
+    }
+  ]
+}
+```
+
+### 4.6 SSE 流式接口响应（新增）
+
+`POST /api/v1/agents/{agent_id}/sessions/{session_id}/messages/stream`
+
+- 请求体：与 `POST /messages` 相同，沿用 `SendMessageRequest`
+- 响应头：`Content-Type: text/event-stream`
+- 每条 SSE 的 `data:` 为 JSON，格式如下：
+
+```json
+{
+  "sandbox_type": "docker",
+  "event": {
+    "type": "message.delta",
+    "session_id": "session-id",
+    "runtime_type": "openclaw",
+    "event_id": "uuid",
+    "ts_ms": 1775650000123,
+    "payload": {
+      "delta": "hello"
+    }
+  }
+}
+```
+
+结束规则：
+
+1. 收到 `message.completed` 后发送最后一条 SSE 并关闭连接。
+2. 运行时异常时发送 `stream.error` 后关闭连接。
+3. 参数校验错误直接返回 HTTP 4xx JSON（不进入 SSE 流）。
+
 ---
 
 ## 5. 沙箱与 Runtime 支持
@@ -385,17 +463,18 @@ def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoi
 
 ---
 
-## 6. 移除 HTTP/SSE
+## 6. 接口兼容策略
 
-### 6.1 需要移除的代码
+### 6.1 保留接口
 
-1. **AdapterClient (HTTP)**：`src/adapter/client.py` - 整个文件移除
-2. **SSE 相关**：`src/adapter/schemas.py` 中的 SSE 相关类型（`StreamEvent`, `StreamEventType`）
-3. **send_message_stream 方法**：在 AgentManager 中的 SSE 流式处理逻辑
+1. 保留 `POST /messages` 作为非流式聚合响应接口。
+2. 新增 `POST /messages/stream` 作为 SSE 流式响应接口。
 
-### 6.2 保留的接口
+### 6.2 不兼容变更
 
-- `src/adapter/__init__.py` - 导出新的 WebSocket 客户端组件
+1. `events[]` 内移除 `sandbox_type` 字段。
+2. `sandbox_type` 只在非流式响应顶层返回一次；SSE 场景在每条 `data` 外层返回。
+3. `tool` 事件命名与 payload 结构以 witty-agent-server 为准（例如 `tool.call.response`）。
 
 ---
 
@@ -495,17 +574,25 @@ class AdaptorReceiveError(DomainError):
 4. 创建 `src/adapter/websocket_client_pool.py` - 实现连接池
 5. 修改 `src/runtime/base.py` - 添加 ws_url 属性
 
-### 10.2 第二阶段：集成 AgentManager
+### 10.2 第二阶段：集成 AgentManager 与 API
 
 1. 修改 `src/application/agent_manager.py` - 替换 HTTP 客户端为 WebSocket 客户端
-2. 修改 `src/api/services.py` - 依赖注入配置
-3. 修改 `src/adapter/__init__.py` - 导出 WebSocket 组件
+2. 增加 `send_message_stream`（SSE 数据源）
+3. 修改 `src/api/agents.py` - 新增 `/messages/stream` 路由
+4. 修改 `src/api/schemas.py` - `MessageEventsResponse` 增加 `sandbox_type`
+5. 修改 `src/api/services.py` - 依赖注入配置
+6. 修改 `src/adapter/__init__.py` - 导出 WebSocket 组件
 
 ### 10.3 第三阶段：清理与测试
 
-1. 移除 HTTP/SSE 相关代码（`client.py`, `schemas.py` 中的 SSE 类型）
-2. 编写单元测试
-3. 编写集成测试
+1. 移除事件内 `sandbox_type` 的历史兼容逻辑
+2. 单元测试覆盖：
+   - WebSocket 入站事件解析（无 `sandbox_type`）
+   - 非流式响应顶层 `sandbox_type`
+   - SSE 流结束与错误路径
+3. E2E 测试覆盖：
+   - `/messages` 非流式回归
+   - `/messages/stream` SSE 连续事件与完成收敛
 
 ---
 
