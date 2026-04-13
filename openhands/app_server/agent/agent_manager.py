@@ -13,9 +13,9 @@ The AgentManager:
 
 import asyncio
 import logging
-import threading
 import uuid
 from datetime import datetime
+from functools import lru_cache
 from typing import Any, AsyncIterator, Optional
 
 from openhands.app_server.agent.adapter_client import get_adapter_client_pool
@@ -56,14 +56,11 @@ class AgentManager:
     """
 
     _instance: Optional["AgentManager"] = None
-    _instance_lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
-            with cls._instance_lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._initialized = False
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
         return cls._instance
 
     def __init__(
@@ -74,6 +71,7 @@ class AgentManager:
         if self._initialized:
             return
         self._initialized = True
+
         self._agents: dict[str, Agent] = {}
         self._sandbox_factory = sandbox_factory or AgentSandboxFactory
         self._storage_service = (
@@ -86,6 +84,7 @@ class AgentManager:
         self._agent_configs: dict[str, dict[str, Any]] = {}
         self._adapter_pool = get_adapter_client_pool()
         self._creation_tasks: dict[str, asyncio.Task] = {}
+
         self._restore_from_store()
 
     def _store_payload_for_agent(self, agent_id: str) -> dict[str, Any]:
@@ -230,25 +229,25 @@ class AgentManager:
         )
 
     @classmethod
+    @lru_cache(maxsize=1)
     def get_instance(cls) -> "AgentManager":
         """Get the singleton instance of AgentManager."""
         if cls._instance is None:
-            with cls._instance_lock:
-                if cls._instance is None:
-                    cls._instance = cls()
+            cls._instance = cls()
         return cls._instance
 
     @classmethod
     def reset_instance(cls) -> None:
         """Reset the singleton instance. For testing purposes."""
-        with cls._instance_lock:
-            inst = cls._instance
-            if inst is not None:
-                tasks = getattr(inst, "_creation_tasks", {}) or {}
-                for t in list(tasks.values()):
-                    if not t.done():
-                        t.cancel()
-            cls._instance = None
+        inst = cls._instance
+        if inst is not None:
+            tasks = getattr(inst, "_creation_tasks", {}) or {}
+            for t in list(tasks.values()):
+                if not t.done():
+                    t.cancel()
+        cls._instance = None
+        # Clear the cache so that get_instance will create a new instance
+        cls.get_instance.cache_clear()
 
     async def create_agent(self, request: CreateAgentRequest) -> AgentInfo:
         """Register an agent and return immediately with status CREATING.
@@ -416,7 +415,18 @@ class AgentManager:
         Returns:
             List of AgentInfo objects.
         """
-        return [agent.to_info() for agent in self._agents.values()]
+        logger.info(f"Listing agents, found {len(self._agents)} agents in memory")
+        try:
+            agents = []
+            for agent in self._agents.values():
+                logger.debug(f"Processing agent: {agent.id}, status: {agent.status}")
+                agent_info = agent.to_info()
+                agents.append(agent_info)
+            logger.info(f"Successfully converted {len(agents)} agents to AgentInfo")
+            return agents
+        except Exception as e:
+            logger.error(f"Error listing agents: {e}", exc_info=True)
+            raise
 
     async def update_agent(self, agent_id: str, request: UpdateAgentRequest) -> Optional[AgentInfo]:
         """Update agent configuration.

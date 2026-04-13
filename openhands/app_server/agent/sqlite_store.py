@@ -21,6 +21,8 @@ class AgentSqliteStore:
         else:
             default_path = "/tmp/agent-workspaces/agentd.sqlite3"
         self._db_path = Path(db_path or os.getenv("AGENTD_SQLITE_PATH", default_path))
+        # Ensure the directory exists
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._engine = create_agentd_engine(str(self._db_path))
         Base.metadata.create_all(self._engine)
         self._session_factory = create_agentd_session_factory(str(self._db_path))

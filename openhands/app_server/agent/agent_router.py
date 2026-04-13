@@ -52,8 +52,12 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 
 def get_agent_manager() -> "AgentManager":
     """Get singleton AgentManager instance."""
-    from openhands.app_server.agent.agent_manager import AgentManager
-    return AgentManager.get_instance()
+    try:
+        from openhands.app_server.agent.agent_manager import AgentManager
+        return AgentManager.get_instance()
+    except Exception as e:
+        logger.error(f"Error in get_agent_manager: {e}", exc_info=True)
+        raise
 
 
 def reset_agent_singleton() -> None:
@@ -89,15 +93,33 @@ async def create_agent(request: CreateAgentRequest) -> AgentInfo:
 
 @router.get(
     "",
-    response_model=list[AgentInfo],
 )
-async def list_agents() -> list[AgentInfo]:
+async def list_agents():
     """List all agents.
 
     Returns a list of all agents in the system.
     """
-    manager = get_agent_manager()
-    return await manager.list_agents()
+    try:
+        manager = get_agent_manager()
+        agents = await manager.list_agents()
+        # Convert to the required format
+        formatted_agents = []
+        for agent in agents:
+            formatted_agent = {
+                "id": agent.id,
+                "name": agent.name,
+                "description": "",  # Add empty description field
+                "adapterType": agent.adapter_type,
+                "config": {},  # Add empty config field
+                "status": agent.status,
+                "createdAt": agent.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "updatedAt": agent.updated_at.strftime("%Y-%m-%d")
+            }
+            formatted_agents.append(formatted_agent)
+        return {"success": True, "data": formatted_agents}
+    except Exception as e:
+        logger.error(f"Error listing agents: {e}", exc_info=True)
+        raise
 
 
 @router.get(

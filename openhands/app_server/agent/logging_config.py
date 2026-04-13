@@ -36,7 +36,8 @@ def get_agentd_log_dir() -> Path:
         return Path(raw).expanduser()
     if os.getenv("PYTEST_CURRENT_TEST"):
         return Path(tempfile.gettempdir()) / "agentd-pytest-logs"
-    return _DEFAULT_DIR.expanduser()
+    # Use project directory instead of home directory to avoid permission issues
+    return Path(".") / ".agentd"
 
 
 def configure_agentd_logging(
