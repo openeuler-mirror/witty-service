@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import subprocess
+import sys
 import time
 from io import TextIOBase
 from pathlib import Path
@@ -139,8 +140,8 @@ class LocalProcessSandboxBackend(SandboxBackend):
 
     def _build_command(self, *, port: int, app_dir: str) -> list[str]:
         return [
-            "uv",
-            "run",
+            sys.executable,
+            "-m",
             "uvicorn",
             "witty_agent_server.app:create_app",
             "--factory",
