@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Protocol
 from uuid import uuid4
 
+
+logger = logging.getLogger(__name__)
+
 from sqlalchemy import false
 from src.adapter.http_client import AdaptorHttpClient
 from src.adapter.websocket_client_pool import AdaptorEndpoint, WebSocketClientPool
@@ -143,7 +146,9 @@ class AgentManager:
 
     def create_agent(self, request: AgentCreateRequest) -> AgentCreateResult:
         agent_id = str(uuid4())
+        logger.info(f"[AgentManager] Creating agent: {request.name}, agent_id: {agent_id}")
         workspace_path = str(self._workspace_store.init_workspace(agent_id))
+        logger.info(f"[AgentManager] Workspace path: {workspace_path}")
         sandbox_handle: SandboxHandle | None = None
         try:
             self._create_agent_record(
@@ -151,33 +156,43 @@ class AgentManager:
                 request=request,
                 workspace_path=workspace_path,
             )
+            logger.info(f"[AgentManager] Agent record created, starting sandbox...")
             sandbox_handle = self._sandbox_backend.start(
                 agent_id=agent_id,
                 workspace_path=workspace_path,
             )
+            logger.info(f"[AgentManager] Sandbox started, handle: {sandbox_handle}")
             adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
+            logger.info(f"[AgentManager] Adapter endpoint: {adapter_endpoint.base_url}")
+            sandbox_payload = self._sandbox_handle_payload(sandbox_handle)
+            logger.info(f"[AgentManager] Sandbox payload: {sandbox_payload}")
             self._repository.save_sandbox_state(
                 agent_id,
-                sandbox_payload_json=self._sandbox_handle_payload(sandbox_handle),
+                sandbox_payload_json=sandbox_payload,
                 adapter_base_url=adapter_endpoint.base_url,
                 adapter_ready=True,
             )
+            logger.info(f"[AgentManager] Sandbox state saved to database")
 
             # 等待适配器就绪（同步等待 /v1/ping）
+            logger.info(f"[AgentManager] Waiting for sandbox to be ready...")
             client: httpx.Client | None = None
-            for _ in range(30):  # 30 秒超时
+            for i in range(30):  # 30 秒超时
                 try:
                     client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=5.0)
                     response = client.get("/v1/ping")
                     if response.status_code == 200:
+                        logger.info(f"[AgentManager] Sandbox is ready after {i+1} attempts")
                         break
-                except Exception:
+                except Exception as exc:
+                    logger.info(f"[AgentManager] Health check attempt {i+1} failed: {exc}")
                     pass
                 finally:
                     if client is not None:
                         client.close()
                 time.sleep(1)
             else:
+                logger.error(f"[AgentManager] Sandbox health check timeout after 30 attempts")
                 raise DomainError(
                     code=AGENT_CREATE_FAILED,
                     message="Sandbox health check timeout.",
@@ -185,11 +200,14 @@ class AgentManager:
                 )
 
             # 调用 /agent/start 启动 witty-agent-server 中的 agent
+            logger.info(f"[AgentManager] Calling /agent/start...")
             client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=30.0)
             try:
                 try:
-                    client.post("/agent/start", json={})
+                    response = client.post("/agent/start", json={})
+                    logger.info(f"[AgentManager] /agent/start response: {response.status_code}")
                 except httpx.HTTPStatusError as exc:
+                    logger.error(f"[AgentManager] /agent/start failed: {exc}")
                     raise DomainError(
                         code=AGENT_CREATE_FAILED,
                         message="Failed to start agent.",
@@ -199,12 +217,16 @@ class AgentManager:
                 client.close()
 
             # 调用 /agent/sessions 在 witty-agent-server 创建 session
+            logger.info(f"[AgentManager] Calling /agent/sessions...")
             client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=30.0)
             try:
                 response = client.post("/agent/sessions", json={})
+                logger.info(f"[AgentManager] /agent/sessions response: {response.status_code}")
                 response.raise_for_status()
                 session_data = response.json()
+                logger.info(f"[AgentManager] Session data: {session_data}")
             except httpx.HTTPStatusError as exc:
+                logger.error(f"[AgentManager] /agent/sessions failed: {exc}")
                 raise DomainError(
                     code=AGENT_CREATE_FAILED,
                     message="Failed to create session on agent.",
@@ -221,15 +243,20 @@ class AgentManager:
                 runtime_type=session_data.get("runtime_type"),
                 created_at=datetime.fromisoformat(session_data["created_at"]) if "created_at" in session_data else None,
             )
+            logger.info(f"[AgentManager] Default session created: {default_session.id}")
             running_agent = self._repository.update_agent_status(
                 agent_id,
                 AgentStatus.running,
             )
+            logger.info(f"[AgentManager] Agent status updated to running, creation complete")
             return AgentCreateResult(
                 agent=replace(running_agent, workspace_path=workspace_path),
                 default_session=default_session,
             )
         except Exception as exc:
+            logger.error(f"[AgentManager] Agent creation failed with error: {exc}")
+            logger.error(f"[AgentManager] Exception type: {type(exc).__name__}")
+            logger.error(f"[AgentManager] Exception traceback:", exc_info=True)
             cleanup_errors: list[dict[str, str]] = []
             if sandbox_handle is not None:
                 self._collect_error(

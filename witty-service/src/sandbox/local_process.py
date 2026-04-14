@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import socket
 import subprocess
 import sys
@@ -8,6 +9,8 @@ from io import TextIOBase
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 from src.sandbox.base import (
     AdapterEndpoint,
@@ -50,11 +53,17 @@ class LocalProcessSandboxBackend(SandboxBackend):
         workspace_path: str,
         **kwargs: Any,
     ) -> SandboxHandle:
+        logger.info(f"[LocalProcessSandbox] Starting sandbox for agent_id: {agent_id}")
         port = int(kwargs.get("port", find_free_port()))
+        logger.info(f"[LocalProcessSandbox] Using port: {port}")
         app_dir = self._resolve_agent_server_app_dir()
+        logger.info(f"[LocalProcessSandbox] Agent server app dir: {app_dir}")
         command = self._build_command(port=port, app_dir=app_dir)
+        logger.info(f"[LocalProcessSandbox] Command: {' '.join(command)}")
 
         try:
+            logger.info(f"[LocalProcessSandbox] Starting process in cwd: {command}")
+            logger.info(f"[LocalProcessSandbox] Workspace path: {workspace_path}")
             process = subprocess.Popen(
                 command,
                 cwd=workspace_path,
@@ -62,7 +71,9 @@ class LocalProcessSandboxBackend(SandboxBackend):
                 stderr=subprocess.PIPE,
                 text=True,
             )
+            logger.info(f"[LocalProcessSandbox] Process started with PID: {process.pid} in cwd: {app_dir}")
         except OSError as exc:
+            logger.error(f"[LocalProcessSandbox] Failed to start process: {exc}")
             raise sandbox_start_failed(
                 sandbox_type=self.sandbox_type,
                 message="Failed to start local process sandbox.",
@@ -74,19 +85,23 @@ class LocalProcessSandboxBackend(SandboxBackend):
 
         time.sleep(self.startup_poll_interval)
         returncode = process.poll()
+        logger.info(f"[LocalProcessSandbox] Initial poll returncode: {returncode}")
         if returncode is not None:
+            stderr = self._read_stderr(process)
+            logger.error(f"[LocalProcessSandbox] Process exited immediately: returncode={returncode}, stderr={stderr}")
             raise sandbox_start_failed(
                 sandbox_type=self.sandbox_type,
                 message="Local process sandbox exited immediately after startup.",
                 details={
                     "command": command,
-                    "stderr": self._read_stderr(process),
+                    "stderr": stderr,
                     "returncode": returncode,
                 },
             )
 
         sandbox_id = str(uuid4())
         base_url = f"http://{self.host}:{port}"
+        logger.info(f"[LocalProcessSandbox] Sandbox ID: {sandbox_id}, base_url: {base_url}")
         handle = SandboxHandle(
             sandbox_id=sandbox_id,
             agent_id=agent_id,
@@ -101,6 +116,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
         )
         self._handles[sandbox_id] = handle
         self._processes[sandbox_id] = process
+        logger.info(f"[LocalProcessSandbox] Sandbox started successfully, returning handle")
         return handle
 
     def stop(self, handle: SandboxHandle | str, **kwargs: Any) -> None:
