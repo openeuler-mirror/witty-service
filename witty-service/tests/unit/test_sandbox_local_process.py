@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import subprocess
+import sys
 
 import pytest
 
@@ -78,8 +79,8 @@ def test_local_runtime_start_builds_expected_command_and_handle(
     handle = backend.start(agent_id="agent-1", workspace_path="/tmp/workspace")
 
     assert popen_calls["command"] == [
-        "uv",
-        "run",
+        sys.executable,
+        "-m",
         "uvicorn",
         "witty_agent_server.app:create_app",
         "--factory",
@@ -253,8 +254,8 @@ def test_local_runtime_start_raises_when_process_exits_immediately(
     assert exc_info.value.code == "SANDBOX_START_FAILED"
     assert exc_info.value.details["stderr"] == "startup boom"
     assert exc_info.value.details["command"] == [
-        "uv",
-        "run",
+        sys.executable,
+        "-m",
         "uvicorn",
         "witty_agent_server.app:create_app",
         "--factory",

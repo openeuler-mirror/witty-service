@@ -66,7 +66,7 @@ def _ensure_dir_exists(database_url: str) -> None:
 def build_default_services() -> ServiceContainer:
     _default_db_path = os.path.expanduser("~/witty-service/db/witty_service.sqlite3")
     database_url = os.getenv("WITTY_DATABASE_URL", f"sqlite:///{_default_db_path}")
-    workspace_base = os.getenv("WITTY_WORKSPACE_BASE", "~/witty-service/agent-workspaces")
+    workspace_base = os.getenv("WITTY_WORKSPACE_BASE", "~/witty-service/")
 
     _ensure_dir_exists(database_url)
     engine = create_sqlite_engine(database_url)
