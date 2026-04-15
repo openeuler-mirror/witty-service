@@ -602,20 +602,37 @@ class AgentManager:
 
         # 3. 清理沙箱
         if sandbox_state is not None:
-            self._collect_error(
-                cleanup_errors,
-                "sandbox_cleanup",
-                lambda: self._cleanup_sandbox(agent_id),
-            )
+            try:
+                self._cleanup_sandbox(agent_id)
+            except Exception as exc:
+                cleanup_errors.append({"stage": "sandbox_cleanup", "error": self._error_message(exc)})
 
         # 4. 保留 workspace 目录（不清除）
 
         # 5. 更新 agent 状态
-        self._collect_error(
-            cleanup_errors,
-            "agent_status",
-            lambda: self._repository.update_agent_status(agent_id, AgentStatus.deleted),
-        )
+        agent_delete_error = None
+        try:
+            self._repository.update_agent_status(agent_id, AgentStatus.deleted)
+            logger.info(f"[AgentManager] Agent status updated to deleted in database")
+        except Exception as exc:
+            agent_delete_error = exc
+            cleanup_errors.append({"stage": "agent_status", "error": self._error_message(exc)})
+            logger.error(f"[AgentManager] Failed to update agent status: {exc}")
+
+        # 对于删除操作，如果沙箱进程已不存在（"Sandbox handle was not found"），
+        # 即使沙箱清理失败也应该允许删除成功
+        if agent_delete_error is None and len(cleanup_errors) > 0:
+            # 检查是否只有 sandbox_cleanup 错误且错误信息包含 "Sandbox handle was not found"
+            non_sandbox_handle_errors = [
+                err for err in cleanup_errors
+                if not (err["stage"] == "sandbox_cleanup" and "Sandbox handle was not found" in err["error"])
+            ]
+            if len(non_sandbox_handle_errors) == 0:
+                # 只有 "Sandbox handle was not found" 错误，允许删除成功
+                logger.warning(
+                    f"[AgentManager] Agent {agent_id} deleted, but sandbox was already gone: {cleanup_errors}"
+                )
+                return
 
         if cleanup_errors:
             self._raise_operation_failed(

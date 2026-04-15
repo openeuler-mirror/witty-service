@@ -158,7 +158,12 @@ class SqliteRepository:
 
     def list_agents(self) -> list[AgentRecord]:
         with self._session_factory() as session:
-            rows = session.query(AgentORM).order_by(AgentORM.created_at.asc()).all()
+            rows = (
+                session.query(AgentORM)
+                .filter(AgentORM.status != AgentStatus.deleted.value)
+                .order_by(AgentORM.created_at.asc())
+                .all()
+            )
             return [self._to_agent_record(row) for row in rows]
 
     def update_agent_status(
