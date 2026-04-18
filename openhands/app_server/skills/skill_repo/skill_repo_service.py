@@ -7,14 +7,14 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Callable
+from typing import Callable, TypedDict
 from urllib.parse import urlparse
 from uuid import uuid4
 from zipfile import ZipFile
 
 import frontmatter
 import yaml
-from sqlalchemy import Column, String, UniqueConstraint, desc, select
+from sqlalchemy import Column, Integer, String, UniqueConstraint, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.agent_server.utils import utc_now
@@ -38,6 +38,15 @@ from openhands.app_server.utils.sql_utils import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+class SkillRepoDiscoverStatusRow(TypedDict):
+    repo_id: str
+    repo_name: str
+    discover_status: str
+    skill_num: int
+
+
 DISCOVER_REPO_TIMEOUT_SECONDS = 30
 GIT_CLONE_RETRY_TIMES = 3
 
@@ -101,7 +110,8 @@ class StoredSkillRepoDiscoveryCache(Base):  # type: ignore
     repo_id = Column(String, primary_key=True)
     repo_name = Column(String, nullable=False)
     discover_status = Column(String, nullable=False, default='done')
-    payload = Column(
+    skill_num = Column(Integer, nullable=False, default=0)
+    discovered_skills = Column(
         create_json_type_decorator(list[dict[str, object]]), nullable=False
     )
     updated_at = Column(UtcDateTime, nullable=False, default=utc_now)
@@ -346,7 +356,7 @@ class SkillRepoService:
             for cached in cached_rows:
                 items.extend(
                     SkillDiscoveryItem.model_validate(item)
-                    for item in (cached.payload or [])
+                    for item in (cached.discovered_skills or [])
                 )
             return items
         except Exception as exc:
@@ -371,13 +381,13 @@ class SkillRepoService:
         try:
             return [
                 SkillDiscoveryItem.model_validate(item)
-                for item in (cached.payload or [])
+                for item in (cached.discovered_skills or [])
             ]
         except Exception as exc:
             _logger.warning('Failed to parse discovery cache: %s', exc)
             return []
 
-    async def get_discover_status(self) -> list[dict[str, str]]:
+    async def get_discover_status(self) -> list[SkillRepoDiscoverStatusRow]:
         user_id = await self._require_user_id()
         result = await self.db_session.execute(
             select(StoredSkillRepoDiscoveryCache).where(
@@ -390,6 +400,7 @@ class SkillRepoService:
                 'repo_id': row.repo_id,
                 'repo_name': row.repo_name,
                 'discover_status': row.discover_status,
+                'skill_num': row.skill_num,
             }
             for row in rows
         ]
@@ -451,7 +462,7 @@ class SkillRepoService:
                 StoredSkillRepoDiscoveryCache.user_id == user_id,
             )
         )
-        for repo_id, (repo_name, payload) in grouped_payload.items():
+        for repo_id, (repo_name, discovered_skills) in grouped_payload.items():
             if repo_id not in owned_repo_ids:
                 _logger.info(
                     'Skip caching discovery result for repo %s (%s): not owned',
@@ -465,7 +476,8 @@ class SkillRepoService:
                     repo_id=repo_id,
                     repo_name=repo_name,
                     discover_status=statuses.get(repo_id, 'done'),
-                    payload=payload,
+                    skill_num=len(discovered_skills),
+                    discovered_skills=discovered_skills,
                     updated_at=utc_now(),
                 )
             )
@@ -484,7 +496,7 @@ class SkillRepoService:
             )
             return
         repo_name = stored.name
-        payload = [item.model_dump(mode='json') for item in items]
+        discovered_skills = [item.model_dump(mode='json') for item in items]
         result = await self.db_session.execute(
             select(StoredSkillRepoDiscoveryCache).where(
                 StoredSkillRepoDiscoveryCache.user_id == user_id,
@@ -498,14 +510,16 @@ class SkillRepoService:
                 repo_id=repo_id,
                 repo_name=repo_name,
                 discover_status=status,
-                payload=payload,
+                skill_num=len(discovered_skills),
+                discovered_skills=discovered_skills,
                 updated_at=utc_now(),
             )
             self.db_session.add(cached)
         else:
             cached.repo_name = repo_name
             cached.discover_status = status
-            cached.payload = payload
+            cached.skill_num = len(discovered_skills)
+            cached.discovered_skills = discovered_skills
             cached.updated_at = utc_now()
         await self.db_session.commit()
 
@@ -581,13 +595,15 @@ class SkillRepoService:
                 repo_id=repo.repo_id,
                 repo_name=repo.name,
                 discover_status=status,
-                payload=[],
+                skill_num=0,
+                discovered_skills=[],
                 updated_at=utc_now(),
             )
             self.db_session.add(cached)
         else:
             cached.repo_name = repo.name
             cached.discover_status = status
+            cached.skill_num = len(cached.discovered_skills or [])
             cached.updated_at = utc_now()
         await self.db_session.commit()
 

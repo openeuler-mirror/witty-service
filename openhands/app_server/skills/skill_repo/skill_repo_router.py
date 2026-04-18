@@ -26,6 +26,7 @@ class SkillRepoDiscoverStatusItem(BaseModel):
     repo_id: str
     repo_name: str
     discover_status: str
+    skill_num: int
 
 
 class SkillRepoDiscoverStatus(BaseModel):
@@ -183,5 +184,13 @@ async def get_discover_status(
         raw_items = await service.get_discover_status()
     except PermissionError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
-    items = [SkillRepoDiscoverStatusItem(**item) for item in raw_items]
+    items = [
+        SkillRepoDiscoverStatusItem(
+            repo_id=item['repo_id'],
+            repo_name=item['repo_name'],
+            discover_status=item['discover_status'],
+            skill_num=item['skill_num'],
+        )
+        for item in raw_items
+    ]
     return SkillRepoDiscoverStatus(items=items)
