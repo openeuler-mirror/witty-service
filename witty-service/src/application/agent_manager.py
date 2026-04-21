@@ -144,6 +144,40 @@ class AgentManager:
         self._ws_client_pool = ws_client_pool or WebSocketClientPool()
         self._logger = logging.getLogger(__name__)
 
+    def list_agent_skills(self, agent_id: str) -> list[dict[str, Any]]:
+        """查询当前 agent 对应 runtime 支持的 skills。"""
+        sandbox_state = self._get_sandbox_state(agent_id)
+        self._logger.info("Listing agent skills: agent_id=%s base_url=%s", agent_id, sandbox_state.adapter_base_url)
+
+        client: httpx.Client | None = None
+        try:
+            client = httpx.Client(base_url=sandbox_state.adapter_base_url, timeout=30.0)
+            response = client.get("/agent/skills")
+            response.raise_for_status()
+            payload = response.json()
+
+            if isinstance(payload, list):
+                skills = payload
+            else:
+                skills = payload.get("skills", []) if isinstance(payload, dict) else []
+
+            if not isinstance(skills, list):
+                self._logger.warning(
+                    "Agent skills response has invalid format: agent_id=%s payload_type=%s",
+                    agent_id,
+                    type(payload).__name__,
+                )
+                return []
+
+            self._logger.info("Listed agent skills successfully: agent_id=%s skill_count=%s", agent_id, len(skills))
+            return [item for item in skills if isinstance(item, dict)]
+        except Exception:
+            self._logger.exception("Failed to list agent skills: agent_id=%s", agent_id)
+            raise
+        finally:
+            if client is not None:
+                client.close()
+
     def create_agent(self, request: AgentCreateRequest) -> AgentCreateResult:
         agent_id = str(uuid4())
         logger.info(f"[AgentManager] Creating agent: {request.name}, agent_id: {agent_id}")

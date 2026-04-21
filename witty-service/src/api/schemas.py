@@ -37,6 +37,7 @@ class AgentResponse(BaseModel):
     updated_at: datetime
     default_session_id: str | None = None
     process_port: int | None = None
+    skills: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SessionResponse(BaseModel):

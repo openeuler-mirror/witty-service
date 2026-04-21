@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, Request, Response, status
@@ -22,6 +23,7 @@ from src.domain.errors import DomainError
 from src.persistence.repositories import AgentRecord
 
 router = APIRouter(prefix="/api/v1/agents", tags=["agents"], dependencies=[Depends(require_bearer_auth)])
+logger = logging.getLogger(__name__)
 
 
 def get_services(request: Request) -> ServiceContainer:
@@ -58,6 +60,7 @@ def create_agent(
 
 @router.get("", response_model=list[AgentResponse])
 def list_agents(services: ServiceContainer = Depends(get_services)) -> list[AgentResponse]:
+    """列出 agent，并补充默认会话与 runtime skills 信息。"""
     agents = services.repository.list_agents()
     result = []
     for agent in agents:
@@ -76,12 +79,21 @@ def list_agents(services: ServiceContainer = Depends(get_services)) -> list[Agen
             if sandbox_state is not None:
                 process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
 
-        result.append(_to_agent_response(agent, default_session_id=default_session_id, process_port=process_port))
+        skills = _safe_list_agent_skills(manager=manager, agent=agent)
+        result.append(
+            _to_agent_response(
+                agent,
+                default_session_id=default_session_id,
+                process_port=process_port,
+                skills=skills,
+            )
+        )
     return result
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
 def get_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> AgentResponse:
+    """获取单个 agent，并补充默认会话与 runtime skills 信息。"""
     manager = services.get_agent_manager_for_agent(agent_id)
 
     # 检查沙箱健康状态，如果进程停止则更新 agent 状态为 error
@@ -91,7 +103,7 @@ def get_agent(agent_id: str, services: ServiceContainer = Depends(get_services))
         # 沙箱进程已停止
         sessions = services.session_manager.list_sessions(agent_id)
         default_session_id = sessions[0].id if sessions else None
-        return _to_agent_response(agent, default_session_id=default_session_id, process_port=None)
+        return _to_agent_response(agent, default_session_id=default_session_id, process_port=None, skills=[])
 
     if agent is None:
         raise DomainError(
@@ -109,7 +121,8 @@ def get_agent(agent_id: str, services: ServiceContainer = Depends(get_services))
         if sandbox_state is not None:
             process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
 
-    return _to_agent_response(agent, default_session_id=default_session_id, process_port=process_port)
+    skills = _safe_list_agent_skills(manager=manager, agent=agent)
+    return _to_agent_response(agent, default_session_id=default_session_id, process_port=process_port, skills=skills)
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -121,20 +134,23 @@ async def delete_agent(agent_id: str, services: ServiceContainer = Depends(get_s
 
 @router.post("/{agent_id}/pause", response_model=AgentResponse)
 def pause_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> AgentResponse:
+    """暂停 agent。"""
     manager = services.get_agent_manager_for_agent(agent_id)
     agent = manager.pause_agent(agent_id)
     sessions = services.session_manager.list_sessions(agent_id)
     default_session_id = sessions[0].id if sessions else None
-    return _to_agent_response(agent, default_session_id=default_session_id)
+    return _to_agent_response(agent, default_session_id=default_session_id, skills=[])
 
 
 @router.post("/{agent_id}/resume", response_model=AgentResponse)
 async def resume_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> AgentResponse:
+    """恢复 agent。"""
     manager = services.get_agent_manager_for_agent(agent_id)
     agent = await manager.resume_agent(agent_id)
     sessions = services.session_manager.list_sessions(agent_id)
     default_session_id = sessions[0].id if sessions else None
-    return _to_agent_response(agent, default_session_id=default_session_id)
+    skills = _safe_list_agent_skills(manager=manager, agent=agent)
+    return _to_agent_response(agent, default_session_id=default_session_id, skills=skills)
 
 
 @router.get("/{agent_id}/sessions", response_model=list[SessionResponse])
@@ -256,7 +272,13 @@ async def send_message_stream(
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-def _to_agent_response(agent: AgentRecord, default_session_id: str | None, process_port: int | None = None) -> AgentResponse:
+def _to_agent_response(
+    agent: AgentRecord,
+    default_session_id: str | None,
+    process_port: int | None = None,
+    skills: list[dict[str, Any]] | None = None,
+) -> AgentResponse:
+    """组装 agent API 响应。"""
     return AgentResponse(
         id=agent.id,
         name=agent.name,
@@ -272,7 +294,20 @@ def _to_agent_response(agent: AgentRecord, default_session_id: str | None, proce
         updated_at=agent.updated_at,
         default_session_id=default_session_id,
         process_port=process_port,
+        skills=skills or [],
     )
+
+
+def _safe_list_agent_skills(manager: Any, agent: AgentRecord) -> list[dict[str, Any]]:
+    """安全获取 agent skills，失败时降级为空列表。"""
+    if agent.status == AgentStatus.error:
+        return []
+
+    try:
+        return manager.list_agent_skills(agent.id)
+    except Exception:
+        logger.warning("Failed to fetch agent skills, fallback to empty list: agent_id=%s", agent.id, exc_info=True)
+        return []
 
 
 def _format_sse_data(event: dict[str, Any]) -> str:
