@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import subprocess
@@ -12,6 +13,7 @@ from uuid import uuid4
 from zipfile import ZipFile
 
 import frontmatter
+import yaml
 from sqlalchemy import Column, String, UniqueConstraint, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +38,8 @@ from openhands.app_server.utils.sql_utils import (
 )
 
 _logger = logging.getLogger(__name__)
+DISCOVER_REPO_TIMEOUT_SECONDS = 30
+GIT_CLONE_RETRY_TIMES = 3
 
 
 class _BackgroundUserContext(UserContext):
@@ -158,6 +162,11 @@ class SkillRepoService:
                 db_session=session,
                 user_context=_BackgroundUserContext(user_id),
             )
+            _logger.info(
+                'Background discover started for repo %s (user %s)',
+                repo_id,
+                user_id,
+            )
             try:
                 await service.discover_one_repo_skill(repo_id)
             except Exception as exc:
@@ -261,9 +270,34 @@ class SkillRepoService:
         self, repo_id: str, *, include_content: bool = False
     ) -> list[SkillDiscoveryItem]:
         stored = await self._get_owned_repo(repo_id)
+        user_id = await self._require_user_id()
+        result = await self.db_session.execute(
+            select(StoredSkillRepoDiscoveryCache).where(
+                StoredSkillRepoDiscoveryCache.user_id == user_id,
+                StoredSkillRepoDiscoveryCache.repo_id == repo_id,
+            )
+        )
+        cached = result.scalar_one_or_none()
+        if cached is not None and cached.discover_status == 'discovering':
+            _logger.warning(
+                'Skill repo discovery already in progress for repo %s (user %s)',
+                repo_id,
+                user_id,
+            )
+            raise ValueError('Skill repo discovery is already in progress')
+
         await self._set_discovery_status(stored, 'discovering')
+        _logger.info(
+            'Marking skill discovery: repo_id=%s, user=%s, status=discovering',
+            repo_id,
+            user_id,
+        )
+
         try:
-            repo_skills = self._discover_repo_skills(stored)
+            repo_skills = await asyncio.wait_for(
+                asyncio.to_thread(self._discover_repo_skills, stored),
+                timeout=DISCOVER_REPO_TIMEOUT_SECONDS,
+            )
             items = [
                 SkillDiscoveryItem(
                     key=skill.key,
@@ -281,15 +315,20 @@ class SkillRepoService:
             await self._store_discovery_cache_for_one_repo(
                 repo_id, items, status='done'
             )
+            _logger.info(
+                'Marking skill discovery: repo_id=%s, user=%s, status=done',
+                repo_id,
+                user_id,
+            )
             return items
         except Exception as exc:
-            _logger.warning(
-                'Failed to discover skills from repo %s (%s): %s',
-                stored.repo_id,
-                stored.name,
+            await self._store_discovery_cache_for_one_repo(repo_id, [], status='failed')
+            _logger.error(
+                'Marking skill discovery: repo_id=%s, user=%s, status=failed: %s',
+                repo_id,
+                user_id,
                 exc,
             )
-            await self._store_discovery_cache_for_one_repo(repo_id, [], status='failed')
             return []
 
     async def get_discovered_repos_skill(self) -> list[SkillDiscoveryItem]:
@@ -603,8 +642,12 @@ class SkillRepoService:
                 StoredSkillRepo.name == repo_name,
             )
         )
-        if result.scalar_one_or_none() is not None:
-            raise ValueError(f'Skill repo "{repo_name}" already exists')
+        existing_repo = result.scalar_one_or_none()
+        if existing_repo is not None:
+            raise ValueError(
+                f'Skill repo "{repo_name}" already exists with repo_id '
+                f'"{existing_repo.repo_id}"'
+            )
 
     def _validate_source_fields(
         self,
@@ -653,17 +696,40 @@ class SkillRepoService:
         source_type = self._coerce_source_type(repo.source_type)
         if source_type == SkillRepoSourceType.LOCAL_IMPORT:
             if repo.local_path is None:
+                _logger.warning(
+                    'Discover repo skills skipped for repo_id=%s: local_path is empty',
+                    repo.repo_id,
+                )
                 return []
             local_path = Path(repo.local_path).expanduser().resolve(strict=False)
             if local_path.is_file() and local_path.suffix == '.zip':
+                _logger.info(
+                    'Discover repo skills treating repo_id=%s, local_path=%s as local archive',
+                    repo.repo_id,
+                    local_path,
+                )
                 return self._discover_local_archive_skills(repo, local_path)
+            _logger.info(
+                'Discover repo skills treating repo_id=%s, local_path=%s as local repo',
+                repo.repo_id,
+                local_path,
+            )
             return self._scan_local_repo(repo=repo, repo_root=local_path)
+        _logger.info(
+            'Discover repo skills treating repo_id=%s, repo_url=%s as git repo url',
+            repo.repo_id,
+            repo.url,
+        )
         return self._discover_git_repo_skills(repo)
 
     def _discover_git_repo_skills(
         self, repo: StoredSkillRepo
     ) -> list[DiscoveredRepoSkill]:
         if repo.url is None:
+            _logger.warning(
+                'Git discover skipped for repo_id=%s: repo url is empty',
+                repo.repo_id,
+            )
             return []
 
         with TemporaryDirectory() as temp_dir:
@@ -672,19 +738,59 @@ class SkillRepoService:
             if repo.branch:
                 command.extend(['--branch', repo.branch])
             command.extend([repo.url, str(clone_dir)])
-            subprocess.run(command, check=True, capture_output=True, text=True)
+            _logger.info(
+                'Git discover cloning repo_id=%s url=%s branch=%s into %s',
+                repo.repo_id,
+                repo.url,
+                repo.branch,
+                clone_dir,
+            )
+            last_exc: subprocess.CalledProcessError | None = None
+            for attempt in range(1, GIT_CLONE_RETRY_TIMES + 1):
+                try:
+                    subprocess.run(command, check=True, capture_output=True, text=True)
+                    break
+                except subprocess.CalledProcessError as exc:
+                    last_exc = exc
+                    _logger.warning(
+                        'Failed to clone repo_id=%s url=%s on branch %s (attempt %s/%s): %s',
+                        repo.repo_id,
+                        repo.url,
+                        repo.branch,
+                        attempt,
+                        GIT_CLONE_RETRY_TIMES,
+                        exc.stderr,
+                    )
+            else:
+                assert last_exc is not None
+                raise last_exc
             return self._scan_git_repo(repo=repo, repo_root=clone_dir)
 
     def _discover_local_archive_skills(
         self, repo: StoredSkillRepo, archive_path: Path
     ) -> list[DiscoveredRepoSkill]:
+        _logger.info(
+            'Local archive discover start for repo_id=%s archive_path=%s',
+            repo.repo_id,
+            archive_path,
+        )
         with TemporaryDirectory() as temp_dir:
             extract_dir = Path(temp_dir) / 'archive'
             extract_dir.mkdir(parents=True, exist_ok=True)
+            _logger.info(
+                'Extracting local archive for repo_id=%s into %s',
+                repo.repo_id,
+                extract_dir,
+            )
             with ZipFile(archive_path) as archive:
                 archive.extractall(extract_dir)
 
             repo_root = self._find_archive_repo_root(extract_dir)
+            _logger.info(
+                'Local archive discover resolved repo root for repo_id=%s: %s',
+                repo.repo_id,
+                repo_root,
+            )
             return self._scan_local_repo(repo=repo, repo_root=repo_root)
 
     def _find_archive_repo_root(self, extract_dir: Path) -> Path:
@@ -712,6 +818,11 @@ class SkillRepoService:
         # If root contains SKILL.md, treat it as a single-skill import.
         root_skill = repo_root / 'SKILL.md'
         if root_skill.exists():
+            _logger.info(
+                'Local repo scan found root SKILL.md for repo_id=%s at %s',
+                repo.repo_id,
+                root_skill,
+            )
             return self._scan_repo_root(
                 repo=repo,
                 repo_root=repo_root,
@@ -719,6 +830,11 @@ class SkillRepoService:
                 only_root=True,
             )
         repo_name_hint = repo_root.name or 'repo'
+        _logger.info(
+            'Local repo scan using nested SKILL.md discovery for repo_id=%s repo_name_hint=%s',
+            repo.repo_id,
+            repo_name_hint,
+        )
 
         def _local_name_builder(
             skill_name: str, repo_name_hint: str = repo_name_hint
@@ -741,6 +857,11 @@ class SkillRepoService:
         only_root: bool,
     ) -> list[DiscoveredRepoSkill]:
         if not repo_root.exists():
+            _logger.warning(
+                'Repo root scan skipped for repo_id=%s: repo_root does not exist (%s)',
+                repo.repo_id,
+                repo_root,
+            )
             return []
 
         if only_root:
@@ -751,31 +872,146 @@ class SkillRepoService:
                 for path in repo_root.rglob('*')
                 if path.is_file() and path.name == 'SKILL.md'
             )
+        _logger.info(
+            'Repo root scan collected %s skill file(s) for repo_id=%s from %s (only_root=%s)',
+            len(skill_files),
+            repo.repo_id,
+            repo_root,
+            only_root,
+        )
 
         discovered: list[DiscoveredRepoSkill] = []
         for skill_file in skill_files:
             if not skill_file.exists():
+                _logger.warning(
+                    'Repo root scan skipping missing skill file for repo_id=%s: %s',
+                    repo.repo_id,
+                    skill_file,
+                )
                 continue
-            loaded = frontmatter.load(
-                io.StringIO(skill_file.read_text(encoding='utf-8'))
-            )
-            metadata = loaded.metadata or {}
+            try:
+                metadata, content = self._load_skill_frontmatter(skill_file)
+            except Exception as exc:
+                raise ValueError(
+                    f'Failed to parse skill file {skill_file}: {exc}'
+                ) from exc
             triggers = self._normalize_repo_triggers(metadata.get('triggers'))
             skill_name = self._derive_repo_skill_name(skill_file, metadata)
-            discovered.append(
-                DiscoveredRepoSkill(
-                    key=self._build_repo_skill_key(repo, repo_root, skill_file),
-                    name=name_builder(skill_name, repo_root.name),
-                    activation_type=self._get_repo_activation_type(
-                        metadata=metadata,
-                        triggers=triggers,
-                    ),
+            discovered_skill = DiscoveredRepoSkill(
+                key=self._build_repo_skill_key(repo, repo_root, skill_file),
+                name=name_builder(skill_name, repo_root.name),
+                activation_type=self._get_repo_activation_type(
+                    metadata=metadata,
                     triggers=triggers,
-                    origin_path=self._to_repo_relative_path(repo_root, skill_file),
-                    content=loaded.content,
-                )
+                ),
+                triggers=triggers,
+                origin_path=self._to_repo_relative_path(repo_root, skill_file),
+                content=content,
             )
+            discovered.append(discovered_skill)
+        _logger.info(
+            'Repo root scan completed for repo_id=%s with %s discovered skill(s)',
+            repo.repo_id,
+            len(discovered),
+        )
         return discovered
+
+    def _load_skill_frontmatter(
+        self, skill_file: Path
+    ) -> tuple[dict[str, object], str]:
+        text = skill_file.read_text(encoding='utf-8')
+        """
+        先标准 YAML/frontmatter解析
+        标准解析失败：自动降级到宽松解析
+        """
+        try:
+            loaded = frontmatter.load(io.StringIO(text))
+            return loaded.metadata or {}, loaded.content
+        except Exception as exc:
+            # 外部 skill 仓库里的 frontmatter 不一定是严格合法的 YAML，
+            # 标准解析失败后降级到宽松解析，尽量避免单个 SKILL.md 影响整个 discover。
+            _logger.warning(
+                'Standard frontmatter parse failed for %s, falling back to lenient parser: %s',
+                skill_file,
+                exc,
+            )
+            return self._load_skill_frontmatter_lenient(text)
+
+    def _load_skill_frontmatter_lenient(
+        self, text: str
+    ) -> tuple[dict[str, object], str]:
+        stripped = text.lstrip()
+        if not stripped.startswith('---'):
+            return {}, text.strip()
+
+        parts = stripped.split('---', maxsplit=2)
+        if len(parts) < 3:
+            return {}, text.strip()
+
+        raw_frontmatter = parts[1]
+        content = parts[2].lstrip('\r\n')
+
+        metadata: dict[str, object] = {}
+        current_key: str | None = None
+        for line in raw_frontmatter.splitlines():
+            stripped_line = line.strip()
+            if not stripped_line or stripped_line.startswith('#'):
+                continue
+
+            # 宽松模式下仅对 triggers 的多行列表做最小兼容，其余字段按单行 key:value 处理。
+            if stripped_line.startswith('- ') and current_key == 'triggers':
+                triggers = metadata.setdefault('triggers', [])
+                if isinstance(triggers, list):
+                    trigger = stripped_line[2:].strip()
+                    if trigger:
+                        triggers.append(trigger)
+                continue
+
+            if ':' not in line:
+                if current_key is not None:
+                    existing = metadata.get(current_key)
+                    if isinstance(existing, str):
+                        metadata[current_key] = f'{existing} {stripped_line}'.strip()
+                continue
+
+            key, value = line.split(':', 1)
+            current_key = key.strip()
+            cleaned_value = value.strip()
+            metadata[current_key] = self._parse_lenient_frontmatter_value(
+                current_key, cleaned_value
+            )
+
+        return metadata, content.strip()
+
+    def _parse_lenient_frontmatter_value(self, key: str, value: str) -> object:
+        if not value:
+            if key == 'triggers':
+                return []
+            return ''
+
+        if key == 'triggers':
+            # 先尝试保留合法 YAML 列表/字符串的语义，失败时再退回到原始文本。
+            try:
+                parsed = yaml.safe_load(value)
+            except Exception:
+                parsed = None
+
+            if isinstance(parsed, list):
+                return [item.strip() for item in parsed if isinstance(item, str)]
+            if isinstance(parsed, str):
+                return [parsed.strip()] if parsed.strip() else []
+            return [value] if value else []
+
+        try:
+            parsed = yaml.safe_load(value)
+        except Exception:
+            parsed = None
+
+        # 对 description 这类包含额外冒号的字段，解析失败时直接保留原文，
+        # 避免因为非严格 YAML 写法丢失信息。
+        if isinstance(parsed, (str, int, float, bool)) or parsed is None:
+            return value if parsed is None else parsed
+        return value
 
     def _parse_git_owner_repo(self, url: str | None) -> tuple[str, str]:
         # Best-effort parsing for common git URL formats.
