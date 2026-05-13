@@ -11,11 +11,7 @@ from fastapi import (
 )
 
 from src.api.auth import require_bearer_auth
-from src.api.schemas import (
-    CreateSkillRepositoryRequest,
-    SkillRepositoryResponse,
-    UpdateSkillRepositoryRequest,
-)
+from src.api.schemas import SkillRepositoryRequest, SkillRepositoryResponse
 from src.api.services import ServiceContainer
 from src.application.skill_manager import SkillManager
 from src.persistence.repositories import SkillRepositoryRecord
@@ -52,7 +48,7 @@ def list_skill_repositories(
     status_code=status.HTTP_201_CREATED,
 )
 def create_skill_repository(
-    payload: CreateSkillRepositoryRequest,
+    payload: SkillRepositoryRequest,
     background_tasks: BackgroundTasks,
     services: ServiceContainer = Depends(get_services),
 ) -> SkillRepositoryResponse:
@@ -72,7 +68,7 @@ def create_skill_repository(
 @router.patch('/repos/{repo_id}', response_model=SkillRepositoryResponse)
 def update_skill_repository(
     repo_id: str,
-    payload: UpdateSkillRepositoryRequest,
+    payload: SkillRepositoryRequest,
     services: ServiceContainer = Depends(get_services),
 ) -> SkillRepositoryResponse:
     service = _build_service(services)

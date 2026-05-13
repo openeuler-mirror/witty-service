@@ -12,11 +12,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 from zipfile import ZipFile
 
-from src.api.schemas import (
-    CreateSkillRepositoryRequest,
-    SkillRepositorySourceType,
-    UpdateSkillRepositoryRequest,
-)
+from src.api.schemas import SkillRepositoryRequest, SkillRepositorySourceType
 from src.persistence.repositories import SkillRepositoryRecord, SqliteRepository
 
 _logger = logging.getLogger(__name__)
@@ -52,7 +48,7 @@ class SkillManager:
         return self.repository.list_skill_repositories()
 
     def create_skill_repository(
-        self, request: CreateSkillRepositoryRequest
+        self, request: SkillRepositoryRequest
     ) -> SkillRepositoryRecord:
         normalized = self._normalize_create_request(request)
         repository_name = self._derive_repository_name(normalized)
@@ -63,7 +59,7 @@ class SkillManager:
             )
         return self.repository.create_skill_repository(
             name=repository_name,
-            source_type=normalized.source_type.value,
+            source_type=normalized.source_type,
             branch=normalized.branch,
             url=normalized.url,
             local_path=normalized.local_path,
@@ -72,12 +68,10 @@ class SkillManager:
     def update_skill_repository(
         self,
         repo_id: str,
-        request: UpdateSkillRepositoryRequest,
+        request: SkillRepositoryRequest,
     ) -> SkillRepositoryRecord:
         stored = self._get_owned_repo(repo_id)
-        source_type = request.source_type or self._coerce_source_type(
-            stored.source_type
-        )
+        source_type = request.source_type or stored.source_type
         branch = request.branch.strip() if request.branch is not None else stored.branch
         url = (
             self._normalize_git_clone_url(request.url.strip())
@@ -198,8 +192,11 @@ class SkillManager:
         )
 
     def _normalize_create_request(
-        self, request: CreateSkillRepositoryRequest
-    ) -> CreateSkillRepositoryRequest:
+        self, request: SkillRepositoryRequest
+    ) -> SkillRepositoryRequest:
+        if request.source_type is None:
+            raise ValueError('source_type is required')
+
         branch = request.branch.strip() if request.branch is not None else None
         url = (
             self._normalize_git_clone_url(request.url.strip())
@@ -214,7 +211,7 @@ class SkillManager:
             url=url,
             local_path=local_path,
         )
-        return CreateSkillRepositoryRequest(
+        return SkillRepositoryRequest(
             source_type=request.source_type,
             branch=branch,
             url=url,
@@ -241,7 +238,10 @@ class SkillManager:
             path = path[:-4]
         return f'{parsed.scheme}://{parsed.netloc}/{path}'
 
-    def _derive_repository_name(self, request: CreateSkillRepositoryRequest) -> str:
+    def _derive_repository_name(self, request: SkillRepositoryRequest) -> str:
+        if request.source_type is None:
+            raise ValueError('source_type is required')
+
         if request.source_type == SkillRepositorySourceType.GIT:
             if not request.url:
                 raise ValueError('git skill repositories require url')
@@ -280,10 +280,7 @@ class SkillManager:
     def _discover_skill_repository_skills(
         self, repo: SkillRepositoryRecord
     ) -> list[SkillObject]:
-        if (
-            self._coerce_source_type(repo.source_type)
-            == SkillRepositorySourceType.LOCAL_IMPORT
-        ):
+        if repo.source_type == SkillRepositorySourceType.LOCAL_IMPORT:
             return self._discover_local_skill_repository_skills(repo)
         return self._discover_git_skill_repository_skills(repo)
 
@@ -527,7 +524,7 @@ class SkillManager:
         return SkillMinRepository(
             repo_id=repo.repo_id,
             name=repo.repo_name,
-            source_type=self._coerce_source_type(repo.source_type),
+            source_type=repo.source_type,
             branch=repo.branch,
             url=repo.url,
             local_path=repo.local_path,
@@ -539,10 +536,7 @@ class SkillManager:
         relative_path: str,
         repo_root: Path,
     ) -> str | None:
-        if (
-            self._coerce_source_type(repo.source_type)
-            == SkillRepositorySourceType.LOCAL_IMPORT
-        ):
+        if repo.source_type == SkillRepositorySourceType.LOCAL_IMPORT:
             return str((repo_root / relative_path).resolve(strict=False))
 
         if not repo.url:
@@ -589,14 +583,9 @@ class SkillManager:
             payload['source_repo'] = {
                 'repo_id': item.source_repo.repo_id,
                 'name': item.source_repo.name,
-                'source_type': item.source_repo.source_type.value,
+                'source_type': item.source_repo.source_type,
                 'branch': item.source_repo.branch,
                 'url': item.source_repo.url,
                 'local_path': item.source_repo.local_path,
             }
         return payload
-
-    def _coerce_source_type(self, source_type: str) -> SkillRepositorySourceType:
-        if source_type in {'zip_url', 'local_dir'}:
-            return SkillRepositorySourceType.LOCAL_IMPORT
-        return SkillRepositorySourceType(source_type)

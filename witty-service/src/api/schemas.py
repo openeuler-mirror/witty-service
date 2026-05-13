@@ -116,14 +116,7 @@ class SkillRepositorySourceType(str, Enum):
     LOCAL_IMPORT = 'local_import'
 
 
-class CreateSkillRepositoryRequest(BaseModel):
-    source_type: SkillRepositorySourceType
-    branch: str | None = None
-    url: str | None = None
-    local_path: str | None = None
-
-
-class UpdateSkillRepositoryRequest(BaseModel):
+class SkillRepositoryRequest(BaseModel):
     source_type: SkillRepositorySourceType | None = None
     branch: str | None = None
     url: str | None = None
