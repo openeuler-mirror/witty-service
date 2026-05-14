@@ -4,6 +4,7 @@ import sys
 from typing import Optional
 
 from witty_service.main import create_app
+from witty_service.workspace_init import init_workspace
 from uvicorn import run
 
 logging.basicConfig(
@@ -65,6 +66,7 @@ def main() -> None:
     logger.info(f"Log level: {args.log_level.upper()}")
 
     try:
+        init_workspace()
         run(
             create_app,
             host=args.host,

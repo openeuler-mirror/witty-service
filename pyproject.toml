@@ -65,6 +65,7 @@ changelog = "https://github.com/witty/witty-service/blob/main/CHANGELOG.md"
 [tool.setuptools]
 packages = [
     "witty_service",
+    "witty_service.data",
     "witty_service.api",
     "witty_service.adapter",
     "witty_service.application",
@@ -93,6 +94,7 @@ packages = [
     "witty_agent_server.logger",
 ]
 package-dir = {"witty_service" = "src/witty_service", "witty_agent_server" = "src/witty_agent_server"}
+package-data = {"witty_service.data" = ["*.tar.gz"]}
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

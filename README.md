@@ -30,7 +30,7 @@ uv pip install -e ".[dev]"
 ### 1.3 启动开发服务器
 
 ```bash
-uvicorn witty_service.main:create_app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn src.main:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
 建议准备：
@@ -58,7 +58,7 @@ uv pip install dist/witty_service-0.1.0-py3-none-any.whl
 ### 2.3 生产环境启动
 
 ```bash
-witty-service --host 0.0.0.0 --port 8000 --workers 4
+uv run witty-service --host 0.0.0.0 --port 8000 --workers 4
 ```
 
 ### 2.4 启动参数说明
