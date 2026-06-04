@@ -1,41 +1,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from pathlib import Path
 from threading import RLock
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from witty_agent_server.application.models.agent import Agent, AgentStatus
+from witty_agent_server.application.models.agent_start import AgentStartRequest
 from witty_agent_server.runtimes.runtime_base import RuntimeType
-
-
-@runtime_checkable
-class RuntimeWorkspaceResolverPort(Protocol):
-    """运行时工作目录解析端口。"""
-
-    def get_agent_spec_path(self, runtime: RuntimeType) -> Path: ...
-
-    def get_runtime_root(self, runtime: RuntimeType) -> Path: ...
-
-
-@runtime_checkable
-class OpenClawLifecyclePort(Protocol):
-    """OpenClaw 生命周期控制端口。"""
-
-    def probe_running(self) -> bool: ...
-
-    def stop(self) -> None: ...
-
-    def start(self) -> None: ...
-
-
-@runtime_checkable
-class GatewayAgentClientPort(Protocol):
-    """Gateway agent 读取端口。"""
-
-    def list_agents(self) -> dict[str, Any]: ...
-
-    def get_agent(self, *, agent_id: str) -> dict[str, Any] | None: ...
 
 
 class AgentServiceBase(ABC):
@@ -69,8 +40,7 @@ class AgentServiceBase(ABC):
     def start(
         self,
         *,
-        agent_id: str | None = None,
-        config: dict[str, Any] | None = None,
+        config: AgentStartRequest | None = None,
         reload: bool = False,
     ) -> Agent:
         """启动 agent。"""
