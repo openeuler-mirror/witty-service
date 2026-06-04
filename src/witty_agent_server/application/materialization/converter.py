@@ -24,6 +24,12 @@ from witty_agent_server.application.materialization.core.io_utils import (
 from witty_agent_server.application.materialization.core.shell_utils import (
     run_cmd,
 )
+from witty_agent_server.application.materialization.openclaw_env import (
+    build_openclaw_env,
+)
+from witty_agent_server.application.materialization.openclaw_paths import (
+    resolve_openclaw_home_dir,
+)
 
 
 _RESOURCE_ROOT = Path(__file__).resolve().parent / "templates"
@@ -88,6 +94,30 @@ def _replace_template_tokens(text: str) -> str:
     return text.replace("${ACCESS_TOKEN}", token)
 
 
+def _load_existing_gateway_tokens(output_path: str) -> tuple[str | None, str | None]:
+    """读取已有配置中的 gateway token，避免重复 materialize 时凭证漂移。"""
+    path = Path(expand_path(output_path))
+    if not path.exists():
+        return None, None
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None, None
+    if not isinstance(body, dict):
+        return None, None
+    gateway = body.get("gateway")
+    if not isinstance(gateway, dict):
+        return None, None
+    auth = gateway.get("auth")
+    remote = gateway.get("remote")
+    auth_token = auth.get("token") if isinstance(auth, dict) else None
+    remote_token = remote.get("token") if isinstance(remote, dict) else None
+    return (
+        auth_token if isinstance(auth_token, str) and auth_token else None,
+        remote_token if isinstance(remote_token, str) and remote_token else None,
+    )
+
+
 def _contains_placeholder(value: str) -> bool:
     return "${" in value and "}" in value
 
@@ -140,7 +170,7 @@ def _assert_required_fields_resolved(cfg: dict[str, Any]) -> None:
 
 
 def _workspace_map(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    return spec.get("workspace") or {"default": {"path": "~/.openclaw/workspace"}}
+    return spec.get("workspace") or {"default": {}}
 
 
 def _subagents(spec: dict[str, Any]) -> list[dict[str, Any]]:
@@ -155,15 +185,24 @@ def _subagents(spec: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _resolve_workspace_ref(
-    expr: str | None, workspaces: dict[str, dict[str, Any]]
+    expr: str | None,
+    workspaces: dict[str, dict[str, Any]],
+    *,
+    openclaw_home: str,
 ) -> str:
     if not expr:
-        return expand_path(workspaces["default"]["path"])
+        default_workspace = workspaces.get("default", {}).get("path")
+        if not isinstance(default_workspace, str) or not default_workspace:
+            default_workspace = f"{openclaw_home}/workspace"
+        return expand_path(default_workspace)
     if expr.startswith("${workspace.") and expr.endswith("}"):
         key = expr[len("${workspace.") : -1]
         if key not in workspaces:
             raise ValueError(f"subAgent workspace 引用不存在: {expr}")
-        return expand_path(workspaces[key]["path"])
+        workspace_path = workspaces[key].get("path")
+        if not isinstance(workspace_path, str) or not workspace_path:
+            workspace_path = f"{openclaw_home}/workspace-{key}"
+        return expand_path(workspace_path)
     return expand_path(expr)
 
 
@@ -222,12 +261,33 @@ def _render_openclaw_base(
     template_text = read_text(options.template_path)
     template_text = _replace_template_tokens(template_text)
     cfg = json.loads(template_text)
+    existing_auth_token, existing_remote_token = _load_existing_gateway_tokens(
+        options.output_path
+    )
 
     models_cfg, default_model, aliases = _build_models(spec)
     cfg["models"] = models_cfg
+    gateway = cfg.setdefault("gateway", {})
+    if not isinstance(gateway, dict):
+        raise ValueError("gateway 配置必须是对象")
+    if existing_auth_token:
+        gateway.setdefault("auth", {})
+        if not isinstance(gateway["auth"], dict):
+            raise ValueError("gateway.auth 配置必须是对象")
+        gateway["auth"]["token"] = existing_auth_token
+    if existing_remote_token:
+        gateway.setdefault("remote", {})
+        if not isinstance(gateway["remote"], dict):
+            raise ValueError("gateway.remote 配置必须是对象")
+        gateway["remote"]["token"] = existing_remote_token
 
+    openclaw_home = str(Path(expand_path(options.output_path)).resolve().parent)
     workspaces = _workspace_map(spec)
-    default_ws = expand_path(workspaces["default"]["path"])
+    default_ws = _resolve_workspace_ref(
+        workspaces.get("default", {}).get("path"),
+        workspaces,
+        openclaw_home=openclaw_home,
+    )
 
     cfg.setdefault("agents", {}).setdefault("defaults", {})
     cfg["agents"]["defaults"]["workspace"] = default_ws
@@ -260,7 +320,11 @@ def _render_openclaw_base(
                 model = copy.deepcopy(default_model)
             item = {
                 "id": s["id"],
-                "workspace": _resolve_workspace_ref(s.get("workspace"), workspaces),
+                "workspace": _resolve_workspace_ref(
+                    s.get("workspace"),
+                    workspaces,
+                    openclaw_home=openclaw_home,
+                ),
                 "model": model,
                 "skills": [
                     x["name"] if isinstance(x, dict) and "name" in x else x
@@ -291,7 +355,7 @@ def _validate_openclaw(output_path: str) -> None:
     run_cmd(
         ["openclaw", "config", "validate"],
         check=True,
-        env={"OPENCLAW_STATE_DIR": state_dir},
+        env=build_openclaw_env(state_dir=state_dir),
     )
 
 
@@ -316,7 +380,7 @@ def _expected_mcp_names(spec: dict[str, Any]) -> list[str]:
 
 def _verify_openclaw_recognition(spec: dict[str, Any], output_path: str) -> None:
     state_dir = str(Path(expand_path(output_path)).resolve().parent)
-    env = {"OPENCLAW_STATE_DIR": state_dir}
+    env = build_openclaw_env(state_dir=state_dir)
     subagents = _subagents(spec)
 
     # base parseability/readability in active state dir
@@ -386,11 +450,21 @@ def _resolve_source(base_dir: str, rel: str) -> str:
 
 
 def _workspace_phase(
-    spec: dict[str, Any], spec_path: str, report: ConvertReport
+    spec: dict[str, Any],
+    spec_path: str,
+    report: ConvertReport,
+    openclaw_home: str,
 ) -> dict[str, str]:
     workspaces = _workspace_map(spec)
 
-    ws_paths = {name: expand_path(data["path"]) for name, data in workspaces.items()}
+    ws_paths: dict[str, str] = {}
+    for name, data in workspaces.items():
+        raw_path = data.get("path")
+        if not isinstance(raw_path, str) or not raw_path:
+            raw_path = f"{openclaw_home}/workspace"
+            if name != "default":
+                raw_path = f"{openclaw_home}/workspace-{name}"
+        ws_paths[name] = expand_path(raw_path)
 
     for name, ws in workspaces.items():
         path = ws_paths[name]
@@ -455,16 +529,6 @@ def _prompt_phase(
         lines.append(text)
         lines.append("")
     body = "\n".join(lines).rstrip()
-
-    body += """
-    ## Interruption Handling Rules
-
-    If your previous assistant response in the conversation history appears truncated, cut off, or incomplete (as if the user stopped you mid-response), you MUST:
-    1. Ignore that incomplete response entirely — do not continue it, do not complete it, do not reference it
-    2. Answer ONLY the user's latest message directly
-    3. Never mention that a previous response was interrupted, or phrases like "continuing from before"
-    4. If the user's new question relates to earlier discussion topics, you may use that contextual knowledge, but must directly address the new question rather than resuming the interrupted response
-    """
 
     begin = "<!-- BEGIN: IMPORTED_SYSTEM_PROMPT -->"
     end = "<!-- END: IMPORTED_SYSTEM_PROMPT -->"
@@ -541,6 +605,7 @@ def _skills_phase(
     spec: dict[str, Any],
     _ws_paths: dict[str, str],
     spec_path: str,
+    openclaw_home: str,
     apply_external: bool,
     report: ConvertReport,
 ) -> None:
@@ -550,14 +615,18 @@ def _skills_phase(
     for idx, entry in enumerate(global_skills):
         logger.debug("processing global_skills[%s]: %s", idx, entry)
         _install_or_materialize_skill(
-            entry, expand_path("~/.openclaw"), spec_path, apply_external, report
+            entry, openclaw_home, spec_path, apply_external, report
         )
     logger.debug("global_skills done")
 
     subagents = _subagents(spec)
     logger.debug("subagents count=%s", len(subagents))
     for sub_idx, sub in enumerate(subagents):
-        ws = _resolve_workspace_ref(sub.get("workspace"), _workspace_map(spec))
+        ws = _resolve_workspace_ref(
+            sub.get("workspace"),
+            _workspace_map(spec),
+            openclaw_home=openclaw_home,
+        )
         sub_skills = sub.get("skills") or []
         logger.debug(
             "subagents[%s] id=%s ws=%s skills count=%s",
@@ -580,7 +649,11 @@ def _skills_phase(
 
 
 def _normalize_mcp_server(
-    obj: dict[str, Any], source_dir: str | None, name_hint: str | None = None
+    obj: dict[str, Any],
+    source_dir: str | None,
+    name_hint: str | None = None,
+    *,
+    openclaw_home: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     name = obj.get("name") or name_hint
     if not name:
@@ -592,7 +665,7 @@ def _normalize_mcp_server(
     if obj.get("args"):
         args = list(obj["args"])
         if source_dir:
-            base = Path(expand_path(f"~/.openclaw/mcp/{name}"))
+            base = Path(openclaw_home or str(resolve_openclaw_home_dir())) / "mcp" / name
             normalized = []
             for a in args:
                 pa = Path(str(a))
@@ -610,8 +683,6 @@ def _normalize_mcp_server(
         server["workingDirectory"] = obj["workingDirectory"]
     if obj.get("url"):
         server["url"] = obj["url"]
-    if obj.get("timeout") is not None:
-        server["timeout"] = obj["timeout"]
     headers = copy.deepcopy(obj.get("headers") or {})
     api_key = obj.get("apiKey")
     if api_key and "Authorization" not in headers:
@@ -632,6 +703,7 @@ def _mcp_phase(
     spec: dict[str, Any],
     cfg: dict[str, Any],
     spec_path: str,
+    openclaw_home: str,
     apply_external: bool,
     report: ConvertReport,
 ) -> dict[str, Any]:
@@ -663,7 +735,7 @@ def _mcp_phase(
                 name = obj.get("name") or item.get("name")
                 if not name:
                     raise ValueError("local_link mcp 缺少 name")
-                dst = expand_path(f"~/.openclaw/mcp/{name}")
+                dst = str(Path(openclaw_home) / "mcp" / name)
                 if Path(src).exists():
                     ensure_dir(dst)
                     copy_tree(src, dst)
@@ -671,9 +743,12 @@ def _mcp_phase(
                     source_dir = dst
                 else:
                     raise FileNotFoundError(f"mcp[{name}] source 不存在: {src}")
-            name, server = _normalize_mcp_server(obj, source_dir, item.get("name"))
-            if item.get("timeout") is not None:
-                server["timeout"] = item["timeout"]
+            name, server = _normalize_mcp_server(
+                obj,
+                source_dir,
+                item.get("name"),
+                openclaw_home=openclaw_home,
+            )
             cfg["mcp"]["servers"][name] = server
             continue
 
@@ -762,9 +837,12 @@ def _mcp_phase(
             payload = json.loads(res.stdout)
             if not isinstance(payload, dict):
                 raise RuntimeError(f"mcporter 返回异常: {name}")
-            _, server = _normalize_mcp_server(payload, None, name)
-            if item.get("timeout") is not None:
-                server["timeout"] = item["timeout"]
+            _, server = _normalize_mcp_server(
+                payload,
+                None,
+                name,
+                openclaw_home=openclaw_home,
+            )
             cfg["mcp"]["servers"][name] = server
             continue
 
@@ -784,6 +862,7 @@ def _print_phase(idx: int, total: int, title: str) -> None:
 def convert_openclaw(options: ConvertOptions) -> ConvertReport:
     report = ConvertReport()
     output_abs = Path(expand_path(options.output_path))
+    openclaw_home = str(output_abs.resolve().parent)
     existed = output_abs.exists()
     previous = output_abs.read_bytes() if existed else None
     total_phases = 6 if options.verify_recognition else 5
@@ -801,7 +880,12 @@ def convert_openclaw(options: ConvertOptions) -> ConvertReport:
 
         # 2) workspace
         _print_phase(2, total_phases, "workspace 转换")
-        ws_paths = _workspace_phase(spec, options.spec_path, report)
+        ws_paths = _workspace_phase(
+            spec,
+            options.spec_path,
+            report,
+            openclaw_home,
+        )
 
         # 3) prompt
         _print_phase(3, total_phases, "prompt 处理")
@@ -809,11 +893,25 @@ def convert_openclaw(options: ConvertOptions) -> ConvertReport:
 
         # 4) skills
         _print_phase(4, total_phases, "skill 转换")
-        _skills_phase(spec, ws_paths, options.spec_path, options.apply_external, report)
+        _skills_phase(
+            spec,
+            ws_paths,
+            options.spec_path,
+            openclaw_home,
+            options.apply_external,
+            report,
+        )
 
         # 5) mcp
         _print_phase(5, total_phases, "mcp 转换")
-        cfg = _mcp_phase(spec, cfg, options.spec_path, options.apply_external, report)
+        cfg = _mcp_phase(
+            spec,
+            cfg,
+            options.spec_path,
+            openclaw_home,
+            options.apply_external,
+            report,
+        )
         _assert_required_fields_resolved(cfg)
         _write_config(cfg, options.output_path)
         _validate_openclaw(options.output_path)

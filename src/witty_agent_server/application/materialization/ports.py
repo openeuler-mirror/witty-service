@@ -14,4 +14,10 @@ class MaterializeReport:
 
 
 class SpecMaterializerPort(Protocol):
-    def materialize(self, spec_path: Path) -> MaterializeReport: ...
+    def materialize(
+        self,
+        spec_path: Path,
+        *,
+        output_path: Path | None = None,
+        profile_name: str | None = None,
+    ) -> MaterializeReport: ...

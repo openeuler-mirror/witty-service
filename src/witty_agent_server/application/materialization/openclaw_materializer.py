@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,12 +12,16 @@ from witty_agent_server.application.materialization.ports import (
     MaterializeReport,
     SpecMaterializerPort,
 )
+from witty_agent_server.application.materialization.openclaw_paths import (
+    resolve_openclaw_home_dir,
+    resolve_openclaw_output_path,
+)
 
 
 _TEMPLATE_PATH = (
     Path(__file__).resolve().parent / "templates" / "openclaw-template.json"
 )
-_DEFAULT_OUTPUT_PATH = Path.home() / ".openclaw" / "openclaw.json"
+logger = logging.getLogger(__name__)
 
 
 class OpenClawMaterializationError(RuntimeError):
@@ -36,11 +41,25 @@ class InvalidOpenClawSpecError(OpenClawMaterializationError):
 @dataclass(slots=True)
 class OpenClawSpecMaterializer(SpecMaterializerPort):
     template_path: Path = _TEMPLATE_PATH
-    output_path: Path = _DEFAULT_OUTPUT_PATH
+    output_path: Path = resolve_openclaw_output_path()
     apply_external: bool = True
     verify_recognition: bool = True
 
-    def materialize(self, spec_path: Path) -> MaterializeReport:
+    def __post_init__(self) -> None:
+        # 便于测试替换底层转换器，同时保持默认实现简单。
+        self._convert_openclaw = convert_openclaw
+
+    def resolve_profile_home(self, profile_name: str | None) -> Path:
+        """解析 profile 对应的 OpenClaw home 根目录。"""
+        return resolve_openclaw_home_dir(profile_name=profile_name)
+
+    def materialize(
+        self,
+        spec_path: Path,
+        *,
+        output_path: Path | None = None,
+        profile_name: str | None = None,
+    ) -> MaterializeReport:
         resolved_path = spec_path.resolve()
         if not resolved_path.is_file():
             raise SpecNotFoundError(
@@ -49,7 +68,11 @@ class OpenClawSpecMaterializer(SpecMaterializerPort):
             )
 
         try:
-            return self._convert_spec(resolved_path)
+            return self._convert_spec(
+                resolved_path,
+                output_path=output_path,
+                profile_name=profile_name,
+            )
         except ValueError as exc:
             raise InvalidOpenClawSpecError(
                 f"Invalid OpenClaw spec: {exc}",
@@ -61,12 +84,27 @@ class OpenClawSpecMaterializer(SpecMaterializerPort):
                 spec_path=resolved_path,
             ) from exc
 
-    def _convert_spec(self, spec_path: Path) -> MaterializeReport:
-        report = convert_openclaw(
+    def _convert_spec(
+        self,
+        spec_path: Path,
+        *,
+        output_path: Path | None = None,
+        profile_name: str | None = None,
+    ) -> MaterializeReport:
+        resolved_output_path = output_path or resolve_openclaw_output_path(
+            profile_name=profile_name
+        )
+        logger.info(
+            "convert openclaw spec: spec_path=%s output_path=%s profile=%s",
+            spec_path,
+            resolved_output_path,
+            profile_name,
+        )
+        report = self._convert_openclaw(
             ConvertOptions(
                 spec_path=str(spec_path),
                 template_path=str(self.template_path),
-                output_path=str(self.output_path),
+                output_path=str(resolved_output_path),
                 apply_external=self.apply_external,
                 verify_recognition=self.verify_recognition,
             )
@@ -93,4 +131,5 @@ __all__ = [
     "OpenClawSpecMaterializer",
     "SpecNotFoundError",
     "materialize",
+    "resolve_openclaw_output_path",
 ]
