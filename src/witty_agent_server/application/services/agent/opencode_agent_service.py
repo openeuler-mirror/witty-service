@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from witty_agent_server.application.models.agent import Agent
+from witty_agent_server.application.models.agent_start import AgentStartRequest
 from witty_agent_server.application.services.agent.base import AgentServiceBase
 from witty_agent_server.application.models.agent import AgentStatus
 from witty_agent_server.runtimes.runtime_base import RuntimeType
@@ -25,17 +25,20 @@ class OpenCodeAgentService(AgentServiceBase):
     def start(
         self,
         *,
-        agent_id: str | None = None,
-        config: dict[str, Any] | None = None,
+        config: AgentStartRequest | None = None,
         reload: bool = False,
     ) -> Agent:
         """启动 opencode agent，仅维护本地状态，不访问 Gateway。"""
         with self._lock:
             self._last_start_already_running = False
+            requested_agent_id = config.agent_id if config is not None else None
             if config is not None:
-                self._agent.config = dict(config)
-            if agent_id is not None:
-                self._agent.id = agent_id
+                self._agent.config = config.model_dump(
+                    exclude_none=True,
+                    exclude={"agent_id"},
+                )
+            if requested_agent_id is not None:
+                self._agent.id = requested_agent_id
             elif self._agent.id is None:
                 self._agent.id = "main"
 

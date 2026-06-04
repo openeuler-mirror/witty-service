@@ -14,24 +14,3 @@ class OpenCodeSkillService(AgentSkillServiceBase):
     def list_skills(self, *, agent_id: str | None = None) -> dict[str, Any]:
         del agent_id
         raise RuntimeSkillsNotSupportedError(runtime_type=self.runtime_type)
-
-    def install_skill(
-        self,
-        *,
-        agent_id: str | None = None,
-        skill_name: str,
-        source_path: str | None = None,
-    ) -> dict[str, Any]:
-        del agent_id, skill_name, source_path
-        raise RuntimeSkillsNotSupportedError(runtime_type=self.runtime_type)
-
-    def uninstall_skill(
-        self,
-        *,
-        agent_id: str | None = None,
-        skill_name: str,
-        source_type: str | None = None,
-        source_path: str | None = None,
-    ) -> dict[str, Any]:
-        del agent_id, skill_name, source_type, source_path
-        raise RuntimeSkillsNotSupportedError(runtime_type=self.runtime_type)
