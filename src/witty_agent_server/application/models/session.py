@@ -14,7 +14,3 @@ class SessionConfigSnapshot(BaseModel):
     mcp: dict[str, Any] = Field(default_factory=dict)
     tools: list[dict[str, Any]] = Field(default_factory=list)
     subagents: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class SessionCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
