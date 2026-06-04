@@ -4,8 +4,8 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 from witty_agent_server.application.models.errors import ErrorResponse
+from witty_agent_server.application.models.agent_start import AgentStartRequest
 from witty_agent_server.application.services.agent import (
     AgentService,
     AgentServiceError,
@@ -25,17 +25,6 @@ from witty_agent_server.application.services.skill.opencode_skill_service import
 logger = logging.getLogger(__name__)
 
 
-class InstallSkillRequest(BaseModel):
-    skill_name: str = Field(min_length=1)
-    source_path: str | None = None
-
-
-class UninstallSkillRequest(BaseModel):
-    skill_name: str = Field(min_length=1)
-    source_type: str | None = None
-    source_path: str | None = None
-
-
 def create_agent_router(
     agent_service: AgentService,
     openclaw_skill_service: OpenClawSkillService | None = None,
@@ -48,12 +37,24 @@ def create_agent_router(
     @router.post("/start", response_model=None)
     def start_agent(
         request: Request,
-        id: str | None = None,
+        body: AgentStartRequest | None = None,
         reload: bool = False,
     ) -> dict[str, Any] | JSONResponse:
         try:
+            start_config = _build_start_config(body=body)
+            agent_id = start_config.agent_id if start_config is not None else None
+            _require_agent_id(agent_id=agent_id)
+            _require_runtime_type(start_config=start_config)
+            logger.info(
+                "start_agent called, agent_id=%s runtime_type=%s deployment_mode=%s reload=%s",
+                agent_id,
+                start_config.runtime_type if start_config is not None else None,
+                start_config.deployment_mode if start_config is not None else None,
+                reload,
+            )
+
             response = agent_service.start(
-                agent_id=id,
+                config=start_config,
                 reload=reload,
             ).model_dump()
             response["already_running"] = agent_service.last_start_already_running
@@ -67,10 +68,7 @@ def create_agent_router(
         id: str | None = None,
     ) -> dict[str, Any] | JSONResponse:
         try:
-            resolved_agent_id = _resolve_request_agent_id(
-                agent_service=agent_service,
-                agent_id=id,
-            )
+            resolved_agent_id = _require_agent_id(agent_id=id)
             return agent_service.stop(agent_id=resolved_agent_id).model_dump()
         except AgentServiceError as exc:
             return _map_agent_error(request=request, exc=exc)
@@ -81,10 +79,7 @@ def create_agent_router(
         id: str | None = None,
     ) -> dict[str, Any] | JSONResponse:
         try:
-            resolved_agent_id = _resolve_request_agent_id(
-                agent_service=agent_service,
-                agent_id=id,
-            )
+            resolved_agent_id = _require_agent_id(agent_id=id)
             agent = agent_service.status(agent_id=resolved_agent_id)
         except AgentServiceError as exc:
             return _map_agent_error(request=request, exc=exc)
@@ -100,10 +95,7 @@ def create_agent_router(
         id: str | None = None,
     ) -> dict[str, Any] | JSONResponse:
         try:
-            resolved_agent_id = _resolve_request_agent_id(
-                agent_service=agent_service,
-                agent_id=id,
-            )
+            resolved_agent_id = _require_agent_id(agent_id=id)
             agent = agent_service.status(agent_id=resolved_agent_id)
         except AgentServiceError as exc:
             return _map_agent_error(request=request, exc=exc)
@@ -127,129 +119,6 @@ def create_agent_router(
                 exc.code,
             )
             return _map_agent_skill_error(request=request, exc=exc)
-
-    @router.post("/skills/install", response_model=None)
-    def install_agent_skill(
-        payload: InstallSkillRequest,
-        request: Request,
-        id: str | None = None,
-    ) -> dict[str, Any] | JSONResponse:
-        try:
-            resolved_agent_id = _resolve_request_agent_id(
-                agent_service=agent_service,
-                agent_id=id,
-            )
-            agent = agent_service.status(agent_id=resolved_agent_id)
-        except AgentServiceError as exc:
-            return _map_agent_error(request=request, exc=exc)
-        logger.info(
-            "install_agent_skill called, agent_id=%s runtime_type=%s skill_name=%s",
-            agent.id,
-            agent.runtime_type,
-            payload.skill_name,
-        )
-        try:
-            resolved_skill_service = _resolve_skill_service(
-                runtime_type=agent.runtime_type,
-                openclaw_skill_service=resolved_openclaw_skill_service,
-                opencode_skill_service=resolved_opencode_skill_service,
-            )
-            install_result = resolved_skill_service.install_skill(
-                agent_id=agent.id,
-                skill_name=payload.skill_name,
-                source_path=payload.source_path,
-            )
-
-            return {
-                "agent_id": agent.id,
-                "runtime_type": agent.runtime_type,
-                **install_result,
-            }
-        except AgentSkillServiceError as exc:
-            logger.warning(
-                "install_agent_skill failed, runtime_type=%s message=%s",
-                agent.runtime_type,
-                exc.message,
-            )
-            return _map_agent_skill_error(request=request, exc=exc)
-        except Exception as exc:
-            logger.exception(
-                "install_agent_skill unexpected error, agent_id=%s runtime_type=%s",
-                agent.id,
-                agent.runtime_type,
-            )
-            return _error_response(
-                request=request,
-                status_code=500,
-                code="INTERNAL_SERVER_ERROR",
-                message="internal server error",
-                details={
-                    "runtime_type": agent.runtime_type,
-                    "reason": str(exc),
-                },
-            )
-
-    @router.post("/skills/uninstall", response_model=None)
-    def uninstall_agent_skill(
-        payload: UninstallSkillRequest,
-        request: Request,
-        id: str | None = None,
-    ) -> dict[str, Any] | JSONResponse:
-        try:
-            resolved_agent_id = _resolve_request_agent_id(
-                agent_service=agent_service,
-                agent_id=id,
-            )
-            agent = agent_service.status(agent_id=resolved_agent_id)
-        except AgentServiceError as exc:
-            return _map_agent_error(request=request, exc=exc)
-        logger.info(
-            "uninstall_agent_skill called, agent_id=%s runtime_type=%s skill_name=%s",
-            agent.id,
-            agent.runtime_type,
-            payload.skill_name,
-        )
-        try:
-            resolved_skill_service = _resolve_skill_service(
-                runtime_type=agent.runtime_type,
-                openclaw_skill_service=resolved_openclaw_skill_service,
-                opencode_skill_service=resolved_opencode_skill_service,
-            )
-            uninstall_result = resolved_skill_service.uninstall_skill(
-                agent_id=agent.id,
-                skill_name=payload.skill_name,
-                source_type=payload.source_type,
-                source_path=payload.source_path,
-            )
-            return {
-                "agent_id": agent.id,
-                "runtime_type": agent.runtime_type,
-                **uninstall_result,
-            }
-        except AgentSkillServiceError as exc:
-            logger.warning(
-                "uninstall_agent_skill failed, runtime_type=%s code=%s message=%s",
-                agent.runtime_type,
-                exc.code,
-                exc.message,
-            )
-            return _map_agent_skill_error(request=request, exc=exc)
-        except Exception as exc:
-            logger.exception(
-                "uninstall_agent_skill unexpected error, agent_id=%s runtime_type=%s",
-                agent.id,
-                agent.runtime_type,
-            )
-            return _error_response(
-                request=request,
-                status_code=500,
-                code="INTERNAL_SERVER_ERROR",
-                message="internal server error",
-                details={
-                    "runtime_type": agent.runtime_type,
-                    "reason": str(exc),
-                },
-            )
 
     @router.get("/list", response_model=None)
     def list_agents(
@@ -333,10 +202,44 @@ def _resolve_skill_service(
     )
 
 
-def _resolve_request_agent_id(
-    *, agent_service: AgentService, agent_id: str | None
-) -> str | None:
-    """未显式传入 id 时，统一回退到 Gateway 默认 agent。"""
+def _require_agent_id(*, agent_id: str | None) -> str:
+    """校验并返回请求中的 agent_id，不允许默认回退。"""
     if isinstance(agent_id, str) and agent_id:
         return agent_id
-    return agent_service.resolve_default_agent()
+    raise AgentServiceError(
+        code="AGENT_ID_REQUIRED",
+        message="agent_id is required",
+        status_code=400,
+        details=None,
+    )
+
+
+def _build_start_config(body: AgentStartRequest | None) -> AgentStartRequest | None:
+    """构建 start 请求对象，统一调用链模型。"""
+    if body is None:
+        return None
+    start_request = AgentStartRequest(
+        agent_id=body.agent_id,
+        runtime_type=body.runtime_type,
+        deployment_mode=body.deployment_mode,
+    )
+    if (
+        start_request.runtime_type is None
+        and start_request.deployment_mode is None
+        and start_request.agent_id is None
+    ):
+        return None
+    return start_request
+
+
+def _require_runtime_type(*, start_config: AgentStartRequest | None) -> str:
+    """校验 start 请求中的 runtime_type 必填。"""
+    runtime_type = start_config.runtime_type if start_config is not None else None
+    if isinstance(runtime_type, str) and runtime_type:
+        return runtime_type
+    raise AgentServiceError(
+        code="RUNTIME_TYPE_REQUIRED",
+        message="runtime_type is required",
+        status_code=400,
+        details=None,
+    )

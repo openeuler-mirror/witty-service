@@ -3,37 +3,48 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-from witty_agent_server.adapters.openclaw_adapter import create_openclaw_runtime
-from witty_agent_server.adapters.runtime_registry import RuntimeRegistry
 from witty_agent_server.application.models.errors import ErrorResponse
-from witty_agent_server.application.models.session import SessionCreateRequest
 from witty_agent_server.application.services.agent import (
     AgentService,
     AgentServiceError,
 )
-from witty_agent_server.application.services.session_state_sync_service import (
+from witty_agent_server.application.services.session_manage.base import (
+    SessionStateEventPublisherBase,
+)
+from witty_agent_server.application.services.session_manage.state_sync_service import (
     SessionStateSyncService,
 )
-from witty_agent_server.application.services.session import (
+from witty_agent_server.application.services.session_to_runtime import (
     SessionNotFoundServiceError,
     SessionService,
     SessionServiceError,
 )
 from witty_agent_server.infra.persistence.in_memory import InMemorySessionRepository
+from witty_agent_server.runtimes.openclaw_runtime_factory import create_openclaw_runtime
 
 
 def build_default_session_service() -> SessionService:
-    service = SessionService(
-        runtime_registry=RuntimeRegistry(),
+    from witty_agent_server.application.services.session_to_runtime import (
+        openclaw_session_service,
+        runtime_registry,
+    )
+
+    runtime_registry_instance = runtime_registry.RuntimeRegistry()
+    runtime = create_openclaw_runtime()
+    runtime_registry_instance.register(runtime)
+    openclaw_service = openclaw_session_service.OpenClawSessionService(
+        runtime_registry=runtime_registry_instance,
         repository=InMemorySessionRepository(),
     )
-    service.register_runtime(create_openclaw_runtime())
-    return service
+    openclaw_service.register_runtime(runtime)
+    return SessionService(
+        services={"openclaw": openclaw_service},
+    )
 
 
 def create_session_router(
     session_service: SessionService | None = None,
-    state_sync_service: SessionStateSyncService | None = None,
+    state_sync_service: SessionStateEventPublisherBase | None = None,
     agent_service: AgentService | None = None,
 ) -> APIRouter:
     service = session_service or build_default_session_service()
@@ -41,9 +52,7 @@ def create_session_router(
     router = APIRouter(prefix="/agents/{agent_id}/sessions")
 
     @router.post("", response_model=None)
-    def create_session(
-        agent_id: str, payload: SessionCreateRequest, request: Request
-    ) -> dict[str, Any] | JSONResponse:
+    def create_session(agent_id: str, request: Request) -> dict[str, Any] | JSONResponse:
         try:
             resolved_agent_config = _resolve_agent_config(
                 agent_id=agent_id,
@@ -51,10 +60,7 @@ def create_session_router(
             )
             return service.create_session(
                 agent_id=agent_id,
-                config={
-                    **resolved_agent_config,
-                    **payload.model_dump(exclude_none=True, exclude_defaults=True),
-                },
+                config=resolved_agent_config,
             )
         except AgentServiceError as exc:
             return _map_agent_error(request=request, exc=exc)
@@ -69,8 +75,7 @@ def create_session_router(
             return service.delete_session(agent_id=agent_id, session_id=session_id)
         except SessionServiceError as exc:
             return _map_session_error(request=request, exc=exc)
-        
-        
+
     @router.post("/{session_id}/abort", response_model=None)
     def abort_session(
         agent_id: str, session_id: str, request: Request

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -20,9 +21,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_GATEWAY_WS_URL = "ws://127.0.0.1:18789"
 _DEFAULT_CONNECT_TIMEOUT = 10.0
 _DEFAULT_EVENT_TIMEOUT = 30.0
-_DEFAULT_IDLE_TIMEOUT = float(os.environ.get("OPENCLAW_GATEWAY_IDLE_TIMEOUT", "30"))
-_DEFAULT_MIN_PROTOCOL = 3
-_DEFAULT_MAX_PROTOCOL = 4
+_DEFAULT_IDLE_TIMEOUT = 30.0
 _DEFAULT_SCOPES = [
     "operator.admin",
     "operator.read",
@@ -47,14 +46,20 @@ class OpenClawGatewayClient(ClientBase):
         *,
         url: str = DEFAULT_GATEWAY_WS_URL,
         token: str | None = None,
+        state_dir: Path | None = None,
         connect_timeout: float = _DEFAULT_CONNECT_TIMEOUT,
         event_timeout: float = _DEFAULT_EVENT_TIMEOUT,
         idle_timeout: float = _DEFAULT_IDLE_TIMEOUT,
     ) -> None:
         self._url = url
         logger.debug("OpenClawGatewayClient init token arg=%r", token)
-        self._token = token or self._resolve_gateway_token()
-        logger.debug("OpenClawGatewayClient init resolved token=%r", self._token)
+        self._token = token
+        self._state_dir_override = state_dir
+        self._resolved_token: str | None = None
+        logger.debug(
+            "OpenClawGatewayClient init state_dir_override=%r",
+            self._state_dir_override,
+        )
         self._connect_timeout = connect_timeout
         self._event_timeout = event_timeout
         self._idle_timeout = idle_timeout
@@ -138,6 +143,11 @@ class OpenClawGatewayClient(ClientBase):
         logger.info(f"list_agents success")
         return payload
 
+    def probe_gateway_auth(self) -> None:
+        """只做 connect 握手预检，让 start 阶段提前暴露并恢复鉴权问题。"""
+        with self._open_connection():
+            logger.info("probe_gateway_auth success")
+
     def list_sessions(self, *, agent_id: str) -> dict[str, Any]:
         logger.info("list_sessions start by gateway rpc, agent_id=%s", agent_id)
         with self._open_connection() as ws:
@@ -196,111 +206,6 @@ class OpenClawGatewayClient(ClientBase):
         )
         return payload
 
-    # 通过 gateway RPC 安装技能。
-    def install_skill(
-        self,
-        *,
-        skill_name: str,
-        agent_id: str | None = None,
-        version: str | None = None,
-        force: bool | None = None,
-    ) -> dict[str, Any]:
-        params: dict[str, Any] = {
-            "source": "clawhub",
-            "slug": skill_name,
-        }
-        if isinstance(version, str) and version:
-            params["version"] = version
-        if isinstance(force, bool):
-            params["force"] = force
-
-        logger.info(
-            "install_skill start by gateway rpc, agent_id=%s slug=%s",
-            agent_id,
-            skill_name,
-        )
-        with self._open_connection() as ws:
-            payload = self._rpc(
-                ws,
-                method="skills.install",
-                params=params,
-            )
-        logger.info(
-            "install_skill success by gateway rpc, agent_id=%s slug=%s payload_keys=%s",
-            agent_id,
-            skill_name,
-            sorted(payload.keys()),
-        )
-
-        self.enable_skill(skill_name=skill_name, agent_id=agent_id)
-
-        return payload
-
-    def enable_skill(self, *, skill_name: str, agent_id: str | None = None) -> None:
-        try:
-            with self._open_connection() as ws:
-                self._rpc(
-                    ws,
-                    method="skills.update",
-                    params={
-                        "skillKey": skill_name,
-                        "enabled": True,
-                    },
-                )
-            logger.info(
-                "enable_skill success by gateway rpc, agent_id=%s skillKey=%s",
-                agent_id,
-                skill_name,
-            )
-        except OpenClawGatewayClientError as exc:
-            logger.warning(
-                "enable_skill failed by gateway rpc, agent_id=%s skillKey=%s code=%s message=%s",
-                agent_id,
-                skill_name,
-                exc.code,
-                exc.message,
-            )
-
-    def uninstall_skill(
-        self,
-        *,
-        skill_name: str,
-        agent_id: str | None = None,
-    ) -> dict[str, Any]:
-        params: dict[str, Any] = {
-            "skillKey": skill_name,
-            "enabled": False,
-        }
-
-        logger.info(
-            "uninstall_skill start by gateway rpc, agent_id=%s slug=%s",
-            agent_id,
-            skill_name,
-        )
-        try:
-            with self._open_connection() as ws:
-                payload = self._rpc(
-                    ws,
-                    method="skills.update",
-                    params=params,
-                )
-        except OpenClawGatewayClientError as exc:
-            logger.error(
-                "uninstall_skill failed by gateway rpc, agent_id=%s skillKey=%s code=%s message=%s",
-                agent_id,
-                skill_name,
-                exc.code,
-                exc.message,
-            )
-            raise
-        logger.info(
-            "uninstall_skill success by gateway rpc, agent_id=%s slug=%s payload_keys=%s",
-            agent_id,
-            skill_name,
-            sorted(payload.keys()),
-        )
-        return payload
-
     # 删除 runtime 侧会话，优先使用 session.delete，若网关不支持则回退 sessions.delete。
     def delete_session(self, *, session_key: str) -> None:
         with self._open_connection() as ws:
@@ -352,8 +257,9 @@ class OpenClawGatewayClient(ClientBase):
         target["value"] = value
 
     def _open_connection(self) -> Any:
-        if not self._token:
-            logger.warning("_open_connection token check failed, token=%r", self._token)
+        token = self._resolve_gateway_token()
+        if not token:
+            logger.warning("_open_connection token check failed, token=%r", token)
             raise OpenClawGatewayClientError(
                 code="GATEWAY_AUTH_MISSING",
                 message="openclaw gateway token not configured",
@@ -361,6 +267,7 @@ class OpenClawGatewayClient(ClientBase):
 
         try:
             ws = connect(self._url, open_timeout=self._connect_timeout)
+            logger.info("WebSocket connection established: %s", self._url)
         except Exception as exc:  # pragma: no cover - network specific
             raise OpenClawGatewayClientError(
                 code="GATEWAY_CONNECT_FAILED",
@@ -369,6 +276,22 @@ class OpenClawGatewayClient(ClientBase):
 
         try:
             self._handshake(ws)
+        except OpenClawGatewayClientError as exc:
+            ws.close()
+            if self._is_pairing_required_error(exc) and self._auto_approve_pairing():
+                logger.info(
+                    "_open_connection pairing approved, retrying websocket connect: url=%s",
+                    self._url,
+                )
+                retry_ws = connect(self._url, open_timeout=self._connect_timeout)
+                logger.info("WebSocket connection established: %s", self._url)
+                try:
+                    self._handshake(retry_ws)
+                except Exception:
+                    retry_ws.close()
+                    raise
+                return retry_ws
+            raise
         except Exception:
             ws.close()
             raise
@@ -377,6 +300,7 @@ class OpenClawGatewayClient(ClientBase):
 
     def _handshake(self, ws: Any) -> None:
         challenge = self._recv_json(ws, timeout=self._connect_timeout)
+        token = self._resolve_gateway_token()
         if (
             challenge.get("type") != "event"
             or challenge.get("event") != "connect.challenge"
@@ -390,9 +314,8 @@ class OpenClawGatewayClient(ClientBase):
         role = "operator"
         scopes = list(_DEFAULT_SCOPES)
         params: dict[str, Any] = {
-            # Keep compatibility with protocol v3 and newer v4 gateway.
-            "minProtocol": _DEFAULT_MIN_PROTOCOL,
-            "maxProtocol": _DEFAULT_MAX_PROTOCOL,
+            "minProtocol": 3,
+            "maxProtocol": 3,
             "client": {
                 "id": "cli",
                 "version": "2026.4.2",
@@ -404,7 +327,7 @@ class OpenClawGatewayClient(ClientBase):
             "commands": [],
             "permissions": {},
             "caps": list(_DEFAULT_CAPS),
-            "auth": {"token": self._token},
+            "auth": {"token": token},
             "locale": "zh-CN",
             "userAgent": "witty-agent-server/0.1.0",
         }
@@ -415,7 +338,7 @@ class OpenClawGatewayClient(ClientBase):
                 nonce=nonce,
                 role=role,
                 scopes=scopes,
-                signature_token=self._token,
+                signature_token=token,
                 client_id="cli",
                 client_mode="cli",
                 platform="linux",
@@ -427,6 +350,44 @@ class OpenClawGatewayClient(ClientBase):
         else:
             logger.debug("_handshake nonce is empty or invalid, skipping device auth")
 
+        response = self._send_connect_and_recv_response(ws, req_id=req_id, params=params)
+        if response.get("ok") is not True:
+            error = response.get("error")
+            if self._should_retry_with_cached_device_token(error):
+                retry_params = dict(params)
+                retry_params["auth"] = dict(params["auth"])
+                cached_device_token = self._load_cached_device_token()
+                if cached_device_token:
+                    retry_params["auth"]["deviceToken"] = cached_device_token
+                    logger.warning(
+                        "_handshake retrying with cached device token after auth mismatch"
+                    )
+                    response = self._send_connect_and_recv_response(
+                        ws,
+                        req_id=req_id,
+                        params=retry_params,
+                    )
+            if response.get("ok") is not True:
+                message = "openclaw gateway handshake failed"
+                if isinstance(error, dict):
+                    err_message = error.get("message")
+                    if isinstance(err_message, str) and err_message:
+                        message = err_message
+                raise OpenClawGatewayClientError(
+                    code="GATEWAY_AUTH_FAILED",
+                    message=message,
+                )
+        payload = response.get("payload")
+        if isinstance(payload, dict):
+            self._store_device_token(payload=payload, fallback_role=role)
+
+    def _send_connect_and_recv_response(
+        self,
+        ws: Any,
+        *,
+        req_id: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
         ws.send(
             json.dumps(
                 {
@@ -437,27 +398,46 @@ class OpenClawGatewayClient(ClientBase):
                 }
             )
         )
-
         response = self._recv_json(ws, timeout=self._connect_timeout)
         if response.get("type") != "res" or response.get("id") != req_id:
             raise OpenClawGatewayClientError(
                 code="GATEWAY_PROTOCOL_ERROR",
                 message="openclaw gateway handshake response mismatch",
             )
-        if response.get("ok") is not True:
-            error = response.get("error")
-            message = "openclaw gateway handshake failed"
-            if isinstance(error, dict):
-                err_message = error.get("message")
-                if isinstance(err_message, str) and err_message:
-                    message = err_message
-            raise OpenClawGatewayClientError(
-                code="GATEWAY_AUTH_FAILED",
-                message=message,
-            )
-        payload = response.get("payload")
-        if isinstance(payload, dict):
-            self._store_device_token(payload=payload, fallback_role=role)
+        return response
+
+    def _should_retry_with_cached_device_token(
+        self, error: dict[str, Any] | None
+    ) -> bool:
+        if not isinstance(error, dict):
+            return False
+        details = error.get("details")
+        if not isinstance(details, dict):
+            return False
+        if details.get("code") != "AUTH_TOKEN_MISMATCH":
+            return False
+        return details.get("canRetryWithDeviceToken") is True
+
+    def _load_cached_device_token(self) -> str | None:
+        auth_path = self._identity_dir() / _DEVICE_AUTH_FILE
+        if not auth_path.exists():
+            return None
+        try:
+            body = json.loads(auth_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(body, dict):
+            return None
+        tokens = body.get("tokens")
+        if not isinstance(tokens, dict):
+            return None
+        for value in tokens.values():
+            if not isinstance(value, dict):
+                continue
+            token = value.get("token")
+            if isinstance(token, str) and token:
+                return token
+        return None
 
     def _rpc(
         self,
@@ -492,12 +472,6 @@ class OpenClawGatewayClient(ClientBase):
             error = message.get("error")
             code = "GATEWAY_RPC_ERROR"
             text = f"openclaw rpc failed: {method}"
-            logger.info(
-                "openclaw rpc failed:, error=%s message=%s method=%s",
-                error,
-                message,
-                method,
-            )            
             if isinstance(error, dict):
                 raw_code = error.get("code")
                 if isinstance(raw_code, str) and raw_code:
@@ -517,12 +491,14 @@ class OpenClawGatewayClient(ClientBase):
         while True:
             try:
                 message = self._recv_json(ws, timeout=self._idle_timeout)
-                logger.debug(
+                logger.info(
                     "received message: %s",
                     json.dumps(message, indent=4, ensure_ascii=False),
                 )
-            except TimeoutError:
-                return
+            except OpenClawGatewayClientError as exc:
+                if self._is_recv_timeout_error(exc):
+                    return
+                raise
             if message.get("type") != "event":
                 continue
             event_name = message.get("event")
@@ -563,17 +539,9 @@ class OpenClawGatewayClient(ClientBase):
             if event_name == "session.message":
                 message_payload = normalized_payload.get("message")
                 if isinstance(message_payload, dict):
-                    # 过滤reason为stop的thinking，但OpenClaw有时候会把最终assistant文本放在这个stop message里
                     stop_reason = message_payload.get("stopReason")
-                    content = message_payload.get("content")
-                    has_text = isinstance(content, list) and any(
-                            isinstance(item, dict)
-                            and item.get("type") == "text"
-                            and isinstance(item.get("text"), str)
-                            and item.get("text")
-                            for item in content
-                    )
-                    if stop_reason == "stop" and not has_text:
+                    # 过滤resaon为stop的thinking
+                    if stop_reason == "stop":
                         continue
             if event_name == "agent" and normalized_payload.get("stream") == "lifecycle":
                 phase = normalized_payload.get("data", {}).get("phase")
@@ -688,7 +656,7 @@ class OpenClawGatewayClient(ClientBase):
                 params={"key": session_key},
             )
             logger.debug("session usage: %s", json.dumps(payload, ensure_ascii=False))
-        except (OpenClawGatewayClientError, TimeoutError) as exc:
+        except OpenClawGatewayClientError as exc:
             # Best-effort usage snapshot. If rejected, keep normal turn flow.
             logger.debug(
                 "skip session usage snapshot due to fetch failure: session_key=%s error=%r",
@@ -701,8 +669,11 @@ class OpenClawGatewayClient(ClientBase):
     def _recv_json(self, ws: Any, *, timeout: float) -> dict[str, Any]:
         try:
             raw = ws.recv(timeout=timeout)
-        except TimeoutError:
-            raise
+        except TimeoutError as exc:
+            raise OpenClawGatewayClientError(
+                code="GATEWAY_RECV_TIMEOUT",
+                message="openclaw gateway receive timeout",
+            ) from exc
         except ConnectionClosed as exc:
             raise OpenClawGatewayClientError(
                 code="GATEWAY_CLOSED",
@@ -737,10 +708,14 @@ class OpenClawGatewayClient(ClientBase):
         return message
 
     def _resolve_gateway_token(self) -> str | None:
-        token = self._token_from_env()
+        if self._resolved_token is not None:
+            return self._resolved_token
+        token = self._token or self._token_from_env()
         if token:
+            self._resolved_token = token
             return token
-        return self._token_from_config()
+        self._resolved_token = self._token_from_config()
+        return self._resolved_token
 
     def _token_from_env(self) -> str | None:
         from os import environ
@@ -751,7 +726,7 @@ class OpenClawGatewayClient(ClientBase):
         return None
 
     def _token_from_config(self) -> str | None:
-        config_path = Path.home() / ".openclaw" / "openclaw.json"
+        config_path = self._state_dir() / "openclaw.json"
         logger.debug(
             "_token_from_config config_path=%s exists=%s",
             config_path,
@@ -781,10 +756,18 @@ class OpenClawGatewayClient(ClientBase):
         return None
 
     def _state_dir(self) -> Path:
-        state_dir = os.environ.get("OPENCLAW_STATE_DIR")
-        if isinstance(state_dir, str) and state_dir:
-            return Path(state_dir)
+        """返回当前 client 绑定的 state 目录。"""
+        if self._state_dir_override is not None:
+            return self._state_dir_override
         return Path.home() / ".openclaw"
+
+    def _is_recv_timeout_error(self, exc: OpenClawGatewayClientError) -> bool:
+        """判断是否为网关接收超时错误。"""
+        return exc.code == "GATEWAY_RECV_TIMEOUT"
+
+    def _is_pairing_required_error(self, exc: OpenClawGatewayClientError) -> bool:
+        """判断网关错误是否要求先完成 device pairing。"""
+        return exc.code == "GATEWAY_AUTH_FAILED" and "pairing required" in exc.message
 
     def _identity_dir(self) -> Path:
         return self._state_dir() / "identity"
@@ -992,26 +975,77 @@ class OpenClawGatewayClient(ClientBase):
     def _auto_approve_pairing(self) -> bool:
         import subprocess
 
+        token = self._resolve_gateway_token() or ""
+        env = dict(os.environ)
+        env["OPENCLAW_STATE_DIR"] = str(self._state_dir())
+        latest_cmd = [
+            "openclaw",
+            "devices",
+            "approve",
+            "--latest",
+            "--token",
+            token,
+            "--url",
+            self._url,
+        ]
         try:
             result = subprocess.run(
-                [
-                    "openclaw",
-                    "devices",
-                    "approve",
-                    "--latest",
-                    "--token",
-                    self._token or "",
-                ],
+                latest_cmd,
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env=env,
             )
             logger.debug("_auto_approve_pairing returncode=%s", result.returncode)
             if result.stdout:
                 logger.debug("_auto_approve_pairing stdout: %s", result.stdout[:200])
             if result.stderr:
                 logger.debug("_auto_approve_pairing stderr: %s", result.stderr[:200])
-            return result.returncode == 0
+            if result.returncode == 0:
+                return True
+
+            request_id = self._extract_pairing_request_id(
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+            if not request_id:
+                return False
+
+            approve_cmd = [
+                "openclaw",
+                "devices",
+                "approve",
+                request_id,
+                "--token",
+                token,
+                "--url",
+                self._url,
+            ]
+            retry = subprocess.run(
+                approve_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            logger.debug("_auto_approve_pairing explicit returncode=%s", retry.returncode)
+            if retry.stdout:
+                logger.debug("_auto_approve_pairing explicit stdout: %s", retry.stdout[:200])
+            if retry.stderr:
+                logger.debug("_auto_approve_pairing explicit stderr: %s", retry.stderr[:200])
+            return retry.returncode == 0
         except Exception as exc:
             logger.warning("_auto_approve_pairing failed: %s", exc)
             return False
+
+    def _extract_pairing_request_id(self, *, stdout: str, stderr: str) -> str | None:
+        """从 CLI 输出中提取待审批 pairing request id。"""
+        text = "\n".join(part for part in (stdout, stderr) if part)
+        match = re.search(
+            r"approve\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+            text,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        return match.group(1)
