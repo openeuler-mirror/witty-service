@@ -72,22 +72,37 @@ def convert_openclaw_from_json(
         )
 
         cfg = conv._render_openclaw_base(spec, render_options)
+        openclaw_home = str(output_abs.resolve().parent)
 
         conv._print_phase(1, total_phases, "写入 openclaw.json 并校验")
         conv._write_config(cfg, options.output_path)
         conv._validate_openclaw(options.output_path)
 
         conv._print_phase(2, total_phases, "workspace 转换")
-        ws_paths = conv._workspace_phase(spec, spec_path, report)
+        ws_paths = conv._workspace_phase(spec, spec_path, report, openclaw_home)
 
         conv._print_phase(3, total_phases, "prompt 处理")
         conv._prompt_phase(spec, ws_paths, spec_path, report)
 
         conv._print_phase(4, total_phases, "skill 转换")
-        conv._skills_phase(spec, ws_paths, spec_path, options.apply_external, report)
+        conv._skills_phase(
+            spec,
+            ws_paths,
+            spec_path,
+            openclaw_home,
+            options.apply_external,
+            report,
+        )
 
         conv._print_phase(5, total_phases, "mcp 转换")
-        cfg = conv._mcp_phase(spec, cfg, spec_path, options.apply_external, report)
+        cfg = conv._mcp_phase(
+            spec,
+            cfg,
+            spec_path,
+            openclaw_home,
+            options.apply_external,
+            report,
+        )
         conv._assert_required_fields_resolved(cfg)
         conv._write_config(cfg, options.output_path)
         conv._validate_openclaw(options.output_path)
