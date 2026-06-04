@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator, Mapping
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable
 
 from witty_agent_server.infra.ws.client_base import ClientBase
+from witty_agent_server.infra.ws.openclaw_gateway_client import OpenClawGatewayClient
 from witty_agent_server.runtimes.runtime_base import (
     RuntimeBase,
     RuntimeChunk,
@@ -13,6 +15,11 @@ from witty_agent_server.runtimes.runtime_base import (
     RuntimeType,
 )
 
+if TYPE_CHECKING:
+    from witty_agent_server.application.composition.runtime_instance_manager import (
+        RuntimeInstanceManager,
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +27,21 @@ logger = logging.getLogger(__name__)
 class OpenClawGatewayRuntime(RuntimeBase):
     runtime_type: RuntimeType = "openclaw"
 
-    def __init__(self, *, client: ClientBase) -> None:
+    def __init__(
+        self,
+        *,
+        client: ClientBase | None = None,
+        runtime_instance_manager: RuntimeInstanceManager | None = None,
+        client_factory: Callable[
+            ..., ClientBase
+        ] = OpenClawGatewayClient,
+    ) -> None:
         self._client = client
+        self._runtime_instance_manager = runtime_instance_manager
+        self._client_factory = client_factory
 
     def list_sessions(self, *, agent_id: str) -> list[dict[str, Any]]:
-        payload = self._client.list_sessions(agent_id=agent_id)
+        payload = self._resolve_client(agent_id=agent_id).list_sessions(agent_id=agent_id)
         sessions = payload.get("sessions")
         if not isinstance(sessions, list):
             logger.warning(
@@ -41,13 +58,13 @@ class OpenClawGatewayRuntime(RuntimeBase):
         return [item for item in sessions if isinstance(item, dict)]
 
     def create_session(self, *, session_key: str) -> None:
-        self._client.create_session(session_key=session_key)
+        self._resolve_client(session_key=session_key).create_session(session_key=session_key)
 
     def delete_session(self, *, session_key: str) -> None:
-        self._client.delete_session(session_key=session_key)
+        self._resolve_client(session_key=session_key).delete_session(session_key=session_key)
 
     def abort_session(self, *, session_key: str) -> None:
-        self._client.abort_session(session_key=session_key)
+        self._resolve_client(session_key=session_key).abort_session(session_key=session_key)
 
     # 将 OpenClaw 事件流转换为统一 RuntimeTurnEvent，供上层处理。
     def run_turn(
@@ -58,8 +75,9 @@ class OpenClawGatewayRuntime(RuntimeBase):
     ) -> Iterator[RuntimeTurnEvent]:
         seen_started_tool_calls: set[str] = set()
         last_usage_payload: dict[str, Any] | None = None
+        completed_emitted = False
         # 对接openclaw，输出原始event
-        for raw_event in self._client.stream_turn(
+        for raw_event in self._resolve_client(session_key=session_key).stream_turn(
             session_key=session_key, message=message
         ):
             for event in self._map_gateway_events(raw_event):
@@ -72,6 +90,10 @@ class OpenClawGatewayRuntime(RuntimeBase):
                     last_usage_payload=last_usage_payload,
                 ):
                     continue
+                if event.get("type") == "message.completed":
+                    if completed_emitted:
+                        continue
+                    completed_emitted = True
                 if event.get("type") == "session.usage":
                     payload = event.get("payload")
                     if isinstance(payload, dict):
@@ -101,9 +123,51 @@ class OpenClawGatewayRuntime(RuntimeBase):
                 delta = event["payload"].get("delta")
                 if isinstance(delta, str) and delta:
                     yield {"type": "token_delta", "delta": delta}
-            elif event_type in {"message.completed", "turn.completed"}:
+            elif event_type == "message.completed":
                 yield {"type": "done"}
                 return
+
+    def _resolve_client(
+        self,
+        *,
+        agent_id: str | None = None,
+        session_key: str | None = None,
+    ) -> ClientBase:
+        """按 agent runtime instance 解析对应 gateway client。"""
+        resolved_agent_id = agent_id or self._parse_agent_id(session_key)
+        if resolved_agent_id is None or self._runtime_instance_manager is None:
+            if self._client is None:
+                raise ValueError("openclaw client is not configured")
+            return self._client
+
+        instance = self._runtime_instance_manager.get_instance_by_agent_id(
+            agent_id=resolved_agent_id,
+            runtime_candidates=("openclaw",),
+        )
+        if instance is None or instance.port is None:
+            if self._client is None:
+                raise ValueError("openclaw runtime instance is not configured")
+            logger.warning(
+                "fallback to default openclaw client: agent_id=%s reason=missing_instance",
+                resolved_agent_id,
+            )
+            return self._client
+
+        return self._client_factory(
+            url=f"ws://127.0.0.1:{instance.port}",
+            token=None,
+            state_dir=instance.state_dir if isinstance(instance.state_dir, Path) else None,
+        )
+
+    def _parse_agent_id(self, session_key: str | None) -> str | None:
+        """从 session_key=agent:{agent_id}:session:{session_id} 中提取 agent_id。"""
+        if not isinstance(session_key, str):
+            return None
+        prefix = "agent:"
+        marker = ":session:"
+        if not session_key.startswith(prefix) or marker not in session_key:
+            return None
+        return session_key[len(prefix) : session_key.index(marker)]
 
     def _map_gateway_events(
         self, raw_event: Mapping[str, Any]
@@ -150,7 +214,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
                     yield {"type": "message.started", "payload": {}}
                     return
                 if normalized_phase == "end":
-                    yield {"type": "turn.completed", "payload": {}}
+                    yield {"type": "message.completed", "payload": {"text": ""}}
                     return
                 if normalized_phase == "error":
                     code = self._pick_string(data, "code") or "OPENCLAW_LIFECYCLE_ERROR"
@@ -173,76 +237,18 @@ class OpenClawGatewayRuntime(RuntimeBase):
                     return
             return
 
+        if raw_type == "chat":
+            yield from self._map_chat_terminal_event(normalized_payload)
+            return
+
         if raw_type == "session.message":
             nested = normalized_payload.get("message")
             if not isinstance(nested, dict):
                 return
-            yield from self._map_session_message(nested)
+            yield from self._extract_thinking_events(nested)
             return
         return
 
-    def _map_session_message(
-            self, message: Mapping[str, Any]
-        ) -> Iterator[RuntimeTurnEvent]:
-            role = message.get("role")
-            content = message.get("content")
-            if role == "toolResult":
-                yield from self._map_tool_result_message(message)
-                return
-            if role == "assistant":
-                if isinstance(content, list):
-                    for item in content:
-                        if not isinstance(item, dict) or item.get("type") != "toolCall":
-                            continue
-                        yield {
-                            "type": "tool.call.started",
-                            "payload": {
-                                "stage": "started",
-                                "tool_name": self._pick_string(item, "name") or "unknown",
-                                "tool_call_id": self._pick_string(item, "id"),
-                                "arguments": item.get("arguments"),
-                            },
-                        }
-                if message.get("stopReason") != "stop":
-                    yield from self._extract_thinking_events(message)
-                    return
-                if isinstance(content, list):
-                    text = "".join(
-                        item.get("text", "")
-                        for item in content
-                        if isinstance(item, dict)
-                        and item.get("type") == "text"
-                        and isinstance(item.get("text"), str)
-                    )
-                    if text:
-                        yield {"type": "message.completed", "payload": {"text": text}}
-                        return
-            yield from self._extract_thinking_events(message)
-    
-    def _map_tool_result_message(
-        self, message: Mapping[str, Any]
-    ) -> Iterator[RuntimeTurnEvent]:
-        tool_name = self._pick_string(message, "toolName", "name") or "unknown"
-        tool_call_id = self._pick_string(message, "toolCallId")
-        content = message.get("content", "")
-        details = message.get("details")
-        if not isinstance(details, dict):
-            details = {}
-        detail_status = details.get("status")
-        is_error = self._pick_bool(message, "isError")
-        yield {
-            "type": "tool.call.response",
-            "payload": {
-                "stage": "response",
-                "name": tool_name,
-                "tool_call_id": tool_call_id,
-                "content": content,
-                "is_error": bool(is_error) or detail_status == "error",
-                "details": details,
-                "exitCode": details.get("exitCode"),
-            },
-        }
- 	 
     def _extract_thinking_events(
         self, message: Mapping[str, Any]
     ) -> Iterator[RuntimeTurnEvent]:
@@ -262,6 +268,44 @@ class OpenClawGatewayRuntime(RuntimeBase):
             if isinstance(signature, str) and signature:
                 payload["signature"] = signature
             yield {"type": "thinking", "payload": payload}
+
+    def _map_chat_terminal_event(
+        self, payload: Mapping[str, Any]
+    ) -> Iterator[RuntimeTurnEvent]:
+        state = self._pick_string(payload, "state")
+        if state != "final":
+            return
+
+        message = payload.get("message")
+        if not isinstance(message, Mapping):
+            yield {"type": "message.completed", "payload": {"text": ""}}
+            return
+
+        completed_payload: dict[str, Any] = {
+            "text": self._extract_chat_message_text(message),
+        }
+        stop_reason = self._pick_string(message, "stopReason")
+        if isinstance(stop_reason, str):
+            completed_payload["stop_reason"] = stop_reason
+        yield {"type": "message.completed", "payload": completed_payload}
+
+    def _extract_chat_message_text(self, message: Mapping[str, Any]) -> str:
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+
+        text_parts: list[str] = []
+        for item in content:
+            if not isinstance(item, Mapping):
+                continue
+            if item.get("type") != "text":
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                text_parts.append(text)
+        return "".join(text_parts)
 
     def _map_agent_tool_stream(
         self, data: Mapping[str, Any]

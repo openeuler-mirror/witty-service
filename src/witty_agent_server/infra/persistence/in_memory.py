@@ -1,8 +1,9 @@
 from copy import deepcopy
 from typing import Any
 
-
 class InMemorySessionRepository:
+    """基于内存的 session 仓储实现。"""
+
     def __init__(self) -> None:
         self._sessions: dict[str, dict[str, Any]] = {}
 
