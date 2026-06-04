@@ -7,20 +7,25 @@ from typing import Any, cast
 from witty_agent_server.application.models.agent import AgentStatus
 from witty_agent_server.application.models.runtime_events import build_outbound_event
 from witty_agent_server.application.services.agent import AgentService
-from witty_agent_server.application.services.session_identity_store import (
+from witty_agent_server.application.services.session_manage.identity_store import (
     RuntimeSessionIdentity,
     SessionIdentityStore,
 )
-from witty_agent_server.application.services.session_state_sync_service import (
-    SessionState,
+from witty_agent_server.application.services.session_manage.state_sync_service import (
     SessionStateSyncService,
 )
-from witty_agent_server.application.services.session import SessionService
-from witty_agent_server.application.services.session import SessionServiceError
+from witty_agent_server.application.services.session_manage.state_sync_service import (
+    SessionState,
+)
+from witty_agent_server.application.services.session_manage.base import (
+    SessionStateEventPublisherBase,
+    SessionTurnExecutorBase,
+)
+from witty_agent_server.application.services.session_to_runtime import SessionService
+from witty_agent_server.application.services.session_to_runtime import SessionServiceError
 from witty_agent_server.runtimes.runtime_base import (
     RuntimeBase,
     RuntimeType,
-    supports_runtime_lifecycle,
     supports_runtime_turn,
 )
 
@@ -43,14 +48,14 @@ class SessionWSOrchestratorError(RuntimeError):
         self.details = details
 
 
-class SessionWSOrchestrator:
+class SessionWSOrchestrator(SessionTurnExecutorBase):
     def __init__(
         self,
         *,
         session_service: SessionService,
         agent_service: AgentService,
         identity_store: SessionIdentityStore | None = None,
-        state_sync_service: SessionStateSyncService | None = None,
+        state_sync_service: SessionStateEventPublisherBase | None = None,
     ) -> None:
         self._session_service = session_service
         self._agent_service = agent_service
@@ -94,6 +99,14 @@ class SessionWSOrchestrator:
             for event in self._run_runtime_turn(runtime, identity, message):
                 if event.get("type") == "stream.error":
                     turn_failed = True
+                    payload = event.get("payload")
+                    logger.warning(
+                        "runtime stream error event: agent_id=%s session_id=%s runtime_type=%s payload=%s",
+                        agent_id,
+                        session_id,
+                        runtime_type,
+                        payload if isinstance(payload, dict) else {},
+                    )
                 yield from self._handle_runtime_event(
                     agent_id=agent_id,
                     session_id=session_id,
@@ -108,6 +121,14 @@ class SessionWSOrchestrator:
                 code = "RUNTIME_UPSTREAM_ERROR"
             if not isinstance(message_text, str) or not message_text:
                 message_text = "runtime request failed"
+            logger.warning(
+                "runtime turn raised exception: agent_id=%s session_id=%s runtime_type=%s code=%s message=%s",
+                agent_id,
+                session_id,
+                runtime_type,
+                code,
+                message_text,
+            )
             payload = {
                 "code": code,
                 "message": message_text,
@@ -137,37 +158,6 @@ class SessionWSOrchestrator:
                 state=target_state,
                 reason="turn.failed" if turn_failed else "turn.completed",
             )
-
-    def abort_turn(self, *, agent_id: str, session_id: str) -> None:
- 	    session = self._require_session(agent_id=agent_id, session_id=session_id)
- 	    runtime_type = cast(RuntimeType, session.get("runtime_type"))
- 	    runtime = self._require_runtime(runtime_type)
- 	    if runtime is not None and supports_runtime_lifecycle(runtime):
- 	        runtime_session_key = session.get("runtime_session_key")
- 	        if isinstance(runtime_session_key, str) and runtime_session_key:
- 	            logger.info(
- 	                "abort runtime turn: agent_id=%s session_id=%s runtime_type=%s session_key=%s",
- 	                agent_id,
- 	                session_id,
- 	                runtime_type,
- 	                runtime_session_key,
- 	            )
- 	            try:
- 	                runtime.abort_session(session_key=runtime_session_key)
- 	            except Exception:
- 	                logger.exception(
- 	                    "abort runtime turn failed: agent_id=%s session_id=%s",
- 	                    agent_id,
- 	                    session_id,
- 	                )
- 	    # 中断会话后上报状态为 idle。
- 	    self._state_sync_service.emit_state_changed(
- 	        agent_id=agent_id,
- 	        session_id=session_id,
- 	        runtime_type=runtime_type,
- 	        state="idle",
- 	        reason="message.abort",
-	    )
 
     def precheck_message(self, *, agent_id: str, session_id: str, message: str) -> None:
         if not isinstance(message, str) or not message.strip():

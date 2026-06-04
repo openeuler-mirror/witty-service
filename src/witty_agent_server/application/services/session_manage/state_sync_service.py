@@ -4,16 +4,17 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from threading import RLock
-from typing import Any, Literal
+from typing import Any
 
 from witty_agent_server.application.models.runtime_events import build_outbound_event
+from witty_agent_server.application.services.session_manage.base import (
+    SessionState,
+    SessionStateEventPublisherBase,
+)
 from witty_agent_server.runtimes.runtime_base import RuntimeType
 
 
 logger = logging.getLogger(__name__)
-
-SessionState = Literal["running", "idle", "error"]
-
 
 @dataclass
 class _SessionStateSnapshot:
@@ -29,7 +30,7 @@ class _SessionQueueBinding:
     queue: asyncio.Queue[dict[str, Any] | None]
 
 
-class SessionStateSyncService:
+class SessionStateSyncService(SessionStateEventPublisherBase):
     """管理会话状态事件与 WS 推送通道。"""
 
     def __init__(self) -> None:
@@ -135,4 +136,27 @@ class SessionStateSyncService:
         )
         if event is None:
             return False
+        return self.emit_event(agent_id=agent_id, session_id=session_id, event=event)
+
+    def emit_heartbeat(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        runtime_type: RuntimeType,
+    ) -> bool:
+        """发送 session 心跳事件，便于上游感知连接活性。"""
+        event = build_outbound_event(
+            agent_id=agent_id,
+            session_id=session_id,
+            runtime_type=runtime_type,
+            type="session.heartbeat",
+            payload={},
+        )
+        logger.debug(
+            "emit session heartbeat: agent_id=%s session_id=%s runtime_type=%s",
+            agent_id,
+            session_id,
+            runtime_type,
+        )
         return self.emit_event(agent_id=agent_id, session_id=session_id, event=event)
