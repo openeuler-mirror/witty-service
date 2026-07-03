@@ -385,6 +385,8 @@ async def send_message(
 ) -> MessageEventsResponse:
     manager = services.get_agent_manager_for_agent(agent_id)
     result = await manager.send_message(agent_id=agent_id, session_id=session_id, content=payload.content)
+    with open("/root/witty-service/tmp/ws_send.log", "a") as f:
+        f.write(json.dumps(result, ensure_ascii=False) + "\n")
     return MessageEventsResponse.model_validate(result)
 
 

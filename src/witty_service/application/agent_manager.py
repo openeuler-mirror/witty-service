@@ -1401,6 +1401,8 @@ class AgentManager:
                 event_dict = await queue.get()
                 if event_dict is None:  # sentinel — stream ended
                     break
+                with open("/root/witty-service/tmp/ws_send.log", "a") as f:
+                    f.write(json.dumps(event_dict, ensure_ascii=False) + "\n")
                 yield {
                     "sandbox_type": sandbox_type,
                     "event": event_dict,

@@ -153,6 +153,18 @@ class OpenClawGatewayRuntime(RuntimeBase):
                 if isinstance(delta, str) and delta:
                     yield {"type": "message.delta", "payload": {"delta": delta}}
                 return
+            if stream == "thinking":
+                delta = data.get("delta")
+                text = data.get("text")
+                if isinstance(delta, str) and delta:
+                    yield {
+                        "type": "thinking.delta",
+                        "payload": {
+                            "delta": delta,
+                            "text": text if isinstance(text, str) else None,
+                        },
+                    }
+                return
             if stream == "tool":
                 yield from self._map_agent_tool_stream(data)
                 return
@@ -210,6 +222,8 @@ class OpenClawGatewayRuntime(RuntimeBase):
                 yield from self._map_tool_result_message(message)
                 return
             if role == "assistant":
+                if message.get("stopReason") != "stop":
+                    yield from self._extract_thinking_events(message)
                 if isinstance(content, list):
                     for item in content:
                         if not isinstance(item, dict) or item.get("type") != "toolCall":
@@ -224,7 +238,6 @@ class OpenClawGatewayRuntime(RuntimeBase):
                             },
                         }
                 if message.get("stopReason") != "stop":
-                    yield from self._extract_thinking_events(message)
                     return
                 if isinstance(content, list):
                     text = "".join(
@@ -325,6 +338,32 @@ class OpenClawGatewayRuntime(RuntimeBase):
                     "content": content,
                     "is_error": is_error,
                     "exitCode": exitCode,
+                },
+            }
+            return
+
+        # 增量更新事件: 来自 OpenClaw agent stream 的 phase:update
+        # exec 运行时会通过 onUpdate 推送进程的增量 stdout/stderr
+        if stage == "update":
+            partial = data.get("partialResult")
+            if isinstance(partial, dict):
+                content = partial.get("content", "")
+                details = partial.get("details", {})
+            else:
+                content = ""
+                details = {}
+            if not isinstance(details, dict):
+                details = {}
+            yield {
+                "type": "tool.call.delta",
+                "payload": {
+                    "stage": "delta",
+                    "name": tool_name,
+                    "tool_call_id": tool_call_id,
+                    "content": content,
+                    "details": details,
+                    "session_id": details.get("sessionId"),
+                    "status": details.get("status", "running"),
                 },
             }
             return
