@@ -571,8 +571,6 @@ class OpenClawGatewayClient(ClientBase):
 
             try:
                 message = self._recv_json(ws, timeout=recv_timeout)
-                with open("/root/witty-service/tmp/ws_debug.log", "a") as f:
-                    f.write(json.dumps(message, ensure_ascii=False) + "\n")
                 logger.debug(
                     "received message: %s",
                     json.dumps(message, indent=4, ensure_ascii=False),
@@ -863,8 +861,6 @@ class OpenClawGatewayClient(ClientBase):
                 message="openclaw gateway returned invalid frame",
             )
 
-        with open("/root/witty-service/tmp/ws_recv.log", "a") as f:
-            f.write(json.dumps(message, ensure_ascii=False) + "\n")
         return message
 
     def _resolve_gateway_token(self) -> str | None:
