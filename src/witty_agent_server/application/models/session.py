@@ -18,3 +18,6 @@ class SessionConfigSnapshot(BaseModel):
 
 class SessionCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    session_id: str | None = None
+    restore: bool = False
