@@ -908,25 +908,42 @@ class AgentManager:
         finally:
             await adaptor_client.close()
 
-        # 4. 创建 session（与 create_agent 保持一致）
-        adaptor_client = self._get_adaptor_http_client(agent_id)
-        try:
+        # 4. 恢复历史 session（witty-agent-server 可能因暂停期间重启导致 session 丢失）
+        historical_sessions = self._session_manager.list_sessions(agent_id)
+        if historical_sessions:
+            adaptor_client = self._get_adaptor_http_client(agent_id)
             try:
-                response = await adaptor_client.post(
-                    f"/agents/{remote_runtime_agent_id}/sessions",
-                    json={},
-                    timeout=30.0,
-                )
-                logger.info(f"{prefix}/agents/sessions succeeded: session_id=%s", response.get("id", "unknown"))
-            except httpx.HTTPStatusError as exc:
-                logger.error(f"{prefix}/agents/sessions failed: %s", exc)
-                raise DomainError(
-                    code=AGENT_CREATE_FAILED,
-                    message="Failed to create session on agent during resume from paused.",
-                    details={"agent_id": agent_id, "error": str(exc)},
-                ) from exc
-        finally:
-            await adaptor_client.close()
+                restored_count = 0
+                failed_count = 0
+                for session in historical_sessions:
+                    try:
+                        await adaptor_client.post(
+                            f"/agents/{remote_runtime_agent_id}/sessions",
+                            json={"session_id": session.id, "restore": True},
+                            timeout=30.0,
+                        )
+                        restored_count += 1
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 409:
+                            restored_count += 1
+                        else:
+                            failed_count += 1
+                            logger.warning(
+                                f"{prefix}Failed to restore historical session "
+                                f"during resume from paused: session_id=%s status=%s",
+                                session.id,
+                                exc.response.status_code,
+                            )
+                if restored_count > 0 or failed_count > 0:
+                    logger.info(
+                        f"{prefix}Historical sessions restored during resume from paused: "
+                        f"restored=%s failed=%s total=%s",
+                        restored_count,
+                        failed_count,
+                        len(historical_sessions),
+                    )
+            finally:
+                await adaptor_client.close()
 
         # 5. 更新状态
         return self._repository.update_agent_status(agent_id, AgentStatus.running)
@@ -1041,25 +1058,43 @@ class AgentManager:
         finally:
             await adaptor_client.close()
 
-        # 5. 创建 session（与 create_agent 保持一致）
-        adaptor_client = self._get_adaptor_http_client(agent_id)
-        try:
+        # 5. 恢复历史 session（服务重启后 witty-agent-server 的 in-memory 存储已清空）
+        historical_sessions = self._session_manager.list_sessions(agent_id)
+        if historical_sessions:
+            adaptor_client = self._get_adaptor_http_client(agent_id)
             try:
-                response = await adaptor_client.post(
-                    f"/agents/{remote_runtime_agent_id}/sessions",
-                    json={},
-                    timeout=30.0,
-                )
-                logger.info(f"{prefix}/agents/sessions succeeded: session_id=%s", response.get("id", "unknown"))
-            except httpx.HTTPStatusError as exc:
-                logger.error(f"{prefix}/agents/sessions failed: %s", exc)
-                raise DomainError(
-                    code=AGENT_CREATE_FAILED,
-                    message="Failed to create session on agent during recovery.",
-                    details={"agent_id": agent_id, "error": str(exc)},
-                ) from exc
-        finally:
-            await adaptor_client.close()
+                restored_count = 0
+                failed_count = 0
+                for session in historical_sessions:
+                    try:
+                        await adaptor_client.post(
+                            f"/agents/{remote_runtime_agent_id}/sessions",
+                            json={"session_id": session.id, "restore": True},
+                            timeout=30.0,
+                        )
+                        restored_count += 1
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 409:
+                            # session 已存在（理论上不会，防御性处理）
+                            restored_count += 1
+                        else:
+                            failed_count += 1
+                            logger.warning(
+                                f"{prefix}Failed to restore historical session: "
+                                f"session_id=%s status=%s",
+                                session.id,
+                                exc.response.status_code,
+                            )
+                if restored_count > 0 or failed_count > 0:
+                    logger.info(
+                        f"{prefix}Historical sessions restored: "
+                        f"restored=%s failed=%s total=%s",
+                        restored_count,
+                        failed_count,
+                        len(historical_sessions),
+                    )
+            finally:
+                await adaptor_client.close()
 
         # 6. 更新状态（保持 running 状态，但更新时间戳）
         return self._repository.update_agent_status(agent_id, AgentStatus.running)
