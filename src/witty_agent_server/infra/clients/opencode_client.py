@@ -145,7 +145,13 @@ class OpenCodeClient(ClientBase):
     def list_agents(self) -> dict[str, Any]:
         response = self.http_client().get("/agent")
         self._raise_for_status(response, action="list_agents")
-        agents = response.json()
+        try:
+            agents = response.json()
+        except (ValueError, httpx.HTTPError):
+            raise OpenCodeClientError(
+                status=response.status_code,
+                message="opencode list_agents failed: invalid JSON response",
+            )
         if not isinstance(agents, list):
             agents = []
         default_id = agents[0].get("id", "main") if agents and isinstance(agents[0], dict) else "main"
@@ -158,7 +164,13 @@ class OpenCodeClient(ClientBase):
         del agent_id
         response = self.http_client().get("/session")
         self._raise_for_status(response, action="list_sessions")
-        body = response.json()
+        try:
+            body = response.json()
+        except (ValueError, httpx.HTTPError):
+            raise OpenCodeClientError(
+                status=response.status_code,
+                message="opencode list_sessions failed: invalid JSON response",
+            )
         sessions = body if isinstance(body, list) else []
         return {"sessions": sessions}
 
@@ -176,7 +188,13 @@ class OpenCodeClient(ClientBase):
     def create_session(self, *, session_key: str) -> None:
         response = self.http_client().post("/session", json={"title": session_key})
         self._raise_for_status(response, action="create_session")
-        body = response.json()
+        try:
+            body = response.json()
+        except (ValueError, httpx.HTTPError):
+            raise OpenCodeClientError(
+                status=response.status_code,
+                message="opencode create_session failed: invalid JSON response",
+            )
         session_id = body.get("id") if isinstance(body, dict) else None
         if isinstance(session_id, str) and session_id:
             self._session_map[session_key] = session_id
