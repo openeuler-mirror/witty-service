@@ -157,7 +157,6 @@ class DockerSandboxBackend(SandboxBackend):
                 },
                 ulimits=[
                     {"name": "nofile", "soft": self.nofile_soft_limit, "hard": self.nofile_hard_limit},
-                    {"name": "nproc", "soft": self.pids_limit, "hard": self.pids_limit},
                 ],
             )
         except Exception as exc:
