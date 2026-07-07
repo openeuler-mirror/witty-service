@@ -1,7 +1,8 @@
 from witty_agent_server.application.services.agent.base import (
     AgentServiceBase,
     GatewayAgentClientPort,
-    OpenClawLifecyclePort,
+    OpenClawLifecycleControlPort,
+    OpenCodeLifecycleControlPort,
     RuntimeLifecyclePort,
     RuntimeWorkspaceResolverPort,
 )
@@ -28,6 +29,11 @@ from witty_agent_server.application.services.agent.openclaw_lifecycle_service im
 from witty_agent_server.application.services.agent.opencode_agent_service import (
     OpenCodeAgentService,
 )
+from witty_agent_server.application.services.agent.opencode_lifecycle_service import (
+    OpenCodeLifecycleError,
+    OpenCodeLifecycleService,
+    OpenCodeServeStartError,
+)
 from witty_agent_server.application.services.agent.runtime_workspace_resolver import (
     RuntimeWorkspaceResolver,
 )
@@ -46,14 +52,18 @@ __all__ = [
     "InvalidAgentConfigError",
     "InvalidAgentTransitionError",
     "OpenClawAgentNotFoundError",
-    "OpenClawLifecyclePort",
     "OpenClawAgentService",
     "OpenClawGatewayStartError",
     "OpenClawGatewayStatusError",
     "OpenClawGatewayStopError",
+    "OpenClawLifecycleControlPort",
     "OpenClawLifecycleError",
     "OpenClawLifecycleService",
     "OpenCodeAgentService",
+    "OpenCodeLifecycleControlPort",
+    "OpenCodeLifecycleError",
+    "OpenCodeLifecycleService",
+    "OpenCodeServeStartError",
     "RuntimeLifecyclePort",
     "RuntimeWorkspaceResolver",
     "RuntimeWorkspaceResolverPort",

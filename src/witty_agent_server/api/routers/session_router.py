@@ -20,7 +20,7 @@ from witty_agent_server.application.services.session import (
     SessionServiceError,
 )
 from witty_agent_server.infra.persistence.in_memory import InMemorySessionRepository
-from witty_agent_server.infra.ws.openclaw_gateway_client import (
+from witty_agent_server.infra.clients.openclaw_gateway_client import (
     OpenClawGatewayClient,
 )
 

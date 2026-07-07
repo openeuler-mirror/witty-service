@@ -4,7 +4,7 @@ import logging
 from collections.abc import Iterator, Mapping
 from typing import Any
 
-from witty_agent_server.infra.ws.client_base import ClientBase
+from witty_agent_server.infra.clients.base import ClientBase
 from witty_agent_server.runtimes.runtime_base import (
     RuntimeBase,
     RuntimeChunk,

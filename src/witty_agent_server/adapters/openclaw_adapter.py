@@ -1,5 +1,4 @@
-from witty_agent_server.infra.ws.openclaw_gateway_client import (
-    DEFAULT_GATEWAY_WS_URL,
+from witty_agent_server.infra.clients.openclaw_gateway_client import (
     OpenClawGatewayClient,
 )
 from witty_agent_server.runtimes.openclaw_gateway_runtime import OpenClawGatewayRuntime

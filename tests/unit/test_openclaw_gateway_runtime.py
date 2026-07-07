@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from witty_agent_server.infra.ws.client_base import ClientBase
+from witty_agent_server.infra.clients.base import ClientBase
 from witty_agent_server.runtimes.openclaw_gateway_runtime import OpenClawGatewayRuntime
 
 
