@@ -66,8 +66,8 @@ def create_run(
     payload: BackportRunRequest,
     request: Request,
 ) -> BackportAsyncRunResponse:
-    if payload.action != "generate_report":
-        raise HTTPException(status_code=400, detail="Only generate_report supports async runs.")
+    if payload.action not in {"generate_report", "run_all"}:
+        raise HTTPException(status_code=400, detail="Only generate_report and run_all support async runs.")
 
     if not hasattr(request.app.state, "backport_runs"):
         request.app.state.backport_runs = {}
@@ -82,6 +82,7 @@ def create_run(
         "status": "running",
         "result": None,
         "error": "",
+        "progress": None,
         "created_at": time.time(),
         "updated_at": time.time(),
     }
@@ -93,7 +94,13 @@ def create_run(
     action_payload = payload.payload
 
     def worker() -> None:
-        service = BackportService(services)
+        # 主要服务于_run_all，记录当前运行的progress
+        def update_progress(progress: dict) -> None:
+            with runs_lock:
+                run_record["progress"] = progress
+                run_record["updated_at"] = time.time()
+
+        service = BackportService(services, progress_callback=update_progress)
         try:
             result = service.run_action(action, action_payload)
             with runs_lock:
