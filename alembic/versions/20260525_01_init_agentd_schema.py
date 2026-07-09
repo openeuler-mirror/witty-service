@@ -66,6 +66,8 @@ def upgrade() -> None:
             nullable=False,
             server_default="idle",
         ),
+        sa.Column("title", sa.String(length=255), nullable=True),
+        sa.Column("pinned", sa.Boolean(), nullable=False, server_default=sa.text("0")),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["agent_id"], ["agents.id"], ondelete="CASCADE"),
@@ -81,6 +83,21 @@ def upgrade() -> None:
         sa.Column("role", sa.String(length=16), nullable=False),
         sa.Column("content", sa.Text(), nullable=False),
         sa.Column("metadata_json", sa.JSON(), nullable=False),
+        sa.Column(
+            "status",
+            sa.Enum(
+                "generating",
+                "completed",
+                "error",
+                "interrupted",
+                name="message_status",
+                native_enum=False,
+                create_constraint=True,
+            ),
+            nullable=False,
+            server_default="completed",
+        ),
+        sa.Column("last_stream_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["agent_id"], ["agents.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["session_id"], ["sessions.id"], ondelete="CASCADE"),
@@ -88,6 +105,8 @@ def upgrade() -> None:
     )
     op.create_index("ix_messages_agent_id", "messages", ["agent_id"], unique=False)
     op.create_index("ix_messages_session_id", "messages", ["session_id"], unique=False)
+    op.create_index("ix_messages_session_created", "messages", ["session_id", "created_at"])
+    op.create_index("ix_messages_session_status", "messages", ["session_id", "status"])
 
     op.create_table(
         "message_events",
@@ -108,6 +127,7 @@ def upgrade() -> None:
     op.create_index("ix_message_events_agent_id", "message_events", ["agent_id"], unique=False)
     op.create_index("ix_message_events_message_id", "message_events", ["message_id"], unique=False)
     op.create_index("ix_message_events_session_id", "message_events", ["session_id"], unique=False)
+    op.create_index("ix_message_events_msg_seq", "message_events", ["message_id", "seq_no"])
 
     op.create_table(
         "skill_repo",
@@ -138,6 +158,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("skill_id"),
         sa.UniqueConstraint("repo_id", "relative_path", name="uq_skills_repo_relative_path"),
     )
+    op.create_index("ix_skills_repo_id", "skills", ["repo_id"], unique=False)
     op.create_table(
         "agent_skills",
         sa.Column("agent_id", sa.String(length=36), nullable=False),

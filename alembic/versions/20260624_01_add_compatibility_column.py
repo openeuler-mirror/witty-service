@@ -5,7 +5,7 @@ import sqlalchemy as sa
 
 
 revision = "20260624_01"
-down_revision = "20260525_01"
+down_revision = "20260622_01"
 branch_labels = None
 depends_on = None
 
