@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -412,7 +413,8 @@ class BackportCvekitClient:
 
     @classmethod
     def _is_blocking_conflict(cls, row: dict[str, Any]) -> bool:
-        return row.get("has_conflict") is True and not cls._is_skipped_row(row)
+        status = str(row.get("status") or "").strip().lower()
+        return row.get("has_conflict") is True and status not in {"failed", "error"} and not cls._is_skipped_row(row)
 
     @staticmethod
     def _is_pending_row(row: dict[str, Any]) -> bool:
@@ -677,6 +679,135 @@ class BackportCvekitClient:
                 "report_path": str(base_path),
                 "commit_count": len(persisted_commits),
                 "commits": persisted_commits,
+            },
+        }
+
+    def load_report(self, base_report_path: str) -> dict[str, Any]:
+        base_path = Path(base_report_path).expanduser().resolve()
+        if not base_path.exists():
+            raise FileNotFoundError(f"base_report_path 不存在: {base_path}")
+        _, commits = self._read_report(base_path)
+        return {
+            "operation": "load_report",
+            "status": "success",
+            "stage": "interactive_editing",
+            "artifacts": {"base_report_path": str(base_path)},
+            "report": {
+                "report_path": str(base_path),
+                "commit_count": len(commits),
+                "commits": commits,
+            },
+        }
+
+    def pin_target_title_index_baseline(
+        self,
+        *,
+        base_report_path: str,
+        target_path: str,
+    ) -> str:
+        base_path = Path(base_report_path).expanduser().resolve()
+        if not base_path.exists():
+            raise FileNotFoundError(f"base_report_path 不存在: {base_path}")
+        target_state = BackportGitClient.get_repo_state(target_path)
+        target_head = str(target_state.get("target_head") or "").strip()
+        if not target_head:
+            raise RuntimeError(f"无法解析目标仓 HEAD: {target_path}")
+
+        report_data, commits = self._read_report(base_path)
+        # 一键运行期间 target 会不断前进；这个字段只固定“标题索引”的查询基线，
+        # 不影响后续 git apply/cherry-pick 使用当前 HEAD。
+        report_data["target_title_index_ref_sha"] = target_head
+        self._write_report(base_path, report_data, commits)
+        return target_head
+
+    def check_row(
+        self,
+        base_report_path: str,
+        row: dict[str, Any],
+        working_report_path: str | None = None,
+    ) -> dict[str, Any]:
+        base_path = Path(base_report_path).expanduser().resolve()
+        if not base_path.exists():
+            raise FileNotFoundError(f"base_report_path 不存在: {base_path}")
+
+        report_data, commits = self._read_report(base_path)
+        resolved_row = self._resolve_commit_row(
+            row=row,
+            base_report_path=base_report_path,
+            working_report_path=working_report_path,
+        )
+
+        # 主 report 是可恢复的工作表；单行临时 report 只用于检查当前 commit。
+        # 每次检查结束后都把单行结果 merge 回主 report，避免整表预检查。
+        row_for_check = dict(resolved_row)
+        original_patch_path = str(
+            row_for_check.get("original_patch_path") or row_for_check.get("patch_path") or ""
+        ).strip()
+        row_for_check["status"] = "pending"
+        row_for_check["merged_in_target"] = None
+        row_for_check["merged_check_error"] = None
+        row_for_check["has_conflict"] = None
+        row_for_check["conflict_check_method"] = None
+        row_for_check["conflict_check_error"] = None
+        row_for_check["backported_patch_path"] = None
+        if original_patch_path:
+            row_for_check["original_patch_path"] = original_patch_path
+            row_for_check["patch_path"] = original_patch_path
+
+        run_dir: Path | None = None
+        try:
+            run_dir, _, updated_rows = self._run_stop_at_first_conflict_report(
+                report_data=report_data,
+                commits=[row_for_check],
+                run_prefix="check-backport-row",
+            )
+            updated_row = updated_rows[0] if updated_rows else row_for_check
+            next_commits = self._merge_report_rows(commits, [updated_row])
+            self._write_report(base_path, report_data, next_commits)
+            return {
+                "operation": "check_row",
+                "status": "success",
+                "stage": "interactive_editing",
+                "summary": "当前提交已检查。",
+                "artifacts": {
+                    "base_report_path": str(base_path),
+                },
+                "report": {
+                    "report_path": str(base_path),
+                    "commit_count": 1,
+                    "commits": [updated_row],
+                },
+            }
+        finally:
+            if run_dir is not None:
+                shutil.rmtree(run_dir, ignore_errors=True)
+
+    def merge_rows_into_report(
+        self,
+        base_report_path: str,
+        rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        base_path = Path(base_report_path).expanduser().resolve()
+        if not base_path.exists():
+            raise FileNotFoundError(f"base_report_path 不存在: {base_path}")
+        report_data, commits = self._read_report(base_path)
+        next_commits = self._merge_report_rows(commits, rows)
+        self._write_report(base_path, report_data, next_commits)
+        row_ids = {self._build_row_id(row) for row in rows if isinstance(row, dict)}
+        affected_rows = [
+            item
+            for item in next_commits
+            if isinstance(item, dict) and self._build_row_id(item) in row_ids
+        ]
+        return {
+            "operation": "merge_rows",
+            "status": "success",
+            "stage": "interactive_editing",
+            "artifacts": {"base_report_path": str(base_path)},
+            "report": {
+                "report_path": str(base_path),
+                "commit_count": len(affected_rows),
+                "commits": affected_rows,
             },
         }
 
@@ -1055,6 +1186,17 @@ class BackportCvekitClient:
                     "conflict_check_error": apply_result.get("error") or row.get("conflict_check_error"),
                 }
                 for row in affected_rows
+            ]
+
+        if affected_rows:
+            report_data, base_commits = self._read_report(base_path)
+            next_commits = self._merge_report_rows(base_commits, affected_rows)
+            self._write_report(base_path, report_data, next_commits)
+            affected_ids = {self._build_row_id(row) for row in affected_rows}
+            affected_rows = [
+                item
+                for item in next_commits
+                if self._build_row_id(item) in affected_ids
             ]
 
         return {

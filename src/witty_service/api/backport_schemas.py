@@ -47,6 +47,7 @@ class BackportAsyncRunResponse(BaseModel):
     status: str
     result: dict[str, Any] | None = None
     error: str = ""
+    progress: dict[str, Any] | None = None
 
 
 class BackportToolSnapshotResponse(BaseModel):

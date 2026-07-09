@@ -44,12 +44,17 @@ def _default_config() -> dict[str, str]:
 
 
 class BackportService:
-    def __init__(self, services: ServiceContainer) -> None:
+    def __init__(
+        self,
+        services: ServiceContainer,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self._config_path = services.workspace_store.base_dir / "config" / "backport.json"
         self._git_client = BackportGitClient()
         self._cvekit_client = BackportCvekitClient(
             runs_root=services.workspace_store.base_dir / "backport-runs",
         )
+        self._progress_callback = progress_callback
 
     def get_config(self) -> dict[str, str]:
         if not self._config_path.exists():
@@ -176,7 +181,9 @@ class BackportService:
 
     def _build_handlers(self) -> dict[str, Callable[[dict[str, Any]], dict[str, Any]]]:
         return {
+            "run_all": self._run_all,
             "generate_report": self._run_generate_report,
+            "load_report": self._run_load_report,
             "continue_report": self._run_continue_report,
             "recheck_conflict": self._run_recheck_conflict,
             "load_git_log": self._run_load_git_log,
@@ -191,6 +198,377 @@ class BackportService:
         }
 
     # ── 业务方法 ──────────────────────────────────────────────
+
+    def _run_all(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = self._extract_config(payload)
+        current_report_path = (
+            self._get_string(payload, "base_report_path", "baseReportPath", "working_report_path", "workingReportPath")
+            or config["current_report_path"]
+        )
+
+        if current_report_path and Path(current_report_path).expanduser().exists():
+            loaded = self._cvekit_client.load_report(current_report_path)
+            current_report_path = self._resolve_report_path(loaded)
+            current_commits = self._resolve_result_commits(loaded)
+            self._emit_run_all_progress(
+                phase="initializing",
+                message="已加载当前 Backport 工作表，准备从现有状态继续。",
+                current_report_path=current_report_path,
+                commits=current_commits,
+                updated_commits=[],
+            )
+        else:
+            self._require_string(payload, "run_all", "excel_path", "excelPath")
+            self._emit_run_all_progress(
+                phase="initializing",
+                message="当前没有可继续的 report，正在从 Excel 初始化工作表。",
+                current_report_path="",
+                commits=[],
+                updated_commits=[],
+            )
+            generated = self._run_generate_report(payload)
+            if generated.get("status") == "failed":
+                return {**generated, "operation": "run_all"}
+            current_report_path = self._resolve_report_path(generated)
+            current_commits = self._resolve_result_commits(generated)
+            self._emit_run_all_progress(
+                phase="initializing",
+                message="工作表已初始化，后续将按 commit 顺序逐条处理。",
+                current_report_path=current_report_path,
+                commits=current_commits,
+                updated_commits=current_commits,
+            )
+
+        if not current_report_path:
+            return {
+                "operation": "run_all",
+                "status": "failed",
+                "stage": "failed",
+                "summary": "一键运行未找到可用 report 路径",
+                "diagnostics": {"error_text": "Missing report path for run_all."},
+            }
+
+        target_baseline_sha = self._cvekit_client.pin_target_title_index_baseline(
+            base_report_path=current_report_path,
+            target_path=self._resolve_target_path(payload, config, operation="run_all"),
+        )
+        self._emit_run_all_progress(
+            phase="initializing",
+            message=f"已固定本轮目标标题索引基线: {target_baseline_sha[:12]}。",
+            current_report_path=current_report_path,
+            commits=current_commits,
+            updated_commits=[],
+        )
+
+        failed_count = 0
+        processed_count = 0
+        index = 0
+        step_count = 0
+        max_steps = int(payload.get("max_steps") or max(len(current_commits) * 4, 20))
+
+        # 一键运行必须按顺序推进：前序 commit 合入后会改变目标仓状态，
+        # 后序 commit 不能依赖一次性整表预检查的结果。
+        while index < len(current_commits) and step_count < max_steps:
+            step_count += 1
+            loaded = self._cvekit_client.load_report(current_report_path)
+            current_commits = self._resolve_result_commits(loaded)
+            if index >= len(current_commits):
+                break
+
+            row = current_commits[index]
+            row_status = str(row.get("status") or "").strip().lower()
+            has_apply_candidate = any(
+                str(row.get(key) or "").strip()
+                for key in ("backported_patch_path", "patch_path", "original_patch_path")
+            )
+            was_unchecked = row_status == "pending" or row.get("has_conflict") is None
+            base_progress = {
+                "current_index": index + 1,
+                "total": len(current_commits),
+                "current_commit": str(row.get("commit") or row.get("input_commit") or ""),
+                "current_title": self._describe_commit_row(row),
+                "current_row_id": str(row.get("row_id") or row.get("commit") or row.get("input_commit") or ""),
+                "failed_count": failed_count,
+                "processed_count": processed_count,
+            }
+
+            if (
+                self._is_skipped_commit(row)
+                or row.get("merged_in_target") is True
+                or row.get("empty_patch") is True
+                or row.get("equivalent_exists") is True
+                or str(row.get("applied_commit") or "").strip()
+                or row_status in {"failed", "error"}
+            ):
+                if row_status in {"failed", "error"}:
+                    failed_count += 1
+                processed_count += 1
+                self._emit_run_all_progress(
+                    phase="skipped",
+                    message=f"跳过第 {index + 1} 条：已完成、无需移植或已标记失败。",
+                    current_report_path=current_report_path,
+                    commits=current_commits,
+                    updated_commits=[row],
+                    failed_count=failed_count,
+                    processed_count=processed_count,
+                    **{key: value for key, value in base_progress.items() if key not in {"failed_count", "processed_count"}},
+                )
+                index += 1
+                continue
+
+            # 如果已经有 patch 文件，先尝试直接应用；失败后再回退到单行检查/解冲突。
+            # 这样避免 pending 行每次都启动 cvekit 做完整检查，绕开批量 cache 无法跨进程复用的问题。
+            needs_check = was_unchecked and not has_apply_candidate
+            if needs_check:
+                self._emit_run_all_progress(
+                    phase="checking",
+                    message=f"正在检查第 {index + 1} 条 commit。",
+                    current_report_path=current_report_path,
+                    commits=current_commits,
+                    updated_commits=[row],
+                    **base_progress,
+                )
+                checked = self._run_check_row(
+                    {
+                        "base_report_path": current_report_path,
+                        "working_report_path": current_report_path,
+                        "row": row,
+                    }
+                )
+                updated_rows = self._resolve_result_commits(checked)
+                if checked.get("status") == "failed":
+                    failed_count += 1
+                    processed_count += 1
+                    self._emit_run_all_progress(
+                        phase="failed",
+                        message=f"第 {index + 1} 条 commit 检查失败，已标记失败并继续后续 commit。",
+                        current_report_path=current_report_path,
+                        commits=current_commits,
+                        updated_commits=updated_rows or [row],
+                        failed_count=failed_count,
+                        processed_count=processed_count,
+                        **{key: value for key, value in base_progress.items() if key not in {"failed_count", "processed_count"}},
+                    )
+                    index += 1
+                    continue
+                self._emit_run_all_progress(
+                    phase="checking",
+                    message=f"第 {index + 1} 条 commit 检查完成。",
+                    current_report_path=current_report_path,
+                    commits=current_commits,
+                    updated_commits=updated_rows,
+                    **base_progress,
+                )
+                continue
+
+            if row.get("has_conflict") is True:
+                self._emit_run_all_progress(
+                    phase="resolving",
+                    message=f"第 {index + 1} 条存在冲突，正在尝试自动处理。",
+                    current_report_path=current_report_path,
+                    commits=current_commits,
+                    updated_commits=[row],
+                    **base_progress,
+                )
+                resolved = self._run_try_resolve(
+                    {
+                        "config": config,
+                        "base_report_path": current_report_path,
+                        "working_report_path": current_report_path,
+                        "row": row,
+                    }
+                )
+                resolved_rows = self._resolve_result_commits(resolved)
+                unresolved = resolved.get("status") == "failed" or self._find_blocking_conflict(resolved_rows) is not None
+                if unresolved:
+                    failed_count += 1
+                    failed_rows = [
+                        {
+                            **(item if isinstance(item, dict) else row),
+                            "status": "failed",
+                            "has_conflict": True,
+                            "error": resolved.get("summary") or "自动解冲突失败",
+                            "conflict_check_error": (
+                                resolved.get("summary")
+                                or (resolved.get("diagnostics") or {}).get("error_text")
+                                or row.get("conflict_check_error")
+                            ),
+                        }
+                        for item in (resolved_rows or [row])
+                    ]
+                    merged = self._cvekit_client.merge_rows_into_report(current_report_path, failed_rows)
+                    updated_rows = self._resolve_result_commits(merged)
+                    processed_count += 1
+                    self._emit_run_all_progress(
+                        phase="failed",
+                        message=f"第 {index + 1} 条自动解冲突失败，已标记失败并继续后续 commit。",
+                        current_report_path=current_report_path,
+                        commits=current_commits,
+                        updated_commits=updated_rows,
+                        failed_count=failed_count,
+                        processed_count=processed_count,
+                        **{key: value for key, value in base_progress.items() if key not in {"failed_count", "processed_count"}},
+                    )
+                    index += 1
+                    continue
+
+                self._emit_run_all_progress(
+                    phase="resolving",
+                    message=f"第 {index + 1} 条自动处理完成，准备应用。",
+                    current_report_path=current_report_path,
+                    commits=current_commits,
+                    updated_commits=resolved_rows or [row],
+                    **base_progress,
+                )
+                loaded = self._cvekit_client.load_report(current_report_path)
+                current_commits = self._resolve_result_commits(loaded)
+                row = current_commits[index]
+                row_status = str(row.get("status") or "").strip().lower()
+                if (
+                    self._is_skipped_commit(row)
+                    or row.get("merged_in_target") is True
+                    or row.get("empty_patch") is True
+                    or row.get("equivalent_exists") is True
+                    or str(row.get("applied_commit") or "").strip()
+                    or row_status in {"failed", "error"}
+                ):
+                    if row_status in {"failed", "error"}:
+                        failed_count += 1
+                    processed_count += 1
+                    self._emit_run_all_progress(
+                        phase="skipped",
+                        message=f"第 {index + 1} 条自动处理后已完成或无需再次应用。",
+                        current_report_path=current_report_path,
+                        commits=current_commits,
+                        updated_commits=[row],
+                        failed_count=failed_count,
+                        processed_count=processed_count,
+                        **{key: value for key, value in base_progress.items() if key not in {"failed_count", "processed_count"}},
+                    )
+                    index += 1
+                    continue
+
+            self._emit_run_all_progress(
+                phase="applying",
+                message=f"正在应用第 {index + 1} 条 commit。",
+                current_report_path=current_report_path,
+                commits=current_commits,
+                updated_commits=[row],
+                **base_progress,
+            )
+            applied = self._run_apply_row(
+                {
+                    "config": config,
+                    "base_report_path": current_report_path,
+                    "working_report_path": current_report_path,
+                    "row": row,
+                }
+            )
+            applied_rows = self._resolve_result_commits(applied)
+            if applied.get("status") == "failed" and was_unchecked:
+                self._emit_run_all_progress(
+                    phase="checking",
+                    message=f"第 {index + 1} 条直接应用失败，正在回退到冲突检查。",
+                    current_report_path=current_report_path,
+                    commits=current_commits,
+                    updated_commits=applied_rows or [row],
+                    **base_progress,
+                )
+                checked = self._run_check_row(
+                    {
+                        "base_report_path": current_report_path,
+                        "working_report_path": current_report_path,
+                        "row": applied_rows[0] if applied_rows else row,
+                    }
+                )
+                updated_rows = self._resolve_result_commits(checked)
+                if checked.get("status") == "failed":
+                    failed_count += 1
+                    processed_count += 1
+                    self._emit_run_all_progress(
+                        phase="failed",
+                        message=f"第 {index + 1} 条 commit 检查失败，已标记失败并继续后续 commit。",
+                        current_report_path=current_report_path,
+                        commits=current_commits,
+                        updated_commits=updated_rows or [row],
+                        failed_count=failed_count,
+                        processed_count=processed_count,
+                        **{key: value for key, value in base_progress.items() if key not in {"failed_count", "processed_count"}},
+                    )
+                    index += 1
+                    continue
+                self._emit_run_all_progress(
+                    phase="checking",
+                    message=f"第 {index + 1} 条 commit 检查完成。",
+                    current_report_path=current_report_path,
+                    commits=current_commits,
+                    updated_commits=updated_rows,
+                    **base_progress,
+                )
+                continue
+
+            if applied.get("status") == "failed":
+                failed_count += 1
+            processed_count += 1
+            self._emit_run_all_progress(
+                phase="failed" if applied.get("status") == "failed" else "applying",
+                message=applied.get("summary") or f"第 {index + 1} 条 commit 应用完成。",
+                current_report_path=current_report_path,
+                commits=current_commits,
+                updated_commits=applied_rows,
+                failed_count=failed_count,
+                processed_count=processed_count,
+                **{key: value for key, value in base_progress.items() if key not in {"failed_count", "processed_count"}},
+            )
+            index += 1
+
+        if step_count >= max_steps and index < len(current_commits):
+            final_report = self._cvekit_client.load_report(current_report_path)
+            final_commits = self._resolve_result_commits(final_report)
+            return {
+                "operation": "run_all",
+                "status": "failed",
+                "stage": "failed",
+                "summary": f"一键运行超过最大步数 {max_steps}，仍未完成。",
+                "artifacts": {"base_report_path": current_report_path},
+                "report": {
+                    "report_path": current_report_path,
+                    "commit_count": len(final_commits),
+                    "commits": final_commits,
+                },
+                "diagnostics": {"error_text": "run_all reached max_steps."},
+            }
+
+        final_report = self._cvekit_client.load_report(current_report_path)
+        final_commits = self._resolve_result_commits(final_report)
+        self._emit_run_all_progress(
+            phase="completed",
+            message="一键运行完成。",
+            current_report_path=current_report_path,
+            commits=final_commits,
+            updated_commits=[],
+            current_index=len(final_commits),
+            total=len(final_commits),
+            failed_count=failed_count,
+            processed_count=processed_count,
+        )
+        return {
+            "operation": "run_all",
+            "status": "success",
+            "stage": "completed",
+            "summary": f"一键运行完成，共处理 {processed_count} 条 commit，失败 {failed_count} 条。",
+            "artifacts": {"base_report_path": current_report_path},
+            "report": {
+                "report_path": current_report_path,
+                "commit_count": len(final_commits),
+                "commits": final_commits,
+            },
+            "report_artifacts": {},
+            "conflict_report_summary": {
+                "status": "not_implemented",
+                "message": "冲突总报告内容预留，后续从工具结果接入。",
+            },
+        }
 
     def _run_generate_report(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
@@ -224,6 +602,26 @@ class BackportService:
             logger.exception("generate_report failed")
             return {
                 "operation": "generate_report",
+                "status": "failed",
+                "summary": str(error),
+                "diagnostics": {"error_text": str(error)},
+            }
+
+    def _run_load_report(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = self._extract_config(payload)
+        base_report_path = self._get_string(payload, "base_report_path", "baseReportPath") or config["current_report_path"]
+        if not base_report_path:
+            raise DomainError(
+                code="BACKPORT_ARGUMENT_REQUIRED",
+                message="Missing required argument for load_report.",
+                details={"action": "load_report", "keys": ["base_report_path", "baseReportPath"]},
+            )
+        try:
+            return self._cvekit_client.load_report(base_report_path=base_report_path)
+        except (RuntimeError, FileNotFoundError, ValueError) as error:
+            logger.exception("load_report failed")
+            return {
+                "operation": "load_report",
                 "status": "failed",
                 "summary": str(error),
                 "diagnostics": {"error_text": str(error)},
@@ -403,6 +801,53 @@ class BackportService:
                 "diagnostics": {"error_text": str(error)},
                 "report": {"commit_count": 1, "commits": [failed_row]},
             }
+
+    def _run_check_row(self, payload: dict[str, Any]) -> dict[str, Any]:
+        base_report_path = self._require_string(payload, "check_row", "base_report_path", "baseReportPath")
+        working_report_path = self._get_string(
+            payload,
+            "working_report_path",
+            "workingReportPath",
+            "current_filtered_report_path",
+            "currentFilteredReportPath",
+        )
+        row = payload.get("row")
+        if not isinstance(row, dict) or not row:
+            raise DomainError(
+                code="BACKPORT_ROW_INVALID",
+                message="row must be a non-empty object.",
+                details={"action": "check_row"},
+            )
+        try:
+            return self._cvekit_client.check_row(
+                base_report_path=base_report_path,
+                working_report_path=working_report_path,
+                row=row,
+            )
+        except (RuntimeError, FileNotFoundError, ValueError) as error:
+            logger.exception("check_row failed")
+            failed_row = dict(row)
+            failed_row["status"] = "failed"
+            failed_row["error"] = str(error)
+            failed_row["conflict_check_error"] = str(error)
+            try:
+                merged = self._cvekit_client.merge_rows_into_report(base_report_path, [failed_row])
+                return {
+                    **merged,
+                    "operation": "check_row",
+                    "status": "failed",
+                    "summary": str(error),
+                    "diagnostics": {"error_text": str(error)},
+                }
+            except (RuntimeError, FileNotFoundError, ValueError):
+                logger.exception("failed to persist check_row failure")
+                return {
+                    "operation": "check_row",
+                    "status": "failed",
+                    "summary": str(error),
+                    "diagnostics": {"error_text": str(error)},
+                    "report": {"commit_count": 1, "commits": [failed_row]},
+                }
 
     def _run_try_resolve(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
@@ -597,22 +1042,122 @@ class BackportService:
             artifacts = {}
 
         config = self.get_config()
-        if action == "generate_report":
+        if action in {"generate_report", "run_all"}:
             config["current_excel_path"] = self._get_string(payload, "excel_path", "excelPath")
-            config["current_filtered_report_path"] = ""
+            if action == "generate_report":
+                config["current_filtered_report_path"] = ""
 
         report_path = (
             self._get_string(artifacts, "base_report_path")
             or self._get_string(artifacts, "report_path")
             or self._get_string(report, "report_path")
         )
-        if action in {"generate_report", "continue_report", "recheck_conflict", "try_resolve"} and report_path:
+        if action in {"generate_report", "continue_report", "recheck_conflict", "try_resolve", "run_all"} and report_path:
             config["current_report_path"] = report_path
 
         filtered_report_path = self._get_string(artifacts, "filtered_report_path")
-        if action == "execute_selected" and filtered_report_path:
+        if action in {"execute_selected", "run_all"} and filtered_report_path:
             config["current_filtered_report_path"] = filtered_report_path
         self.update_config(config)
+
+    def _emit_run_all_progress(
+        self,
+        *,
+        phase: str,
+        message: str,
+        current_report_path: str,
+        commits: list[dict[str, Any]],
+        updated_commits: list[dict[str, Any]],
+        current_index: int = 0,
+        total: int | None = None,
+        current_commit: str = "",
+        current_title: str = "",
+        current_row_id: str = "",
+        failed_count: int = 0,
+        processed_count: int = 0,
+    ) -> None:
+        if self._progress_callback is None:
+            return
+        safe_updated = self._cvekit_client.sanitize_commit_list(updated_commits)
+        progress = {
+            "phase": phase,
+            "message": message,
+            "current_report_path": current_report_path,
+            "current_index": current_index,
+            "total": total if total is not None else len(commits),
+            "current_commit": current_commit,
+            "current_title": current_title,
+            "current_row_id": current_row_id,
+            "processed_count": processed_count,
+            "failed_count": failed_count,
+            "updated_commits": safe_updated,
+            "conflict_report_summary": {
+                "status": "not_implemented",
+                "message": "冲突总报告内容预留，后续从工具结果接入。",
+            },
+        }
+        try:
+            self._progress_callback(progress)
+        except Exception:
+            logger.exception("Backport run_all progress callback failed")
+
+    @staticmethod
+    def _is_skipped_commit(item: dict[str, Any]) -> bool:
+        status = str(item.get("status") or "").strip().lower()
+        merged = str(item.get("merged_in_target") or "").strip().lower()
+        return status == "skipped" or merged == "skipped" or item.get("is_merge_commit") is True
+
+    @classmethod
+    def _find_blocking_conflict(cls, commits: list[dict[str, Any]]) -> dict[str, Any] | None:
+        return next(
+            (
+                item
+                for item in commits
+                if isinstance(item, dict)
+                and item.get("has_conflict") is True
+                and str(item.get("status") or "").strip().lower() not in {"failed", "error"}
+                and not cls._is_skipped_commit(item)
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _has_pending_commit(commits: list[dict[str, Any]]) -> bool:
+        return any(
+            isinstance(item, dict)
+            and str(item.get("status") or "").strip().lower() == "pending"
+            for item in commits
+        )
+
+    @staticmethod
+    def _resolve_report_path(parsed_result: dict[str, Any]) -> str:
+        artifacts = parsed_result.get("artifacts")
+        if not isinstance(artifacts, dict):
+            artifacts = {}
+        report = parsed_result.get("report")
+        if not isinstance(report, dict):
+            report = {}
+        return (
+            BackportService._get_string(artifacts, "base_report_path")
+            or BackportService._get_string(artifacts, "report_path")
+            or BackportService._get_string(report, "report_path")
+        )
+
+    @staticmethod
+    def _resolve_result_commits(parsed_result: dict[str, Any]) -> list[dict[str, Any]]:
+        report = parsed_result.get("report")
+        if not isinstance(report, dict):
+            return []
+        commits = report.get("commits")
+        return [item for item in commits if isinstance(item, dict)] if isinstance(commits, list) else []
+
+    @staticmethod
+    def _describe_commit_row(row: dict[str, Any]) -> str:
+        for key in ("row_id", "commit", "input_commit", "title", "commit_title"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return "<unknown>"
 
     def _require_string(self, payload: dict[str, Any], operation: str, *keys: str) -> str:
         value = self._get_string(payload, *keys)
