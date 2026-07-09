@@ -58,6 +58,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
     ) -> Iterator[RuntimeTurnEvent]:
         seen_started_tool_calls: set[str] = set()
         last_usage_payload: dict[str, Any] | None = None
+        _acc_delta: str = ""  # 累积已收到的 delta 文本，用于补齐上游未流出的末尾字符
         # 对接openclaw，输出原始event
         for raw_event in self._client.stream_turn(
             session_key=session_key, message=message
@@ -76,6 +77,27 @@ class OpenClawGatewayRuntime(RuntimeBase):
                     payload = event.get("payload")
                     if isinstance(payload, dict):
                         last_usage_payload = dict(payload)
+
+                # 追踪 message.delta 累积文本
+                if event.get("type") == "message.delta":
+                    delta = event.get("payload", {}).get("delta", "")
+                    if isinstance(delta, str) and delta:
+                        _acc_delta += delta
+                # 上游 OpenClaw runtime 可能将最后几个字符直接打包到 session.message
+                # 的完整文本中，而未通过 assistant stream 以 delta 形式下发。此处检测
+                # message.completed 文本是否比累积 delta 更长，补发缺失的末尾 delta。
+                elif event.get("type") == "message.completed":
+                    full_text = event.get("payload", {}).get("text", "")
+                    if (
+                        isinstance(full_text, str)
+                        and len(full_text) > len(_acc_delta)
+                        and full_text.startswith(_acc_delta)
+                    ):
+                        missing = full_text[len(_acc_delta):]
+                        if missing:
+                            yield {"type": "message.delta", "payload": {"delta": missing}}
+                            _acc_delta = full_text
+
                 yield event
 
     # 非流式发送时，仅拼接 message.delta 的 delta 作为最终结果。
