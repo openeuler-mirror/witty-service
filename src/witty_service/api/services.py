@@ -90,7 +90,7 @@ def build_default_services() -> ServiceContainer:
 
     _ensure_dir_exists(database_url)
     engine = create_sqlite_engine(database_url)
-    init_db(engine)
+    init_db(engine, auto_create=settings.database.auto_create)
 
     insight_http_client = None
     if insight_settings.enabled:
