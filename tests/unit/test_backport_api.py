@@ -40,6 +40,8 @@ def _service() -> MagicMock:
         "current_report_path": "/tmp/report.md",
         "current_filtered_report_path": "/tmp/filtered.md",
         "commit_sort": "describe",
+        "target_config_layout": "none",
+        "target_config_layout_opts": {"default_level": "L1-RECOMMEND"},
     }
     service.browse_path.return_value = {"path": "/tmp", "items": []}
     service.run_action.return_value = {
@@ -167,3 +169,29 @@ class TestTargetConfigLayoutSchema:
         for level in ("L0-MANDATORY", "L1-RECOMMEND", "L2-OPTIONAL"):
             opts = TargetConfigLayoutOpts(default_level=level)
             assert opts.default_level == level
+
+    def test_config_roundtrip_preserves_layout_fields(self) -> None:
+        """GET/PUT 往返后 layout 字段保持不变"""
+        payload = BackportConfigPayload(
+            target_config_layout="anolis",
+            target_config_layout_opts={"default_level": "L2-OPTIONAL"},
+        )
+        dumped = payload.model_dump()
+        assert dumped["target_config_layout"] == "anolis"
+        assert dumped["target_config_layout_opts"] == {"default_level": "L2-OPTIONAL"}
+
+        # 模拟从 JSON 重新加载
+        reloaded = BackportConfigPayload(**dumped)
+        assert reloaded.target_config_layout == "anolis"
+        assert reloaded.target_config_layout_opts.default_level == "L2-OPTIONAL"
+
+    def test_old_config_missing_fields_gets_defaults(self) -> None:
+        """旧配置缺少新字段时自动补齐默认值"""
+        # 模拟旧版 config JSON（没有 target_config_layout 和 target_config_layout_opts）
+        old_payload = {
+            "project_url": "https://example.com",
+            "target_path": "/tmp/target",
+        }
+        payload = BackportConfigPayload(**old_payload)
+        assert payload.target_config_layout == "none"
+        assert payload.target_config_layout_opts.default_level == "L1-RECOMMEND"
