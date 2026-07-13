@@ -12,6 +12,7 @@ from witty_service.api.backport_schemas import (
     BackportConfigPayload,
     BackportAsyncRunResponse,
     BackportConfigUpdateResponse,
+    BackportRuntimeStatusResponse,
     BackportRunRequest,
     BackportRunResponse,
 )
@@ -37,6 +38,13 @@ def get_backport_service(
     return BackportService(services)
 
 
+def _ensure_backport_runs(request: Request) -> tuple[dict, threading.Lock]:
+    if not hasattr(request.app.state, "backport_runs"):
+        request.app.state.backport_runs = {}
+        request.app.state.backport_runs_lock = threading.Lock()
+    return request.app.state.backport_runs, request.app.state.backport_runs_lock
+
+
 @router.get("/config", response_model=BackportConfigPayload)
 def get_config(
     backport_service: BackportService = Depends(get_backport_service),
@@ -51,6 +59,14 @@ def update_config(
 ) -> BackportConfigUpdateResponse:
     backport_service.update_config(payload.model_dump())
     return BackportConfigUpdateResponse(ok=True, config_path=backport_service.config_path)
+
+
+@router.post("/runtime-status", response_model=BackportRuntimeStatusResponse)
+def get_runtime_status(
+    payload: BackportConfigPayload,
+    backport_service: BackportService = Depends(get_backport_service),
+) -> BackportRuntimeStatusResponse:
+    return BackportRuntimeStatusResponse(**backport_service.get_runtime_status(payload.model_dump()))
 
 
 @router.get("/browse")
@@ -69,12 +85,7 @@ def create_run(
     if payload.action not in {"generate_report", "run_all"}:
         raise HTTPException(status_code=400, detail="Only generate_report and run_all support async runs.")
 
-    if not hasattr(request.app.state, "backport_runs"):
-        request.app.state.backport_runs = {}
-        request.app.state.backport_runs_lock = threading.Lock()
-
-    runs = request.app.state.backport_runs
-    runs_lock = request.app.state.backport_runs_lock
+    runs, runs_lock = _ensure_backport_runs(request)
     run_id = uuid.uuid4().hex
     run_record = {
         "run_id": run_id,
@@ -85,6 +96,8 @@ def create_run(
         "progress": None,
         "created_at": time.time(),
         "updated_at": time.time(),
+        "pause_requested": False,
+        "paused_at": None,
     }
     with runs_lock:
         runs[run_id] = run_record
@@ -100,12 +113,23 @@ def create_run(
                 run_record["progress"] = progress
                 run_record["updated_at"] = time.time()
 
-        service = BackportService(services, progress_callback=update_progress)
+        def pause_requested() -> bool:
+            with runs_lock:
+                return bool(run_record.get("pause_requested"))
+
+        service = BackportService(
+            services,
+            progress_callback=update_progress,
+            pause_checker=pause_requested,
+        )
         try:
             result = service.run_action(action, action_payload)
             with runs_lock:
                 run_record["status"] = "success"
                 run_record["result"] = result
+                parsed_result = result.get("parsedResult") if isinstance(result, dict) else None
+                if isinstance(parsed_result, dict) and parsed_result.get("stage") == "paused":
+                    run_record["paused_at"] = time.time()
                 run_record["updated_at"] = time.time()
         except Exception as exc:
             logger.exception("Backport async run failed: run_id=%s action=%s", run_id, action)
@@ -123,14 +147,31 @@ def get_run(
     run_id: str,
     request: Request,
 ) -> BackportAsyncRunResponse:
-    if not hasattr(request.app.state, "backport_runs"):
-        request.app.state.backport_runs = {}
-        request.app.state.backport_runs_lock = threading.Lock()
+    runs, runs_lock = _ensure_backport_runs(request)
 
-    with request.app.state.backport_runs_lock:
-        run_record = request.app.state.backport_runs.get(run_id)
+    with runs_lock:
+        run_record = runs.get(run_id)
         if run_record is None:
             raise HTTPException(status_code=404, detail="Backport run not found.")
+        return BackportAsyncRunResponse(**dict(run_record))
+
+
+@router.post("/runs/{run_id}/pause", response_model=BackportAsyncRunResponse)
+def pause_run(
+    run_id: str,
+    request: Request,
+) -> BackportAsyncRunResponse:
+    runs, runs_lock = _ensure_backport_runs(request)
+    with runs_lock:
+        run_record = runs.get(run_id)
+        if run_record is None:
+            raise HTTPException(status_code=404, detail="Backport run not found.")
+        if run_record.get("action") != "run_all":
+            raise HTTPException(status_code=400, detail="Only run_all supports pause.")
+        if run_record.get("status") != "running":
+            return BackportAsyncRunResponse(**dict(run_record))
+        run_record["pause_requested"] = True
+        run_record["updated_at"] = time.time()
         return BackportAsyncRunResponse(**dict(run_record))
 
 
