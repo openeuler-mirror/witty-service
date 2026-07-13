@@ -619,6 +619,8 @@ class BackportService:
                 commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 commit_sort=config["commit_sort"],
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
             )
         except (RuntimeError, FileNotFoundError, NotADirectoryError, ValueError) as error:
             logger.exception("generate_report failed")
@@ -773,6 +775,8 @@ class BackportService:
                 commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("execute_selected failed")
@@ -900,6 +904,8 @@ class BackportService:
                 commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("try_resolve failed")
