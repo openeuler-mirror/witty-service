@@ -23,7 +23,7 @@ commit {{commit_id}} {{source}}
 {{trailers}}"""
 
 
-def _default_config() -> dict[str, str]:
+def _default_config() -> dict[str, Any]:
     return {
         "project_url": "",
         "project_dir": "",
@@ -40,6 +40,8 @@ def _default_config() -> dict[str, str]:
         "current_excel_path": "",
         "current_report_path": "",
         "current_filtered_report_path": "",
+        "target_config_layout": "none",
+        "target_config_layout_opts": {"default_level": "L1-RECOMMEND"},
     }
 
 
@@ -56,7 +58,7 @@ class BackportService:
         )
         self._progress_callback = progress_callback
 
-    def get_config(self) -> dict[str, str]:
+    def get_config(self) -> dict[str, Any]:
         if not self._config_path.exists():
             logger.info("Backport config not found, using defaults: path=%s", self._config_path)
             return _default_config()
@@ -73,6 +75,12 @@ class BackportService:
         config = _default_config()
         for key in config:
             value = loaded.get(key, "")
+            if key == "target_config_layout_opts":
+                if isinstance(value, dict):
+                    merged = dict(config[key])
+                    merged.update(value)
+                    config[key] = merged
+                continue
             config[key] = value if isinstance(value, str) else ""
         config["commit_message_source"] = self._normalize_commit_message_source(
             config.get("commit_message_source", "")
@@ -86,10 +94,16 @@ class BackportService:
         )
         return config
 
-    def update_config(self, payload: dict[str, str]) -> None:
+    def update_config(self, payload: dict[str, Any]) -> None:
         config = _default_config()
         for key in config:
             value = payload.get(key, "")
+            if key == "target_config_layout_opts":
+                if isinstance(value, dict):
+                    merged = dict(config[key])
+                    merged.update(value)
+                    config[key] = merged
+                continue
             config[key] = value.strip() if isinstance(value, str) else ""
         config["commit_message_source"] = self._normalize_commit_message_source(
             config.get("commit_message_source", "")
@@ -1014,7 +1028,7 @@ class BackportService:
 
     # ── 辅助方法 ──────────────────────────────────────────────
 
-    def _extract_config(self, payload: dict[str, Any]) -> dict[str, str]:
+    def _extract_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         raw_config = payload.get("config")
         normalized = self.get_config()
         if not isinstance(raw_config, dict):
@@ -1022,6 +1036,12 @@ class BackportService:
 
         for key in _default_config():
             value = raw_config.get(key)
+            if key == "target_config_layout_opts":
+                if isinstance(value, dict):
+                    merged = dict(normalized[key])
+                    merged.update(value)
+                    normalized[key] = merged
+                continue
             if isinstance(value, str):
                 stripped = value.strip()
                 if stripped or key.startswith("current_"):
@@ -1184,7 +1204,7 @@ class BackportService:
     def _resolve_target_path(
         self,
         payload: dict[str, Any],
-        config: dict[str, str],
+        config: dict[str, Any],
         *,
         operation: str,
     ) -> str:
