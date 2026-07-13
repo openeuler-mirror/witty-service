@@ -515,6 +515,8 @@ class BackportCvekitClient:
         commit_message_source: str,
         linux_repo_path: str,
         commit_sort: str = "describe",
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         excel = Path(excel_path).expanduser().resolve()
         if not excel.exists():
@@ -556,6 +558,13 @@ class BackportCvekitClient:
         }.items():
             if isinstance(value, str) and value.strip():
                 base_config[key] = value.strip()
+
+        # 仅在 layout != "none" 时写入新字段
+        if target_config_layout and target_config_layout != "none":
+            base_config["target_config_layout"] = target_config_layout
+            if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
+                base_config["target_config_layout_opts"] = target_config_layout_opts
+
         with base_config_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(base_config, handle, allow_unicode=True, sort_keys=False)
 
@@ -905,6 +914,8 @@ class BackportCvekitClient:
         commit_message_source: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -970,6 +981,13 @@ class BackportCvekitClient:
             config_data["commit_message_source"] = commit_message_source
         if linux_repo_path.strip():
             config_data["linux_repo_path"] = linux_repo_path.strip()
+
+        # 仅在 layout != "none" 时写入新字段
+        if target_config_layout and target_config_layout != "none":
+            config_data["target_config_layout"] = target_config_layout
+            if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
+                config_data["target_config_layout_opts"] = target_config_layout_opts
+
         with filtered_report_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config_data, handle, allow_unicode=True, sort_keys=False)
 
@@ -1031,6 +1049,8 @@ class BackportCvekitClient:
         commit_message_source: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -1079,6 +1099,8 @@ class BackportCvekitClient:
             commit_message_source=commit_message_source,
             linux_repo_path=linux_repo_path,
             working_report_path=working_report_path,
+            target_config_layout=target_config_layout,
+            target_config_layout_opts=target_config_layout_opts,
         )
         affected_rows = [
             self._normalize_try_resolve_row(item)
