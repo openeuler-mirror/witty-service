@@ -4,6 +4,10 @@ import logging
 from typing import Any
 
 from witty_agent_server.application.services.session.base import SessionServiceBase
+from witty_agent_server.application.services.session.errors import (
+    RuntimeNotSupportedError,
+    SessionServiceError,
+)
 from witty_agent_server.runtimes.runtime_base import supports_runtime_session_listing
 
 
@@ -87,56 +91,3 @@ class OpenClawSessionService(SessionServiceBase):
             created_session["runtime_type"],
         )
         return created_session
-
-    def delete_session(self, *, agent_id: str, session_id: str) -> dict[str, Any]:
-        session = self._require_session(agent_id=agent_id, session_id=session_id)
-        runtime_type = session.get("runtime_type")
-        if not isinstance(runtime_type, str):
-            raise RuntimeNotSupportedError()
-        runtime_session_key = self._resolve_runtime_session_key(session)
-
-        self._ensure_runtime_session_deleted(
-            runtime_type=runtime_type,
-            session_key=runtime_session_key,
-        )
-
-        if self.repository is None:
-            raise SessionServiceError(
-                code="SESSION_REPOSITORY_NOT_CONFIGURED",
-                message="session repository not configured",
-                status_code=500,
-            )
-        deleted = self.repository.delete(session_id)
-        if deleted is None:
-            from witty_agent_server.application.services.session.errors import (
-                SessionNotFoundServiceError,
-            )
-
-            raise SessionNotFoundServiceError()
-        self._events.pop(session_id, None)
-        logger.info(
-            "session deleted: agent_id=%s session_id=%s runtime_key=%s",
-            agent_id,
-            session_id,
-            runtime_session_key,
-        )
-        return {"id": session_id, "deleted": True}
-
-    def abort_session(self, *, agent_id: str, session_id: str) -> dict[str, Any]:
-        session = self._require_session(agent_id=agent_id, session_id=session_id)
-        runtime_type = session.get("runtime_type")
-        if not isinstance(runtime_type, str):
-            raise RuntimeNotSupportedError()
-        runtime_session_key = self._resolve_runtime_session_key(session)
-
-        self._ensure_runtime_session_aborted(
-            runtime_type=runtime_type,
-            session_key=runtime_session_key,
-        )
-        logger.info(
-            "session aborted: agent_id=%s session_id=%s runtime_key=%s",
-            agent_id,
-            session_id,
-            runtime_session_key,
-        )
-        return {"id": session_id, "aborted": True}

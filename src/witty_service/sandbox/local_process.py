@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from math import log
 import socket
 import subprocess
@@ -65,6 +66,16 @@ class LocalProcessSandboxBackend(SandboxBackend):
         stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info(f"[LocalProcessSandbox] Stderr log path: {stderr_log_path}")
 
+        # 透传调用方注入的额外环境变量（例如 WITTY_RUNTIME_DEFAULT），
+        env = os.environ.copy()
+        extra_env = kwargs.get("env")
+        if isinstance(extra_env, dict):
+            env.update(extra_env)
+            logger.info(
+                "[LocalProcessSandbox] Merging extra env vars: %s",
+                list(extra_env.keys()),
+            )
+
         try:
             logger.info(f"[LocalProcessSandbox] Starting process in cwd: {command}")
             logger.info(f"[LocalProcessSandbox] Workspace path: {workspace_path}")
@@ -74,6 +85,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
                     cwd=workspace_path,
                     stdout=subprocess.DEVNULL,
                     stderr=stderr_file,
+                    env=env,
                     text=True,
                 )
             logger.info(f"[LocalProcessSandbox] Process started with PID: {process.pid} in cwd: {app_dir}")

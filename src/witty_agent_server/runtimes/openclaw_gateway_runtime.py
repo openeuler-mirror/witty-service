@@ -7,10 +7,9 @@ from typing import Any
 from witty_agent_server.infra.clients.base import ClientBase
 from witty_agent_server.runtimes.runtime_base import (
     RuntimeBase,
-    RuntimeChunk,
-    RuntimeResult,
     RuntimeTurnEvent,
     RuntimeType,
+    TurnEventType,
 )
 
 
@@ -21,111 +20,43 @@ class OpenClawGatewayRuntime(RuntimeBase):
     runtime_type: RuntimeType = "openclaw"
 
     def __init__(self, *, client: ClientBase) -> None:
-        self._client = client
+        super().__init__(client=client)
+        self._acc_delta: str = ""
 
-    def list_sessions(self, *, agent_id: str) -> list[dict[str, Any]]:
-        payload = self._client.list_sessions(agent_id=agent_id)
-        sessions = payload.get("sessions")
-        if not isinstance(sessions, list):
-            logger.warning(
-                "list_sessions returned invalid payload, agent_id=%s payload=%s",
-                agent_id,
-                payload,
-            )
-            return []
-        logger.info(
-            "list_sessions fetched from runtime, agent_id=%s count=%s",
-            agent_id,
-            len(sessions),
-        )
-        return [item for item in sessions if isinstance(item, dict)]
+    def _on_turn_begin(self, session_key: str, message: str) -> None:
+        del session_key, message
+        self._acc_delta = ""
 
-    def create_session(self, *, session_key: str) -> None:
-        self._client.create_session(session_key=session_key)
+    def _map_events(self, raw: dict[str, Any]) -> Iterator[RuntimeTurnEvent]:
+        yield from self._map_gateway_events(raw)
 
-    def delete_session(self, *, session_key: str) -> None:
-        self._client.delete_session(session_key=session_key)
-
-    def abort_session(self, *, session_key: str) -> None:
-        self._client.abort_session(session_key=session_key)
-
-    # 将 OpenClaw 事件流转换为统一 RuntimeTurnEvent，供上层处理。
-    def run_turn(
-        self,
-        *,
-        session_key: str,
-        message: str,
+    def _on_mapped_event(
+        self, event: RuntimeTurnEvent
     ) -> Iterator[RuntimeTurnEvent]:
-        seen_started_tool_calls: set[str] = set()
-        last_usage_payload: dict[str, Any] | None = None
-        _acc_delta: str = ""  # 累积已收到的 delta 文本，用于补齐上游未流出的末尾字符
-        # 对接openclaw，输出原始event
-        for raw_event in self._client.stream_turn(
-            session_key=session_key, message=message
-        ):
-            for event in self._map_gateway_events(raw_event):
-                if self._should_skip_duplicate_started(
-                    event=event, seen_started_tool_calls=seen_started_tool_calls
-                ):
-                    continue
-                if self._should_skip_duplicate_usage(
-                    event=event,
-                    last_usage_payload=last_usage_payload,
-                ):
-                    continue
-                if event.get("type") == "session.usage":
-                    payload = event.get("payload")
-                    if isinstance(payload, dict):
-                        last_usage_payload = dict(payload)
+        # 追踪 message.delta 累积文本
+        if event.get("type") == TurnEventType.MESSAGE_DELTA:
+            delta = event.get("payload", {}).get("delta", "")
+            if isinstance(delta, str) and delta:
+                self._acc_delta += delta
+        # 上游 OpenClaw runtime 可能将最后几个字符直接打包到 session.message
+        # 的完整文本中，而未通过 assistant stream 以 delta 形式下发。此处检测
+        # message.completed 文本是否比累积 delta 更长，补发缺失的末尾 delta。
+        elif event.get("type") == TurnEventType.MESSAGE_COMPLETED:
+            full_text = event.get("payload", {}).get("text", "")
+            if (
+                isinstance(full_text, str)
+                and len(full_text) > len(self._acc_delta)
+                and full_text.startswith(self._acc_delta)
+            ):
+                missing = full_text[len(self._acc_delta):]
+                if missing:
+                    yield {
+                        "type": TurnEventType.MESSAGE_DELTA,
+                        "payload": {"delta": missing},
+                    }
+                    self._acc_delta = full_text
+        yield event
 
-                # 追踪 message.delta 累积文本
-                if event.get("type") == "message.delta":
-                    delta = event.get("payload", {}).get("delta", "")
-                    if isinstance(delta, str) and delta:
-                        _acc_delta += delta
-                # 上游 OpenClaw runtime 可能将最后几个字符直接打包到 session.message
-                # 的完整文本中，而未通过 assistant stream 以 delta 形式下发。此处检测
-                # message.completed 文本是否比累积 delta 更长，补发缺失的末尾 delta。
-                elif event.get("type") == "message.completed":
-                    full_text = event.get("payload", {}).get("text", "")
-                    if (
-                        isinstance(full_text, str)
-                        and len(full_text) > len(_acc_delta)
-                        and full_text.startswith(_acc_delta)
-                    ):
-                        missing = full_text[len(_acc_delta):]
-                        if missing:
-                            yield {"type": "message.delta", "payload": {"delta": missing}}
-                            _acc_delta = full_text
-
-                yield event
-
-    # 非流式发送时，仅拼接 message.delta 的 delta 作为最终结果。
-    def send_message(self, session_id: str, message: str) -> RuntimeResult:
-        text_parts: list[str] = []
-        for event in self.run_turn(session_key=session_id, message=message):
-            if event["type"] != "message.delta":
-                continue
-            delta = event["payload"].get("delta")
-            if isinstance(delta, str):
-                text_parts.append(delta)
-        return {"text": "".join(text_parts)}
-
-    # 流式发送时，复用 run_turn 事件流并将 message.delta 转成 token_delta。
-    def stream_message(
-        self,
-        session_id: str,
-        message: str,
-    ) -> Iterator[RuntimeChunk]:
-        for event in self.run_turn(session_key=session_id, message=message):
-            event_type = event.get("type")
-            if event_type == "message.delta":
-                delta = event["payload"].get("delta")
-                if isinstance(delta, str) and delta:
-                    yield {"type": "token_delta", "delta": delta}
-            elif event_type in {"message.completed", "turn.completed"}:
-                yield {"type": "done"}
-                return
 
     def _map_gateway_events(
         self, raw_event: Mapping[str, Any]
@@ -140,7 +71,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
 
         if raw_type == "session.usage":
             if normalized_payload:
-                yield {"type": "session.usage", "payload": normalized_payload}
+                yield {"type": TurnEventType.SESSION_USAGE, "payload": normalized_payload}
             return
 
         if raw_type == "sessions.changed":
@@ -156,7 +87,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
             if runtime_session_id is None:
                 return
             yield {
-                "type": "session.runtime.changed",
+                "type": TurnEventType.SESSION_RUNTIME_CHANGED,
                 "payload": {
                     "runtime_session_id": runtime_session_id,
                 },
@@ -173,14 +104,14 @@ class OpenClawGatewayRuntime(RuntimeBase):
             if stream == "assistant":
                 delta = data.get("delta")
                 if isinstance(delta, str) and delta:
-                    yield {"type": "message.delta", "payload": {"delta": delta}}
+                    yield {"type": TurnEventType.MESSAGE_DELTA, "payload": {"delta": delta}}
                 return
             if stream == "thinking":
                 delta = data.get("delta")
                 text = data.get("text")
                 if isinstance(delta, str) and delta:
                     yield {
-                        "type": "thinking.delta",
+                        "type": TurnEventType.THINKING_DELTA,
                         "payload": {
                             "delta": delta,
                             "text": text if isinstance(text, str) else None,
@@ -193,7 +124,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
             if stream == "sessions.usage":
                 usage_payload = self._extract_usage_payload(data)
                 if usage_payload is not None:
-                    yield {"type": "session.usage", "payload": usage_payload}
+                    yield {"type": TurnEventType.SESSION_USAGE, "payload": usage_payload}
                 return
             if stream == "lifecycle":
                 phase = self._pick_string(data, "phase")
@@ -201,10 +132,10 @@ class OpenClawGatewayRuntime(RuntimeBase):
                     return
                 normalized_phase = phase.lower()
                 if normalized_phase == "start":
-                    yield {"type": "message.started", "payload": {}}
+                    yield {"type": TurnEventType.MESSAGE_STARTED, "payload": {}}
                     return
                 if normalized_phase == "end":
-                    yield {"type": "turn.completed", "payload": {}}
+                    yield {"type": TurnEventType.TURN_COMPLETED, "payload": {}}
                     return
                 if normalized_phase == "error":
                     code = self._pick_string(data, "code") or "OPENCLAW_LIFECYCLE_ERROR"
@@ -217,7 +148,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
                         or "openclaw lifecycle stream error"
                     )
                     yield {
-                        "type": "stream.error",
+                        "type": TurnEventType.STREAM_ERROR,
                         "payload": {
                             "code": code,
                             "message": message,
@@ -251,7 +182,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
                         if not isinstance(item, dict) or item.get("type") != "toolCall":
                             continue
                         yield {
-                            "type": "tool.call.started",
+                            "type": TurnEventType.TOOL_CALL_STARTED,
                             "payload": {
                                 "stage": "started",
                                 "tool_name": self._pick_string(item, "name") or "unknown",
@@ -270,10 +201,10 @@ class OpenClawGatewayRuntime(RuntimeBase):
                         and isinstance(item.get("text"), str)
                     )
                     if text:
-                        yield {"type": "message.completed", "payload": {"text": text}}
+                        yield {"type": TurnEventType.MESSAGE_COMPLETED, "payload": {"text": text}}
                         return
             yield from self._extract_thinking_events(message)
-    
+
     def _map_tool_result_message(
         self, message: Mapping[str, Any]
     ) -> Iterator[RuntimeTurnEvent]:
@@ -286,7 +217,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
         detail_status = details.get("status")
         is_error = self._pick_bool(message, "isError")
         yield {
-            "type": "tool.call.response",
+            "type": TurnEventType.TOOL_CALL_RESPONSE,
             "payload": {
                 "stage": "response",
                 "name": tool_name,
@@ -297,7 +228,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
                 "exitCode": details.get("exitCode"),
             },
         }
- 	 
+
     def _extract_thinking_events(
         self, message: Mapping[str, Any]
     ) -> Iterator[RuntimeTurnEvent]:
@@ -316,7 +247,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
             signature = item.get("signature")
             if isinstance(signature, str) and signature:
                 payload["signature"] = signature
-            yield {"type": "thinking", "payload": payload}
+            yield {"type": TurnEventType.THINKING, "payload": payload}
 
     def _map_agent_tool_stream(
         self, data: Mapping[str, Any]
@@ -332,7 +263,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
 
         if stage == "start":
             yield {
-                "type": "tool.call.started",
+                "type": TurnEventType.TOOL_CALL_STARTED,
                 "payload": {
                     "stage": "started",
                     "tool_name": tool_name,
@@ -352,7 +283,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
                 details = {}
             exitCode = details.get("exitCode", 1)
             yield {
-                "type": "tool.call.response",
+                "type": TurnEventType.TOOL_CALL_RESPONSE,
                 "payload": {
                     "stage": "response",
                     "name": tool_name,
@@ -377,7 +308,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
             if not isinstance(details, dict):
                 details = {}
             yield {
-                "type": "tool.call.delta",
+                "type": TurnEventType.TOOL_CALL_DELTA,
                 "payload": {
                     "stage": "delta",
                     "name": tool_name,
@@ -471,37 +402,3 @@ class OpenClawGatewayRuntime(RuntimeBase):
             if isinstance(value, (int, float)):
                 return float(value)
         return None
-
-    def _should_skip_duplicate_started(
-        self,
-        *,
-        event: RuntimeTurnEvent,
-        seen_started_tool_calls: set[str],
-    ) -> bool:
-        if event.get("type") != "tool.call.started":
-            return False
-        payload = event.get("payload")
-        if not isinstance(payload, dict):
-            return False
-        tool_call_id = payload.get("tool_call_id")
-        if not isinstance(tool_call_id, str) or not tool_call_id:
-            return False
-        if tool_call_id in seen_started_tool_calls:
-            return True
-        seen_started_tool_calls.add(tool_call_id)
-        return False
-
-    def _should_skip_duplicate_usage(
-        self,
-        *,
-        event: RuntimeTurnEvent,
-        last_usage_payload: Mapping[str, Any] | None,
-    ) -> bool:
-        if event.get("type") != "session.usage":
-            return False
-        payload = event.get("payload")
-        if not isinstance(payload, dict):
-            return False
-        if last_usage_payload is not None and dict(last_usage_payload) == payload:
-            return True
-        return False

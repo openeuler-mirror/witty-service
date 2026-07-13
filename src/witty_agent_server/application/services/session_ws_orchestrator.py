@@ -344,7 +344,7 @@ class SessionWSOrchestrator:
         text_parts: list[str] = []
         for chunk in runtime.stream_message(identity.runtime_session_key, message):
             chunk_type = chunk.get("type")
-            if chunk_type == "token_delta":
+            if chunk_type in ("delta", "token_delta"):
                 delta = chunk.get("delta")
                 if isinstance(delta, str) and delta:
                     text_parts.append(delta)

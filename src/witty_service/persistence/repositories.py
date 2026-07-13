@@ -217,7 +217,7 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
                 thinking.append(content)
             item["content"] = content
         
-        elif evt.event_type == "message.delta":
+        elif evt.event_type in ("message.delta", "thinking.delta"):
             continue
 
         elif evt.event_type == "usage.updated":
@@ -227,7 +227,6 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
                 "totalCost": payload.get("total_cost"),
             }
             item["usage"] = usage
-
         event_items.append(item)
 
     msg_status = msg.status.value if isinstance(msg.status, MessageStatus) else msg.status
@@ -881,7 +880,7 @@ class SqliteRepository:
             while True:
                 subq = select(MessageEventORM.id).filter(
                     MessageEventORM.message_id == message_id,
-                    MessageEventORM.event_type == "message.delta",
+                    MessageEventORM.event_type.in_(["message.delta", "thinking.delta"]),
                 ).limit(BATCH)
                 deleted = (
                     session.query(MessageEventORM)

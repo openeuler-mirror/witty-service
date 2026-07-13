@@ -124,6 +124,17 @@ class OpenCodeAgentService(AgentServiceBase):
         if config_dir is not None:
             self._lifecycle_service.update_config(config_dir=config_dir)
 
+        # 配置模型
+        model_cfg = config.get("model")
+        if isinstance(model_cfg, dict):
+            self._lifecycle_service.configure_model(
+                model_provider=model_cfg.get("provider", ""),
+                model_name=model_cfg.get("name"),
+                api_key=model_cfg.get("api_key", ""),
+                api_base_url=model_cfg.get("api_base_url"),
+                compatibility=model_cfg.get("compatibility"),
+            )
+
     def stop(self, *, agent_id: str | None = None) -> Agent:
         """停止 opencode serve 进程并将状态切换为 stopped。
 

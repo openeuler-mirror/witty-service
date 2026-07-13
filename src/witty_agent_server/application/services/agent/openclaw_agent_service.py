@@ -82,8 +82,9 @@ class OpenClawAgentService(AgentServiceBase):
         使用 onboard 命令启动，支持根据模型提供商选择不同的认证方式。
         """
         with self._lock:
-            profile = config.get("profile") if config else None
-            gateway_port = config.get("gateway_port") if config else None
+            openclaw_config = config.get("openclaw") if config else None
+            profile = openclaw_config.get("profile") if isinstance(openclaw_config, dict) else None
+            gateway_port = openclaw_config.get("gateway_port") if isinstance(openclaw_config, dict) else None
 
             is_running = self._probe_openclaw_running()
             logger.info(
