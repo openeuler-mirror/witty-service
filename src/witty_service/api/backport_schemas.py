@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +11,12 @@ commit {{commit_id}} {{source}}
 {{body}}
 
 {{trailers}}"""
+
+
+class TargetConfigLayoutOpts(BaseModel):
+    default_level: Literal["L0-MANDATORY", "L1-RECOMMEND", "L2-OPTIONAL"] = Field(
+        default_factory=lambda: "L1-RECOMMEND"
+    )
 
 
 class BackportConfigPayload(BaseModel):
@@ -29,6 +35,10 @@ class BackportConfigPayload(BaseModel):
     current_excel_path: str = ""
     current_report_path: str = ""
     current_filtered_report_path: str = ""
+    target_config_layout: Literal["none", "anolis"] = "none"
+    target_config_layout_opts: TargetConfigLayoutOpts = Field(
+        default_factory=TargetConfigLayoutOpts
+    )
 
 
 class BackportConfigUpdateResponse(BaseModel):
