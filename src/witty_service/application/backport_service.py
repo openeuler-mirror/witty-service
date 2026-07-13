@@ -81,6 +81,10 @@ class BackportService:
                     merged.update(value)
                     config[key] = merged
                 continue
+            if key == "target_config_layout":
+                if isinstance(value, str) and value.strip():
+                    config[key] = value.strip()
+                continue
             config[key] = value if isinstance(value, str) else ""
         config["commit_message_source"] = self._normalize_commit_message_source(
             config.get("commit_message_source", "")
@@ -103,6 +107,10 @@ class BackportService:
                     merged = dict(config[key])
                     merged.update(value)
                     config[key] = merged
+                continue
+            if key == "target_config_layout":
+                if isinstance(value, str) and value.strip():
+                    config[key] = value.strip()
                 continue
             config[key] = value.strip() if isinstance(value, str) else ""
         config["commit_message_source"] = self._normalize_commit_message_source(
@@ -1041,6 +1049,10 @@ class BackportService:
                     merged = dict(normalized[key])
                     merged.update(value)
                     normalized[key] = merged
+                continue
+            if key == "target_config_layout":
+                if isinstance(value, str) and value.strip():
+                    normalized[key] = value.strip()
                 continue
             if isinstance(value, str):
                 stripped = value.strip()
