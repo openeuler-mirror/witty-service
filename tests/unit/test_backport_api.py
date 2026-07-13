@@ -120,3 +120,50 @@ def test_get_run_raises_when_missing() -> None:
         backport_api.get_run("missing", request=request)
 
     assert exc_info.value.status_code == 404
+
+
+# ── target_config_layout / target_config_layout_opts Schema 测试 ──
+
+from witty_service.api.backport_schemas import TargetConfigLayoutOpts
+
+
+class TestTargetConfigLayoutSchema:
+    def test_default_values(self) -> None:
+        """默认值：layout=none, opts.default_level=L1-RECOMMEND"""
+        payload = BackportConfigPayload()
+        assert payload.target_config_layout == "none"
+        assert payload.target_config_layout_opts.default_level == "L1-RECOMMEND"
+
+    def test_anolis_with_l2_optional_accepted(self) -> None:
+        """合法组合 anolis + L2-OPTIONAL 被接受"""
+        payload = BackportConfigPayload(
+            target_config_layout="anolis",
+            target_config_layout_opts={"default_level": "L2-OPTIONAL"},
+        )
+        assert payload.target_config_layout == "anolis"
+        assert payload.target_config_layout_opts.default_level == "L2-OPTIONAL"
+
+    def test_invalid_layout_rejected(self) -> None:
+        """非法 layout 值被 Pydantic 拒绝"""
+        import pydantic
+        with pytest.raises(pydantic.ValidationError):
+            BackportConfigPayload(target_config_layout="invalid")
+
+    def test_invalid_default_level_rejected(self) -> None:
+        """非法 default_level 值被 Pydantic 拒绝"""
+        import pydantic
+        with pytest.raises(pydantic.ValidationError):
+            BackportConfigPayload(
+                target_config_layout_opts={"default_level": "INVALID"},
+            )
+
+    def test_target_config_layout_opts_default_factory(self) -> None:
+        """default_factory 创建独立实例"""
+        opts = TargetConfigLayoutOpts()
+        assert opts.default_level == "L1-RECOMMEND"
+
+    def test_target_config_layout_opts_all_valid_levels(self) -> None:
+        """三个合法 default_level 值都被接受"""
+        for level in ("L0-MANDATORY", "L1-RECOMMEND", "L2-OPTIONAL"):
+            opts = TargetConfigLayoutOpts(default_level=level)
+            assert opts.default_level == level
