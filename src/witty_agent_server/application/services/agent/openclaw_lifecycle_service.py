@@ -1,10 +1,18 @@
 from collections.abc import Callable, Sequence
 import json
 import logging
-import socket
 import subprocess
+import threading
 import time
 from subprocess import CompletedProcess, Popen, run
+
+from witty_agent_server.application.services.agent._process_utils import (
+    _KILL_TIMEOUT_SECONDS,
+    _STDERR_DRAIN_JOIN_TIMEOUT,
+    _STOP_TIMEOUT_SECONDS,
+    port_is_listening,
+    start_stderr_drainer,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -158,6 +166,7 @@ class OpenClawLifecycleService:
         self._profile = profile
         self._gateway_port = gateway_port
         self._gateway_process: Popen[str] | None = None
+        self._stderr_drainer: threading.Thread | None = None
 
     def update_config(
         self,
@@ -213,7 +222,7 @@ class OpenClawLifecycleService:
             "start() method is deprecated. Use onboard() instead."
         )
 
-    def start_gateway(self) -> None:
+    def start_server(self) -> None:
         if not self._profile or not self._gateway_port:
             raise OpenClawLifecycleError(
                 action="gateway run",
@@ -242,23 +251,32 @@ class OpenClawLifecycleService:
             text=True,
         )
 
+        self._stderr_drainer = start_stderr_drainer(
+            self._gateway_process,
+            logger=logger,
+            log_prefix="openclaw gateway stderr",
+            thread_name="openclaw-gateway-stderr-drainer",
+        )
+
         deadline = time.time() + 30
         while time.time() < deadline:
             if self._gateway_process.poll() is not None:
-                _, stderr = self._gateway_process.communicate()
+                rc = self._gateway_process.returncode or -1
+                self._stop_gateway_process()
                 raise OpenClawLifecycleError(
                     action="gateway run",
                     command=command,
-                    returncode=self._gateway_process.returncode or -1,
+                    returncode=rc,
                     stdout="",
-                    stderr=stderr or "",
+                    stderr="(see logs for stderr output)",
                     message="gateway process exited prematurely",
                 )
-            if self._port_is_listening(self._gateway_port):
+            if port_is_listening(self._gateway_port):
                 logger.info("Gateway started successfully on port %s", self._gateway_port)
                 return
             time.sleep(1)
 
+        self._stop_gateway_process()
         raise OpenClawLifecycleError(
             action="gateway run",
             command=command,
@@ -269,32 +287,27 @@ class OpenClawLifecycleService:
         )
 
     def _stop_gateway_process(self) -> None:
-        if self._gateway_process is None:
+        process = self._gateway_process
+        if process is None:
             return
+        self._gateway_process = None
+
         try:
-            self._gateway_process.terminate()
-            self._gateway_process.wait(timeout=5)
+            process.terminate()
+            process.wait(timeout=_STOP_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            pass
+            try:
+                process.kill()
+                process.wait(timeout=_KILL_TIMEOUT_SECONDS)
+            except Exception:
+                logger.exception("Failed to kill gateway process, giving up")
         except Exception:
             logger.exception("Failed to terminate gateway process")
 
-        if self._gateway_process.poll() is None:
-            try:
-                self._gateway_process.kill()
-                self._gateway_process.wait()
-            except Exception:
-                logger.exception("Failed to kill gateway process, giving up")
-
-        self._gateway_process = None
-
-    @staticmethod
-    def _port_is_listening(port: int) -> bool:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=1):
-                return True
-        except (OSError, ConnectionRefusedError):
-            return False
+        drainer = self._stderr_drainer
+        self._stderr_drainer = None
+        if drainer is not None and drainer.is_alive():
+            drainer.join(timeout=_STDERR_DRAIN_JOIN_TIMEOUT)
 
     def mcp_set(self, name: str, config: dict[str, object]) -> None:
         if not self._profile:

@@ -9,7 +9,7 @@ from witty_agent_server.application.models.agent import Agent, AgentStatus
 from witty_agent_server.application.services.agent.base import (
     AgentServiceBase,
     GatewayAgentClientPort,
-    OpenClawLifecyclePort,
+    OpenClawLifecycleControlPort,
 )
 from witty_agent_server.application.services.agent.errors import (
     AgentDefaultNotConfiguredError,
@@ -22,7 +22,7 @@ from witty_agent_server.application.services.agent.openclaw_lifecycle_service im
     OpenClawLifecycleService,
 )
 
-from witty_agent_server.infra.ws.openclaw_gateway_client import (
+from witty_agent_server.infra.clients.openclaw_gateway_client import (
     OpenClawGatewayClient,
     OpenClawGatewayClientError,
 )
@@ -49,7 +49,7 @@ class OpenClawAgentService(AgentServiceBase):
     def __init__(
         self,
         agent: Agent | None = None,
-        lifecycle_service: OpenClawLifecyclePort | None = None,
+        lifecycle_service: OpenClawLifecycleControlPort | None = None,
         gateway_agent_client: GatewayAgentClientPort | None = None,
         runtime: RuntimeType = "openclaw",
         *,
@@ -57,9 +57,11 @@ class OpenClawAgentService(AgentServiceBase):
         gateway_port: int | None = None,
     ) -> None:
         super().__init__(agent=agent, runtime=runtime)
-        self._lifecycle_service = lifecycle_service or OpenClawLifecycleService(
-            profile=profile,
-            gateway_port=gateway_port,
+        self._lifecycle_service: OpenClawLifecycleControlPort = (
+            lifecycle_service or OpenClawLifecycleService(
+                profile=profile,
+                gateway_port=gateway_port,
+            )
         )
         self._gateway_agent_client = gateway_agent_client or OpenClawGatewayClient(
             profile=profile,
@@ -241,7 +243,7 @@ class OpenClawAgentService(AgentServiceBase):
             ) from exc
 
         try:
-            self._lifecycle_service.start_gateway()
+            self._lifecycle_service.start_server()
         except OpenClawLifecycleError as exc:
             raise AgentServiceError(
                 code="OPENCLAW_GATEWAY_START_FAILED",

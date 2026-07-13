@@ -19,7 +19,7 @@ from witty_agent_server.application.services.skill.openclaw_skill_client import 
 from witty_agent_server.application.services.skill.skill_client_port import (
     SkillClientPort,
 )
-from witty_agent_server.infra.ws.openclaw_gateway_client import (
+from witty_agent_server.infra.clients.openclaw_gateway_client import (
     OpenClawGatewayClientError,
 )
 from witty_service.config import get_settings
