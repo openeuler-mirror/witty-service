@@ -20,38 +20,35 @@ class OpenCodeRuntime(RuntimeBase):
 
     def __init__(self, *, client: ClientBase | None = None) -> None:
         super().__init__(client=client)
-        self._part_types_by_id: dict[str, str] = {}
-        self._started_tool_call_ids: set[str] = set()
-        self._accumulated_text: str = ""
 
     def _on_turn_begin(self, session_key: str, message: str) -> None:
         del session_key, message
-        self._part_types_by_id = {}
-        self._started_tool_call_ids = set()
-        self._accumulated_text = ""
+        self._turn.part_types_by_id = {}
+        self._turn.started_tool_call_ids = set()
+        self._turn.accumulated_text = ""
 
     def _on_raw_event(self, raw: dict[str, Any]) -> None:
-        self._track_part_type(raw, part_types_by_id=self._part_types_by_id)
+        self._track_part_type(raw, part_types_by_id=self._turn.part_types_by_id)
 
     def _map_events(self, raw: dict[str, Any]) -> Iterator[RuntimeTurnEvent]:
         yield from self._map_opencode_event(
             raw,
-            part_types_by_id=self._part_types_by_id,
-            started_tool_call_ids=self._started_tool_call_ids,
+            part_types_by_id=self._turn.part_types_by_id,
+            started_tool_call_ids=self._turn.started_tool_call_ids,
         )
 
     def _on_mapped_event(
         self, event: RuntimeTurnEvent
     ) -> Iterator[RuntimeTurnEvent]:
         if event.get("type") == TurnEventType.MESSAGE_DELTA:
-            self._accumulated_text += event.get("payload", {}).get("delta", "")
+            self._turn.accumulated_text += event.get("payload", {}).get("delta", "")
         if (
             event.get("type") == TurnEventType.MESSAGE_COMPLETED
-            and self._accumulated_text
+            and self._turn.accumulated_text
         ):
             event = {
                 "type": event["type"],
-                "payload": {**event["payload"], "text": self._accumulated_text},
+                "payload": {**event["payload"], "text": self._turn.accumulated_text},
             }
         yield event
 

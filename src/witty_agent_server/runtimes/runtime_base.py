@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from enum import StrEnum
 from typing import Any, Literal, NotRequired, TypedDict
 
 from witty_agent_server.infra.clients.base import ClientBase
+
+logger = logging.getLogger(__name__)
 
 
 RuntimeType = Literal["openclaw", "opencode"]
@@ -47,6 +51,7 @@ class RuntimeBase(ABC):
 
     def __init__(self, *, client: ClientBase | None = None) -> None:
         self._client = client
+        self._turn = threading.local()
 
     def run_turn(
         self,
@@ -94,7 +99,11 @@ class RuntimeBase(ABC):
         """
 
     def _on_turn_begin(self, session_key: str, message: str) -> None:
-        """每轮开始时的状态初始化钩子（可选覆盖）。"""
+        """每轮开始时的状态初始化钩子（可选覆盖）。
+
+        Per-turn 可变状态应存储在 ``self._turn``
+        子类应在此钩子中初始化 ``self._turn.xxx``。
+        """
         del session_key, message
 
     def _on_raw_event(self, raw: dict[str, Any]) -> None:
@@ -107,6 +116,7 @@ class RuntimeBase(ABC):
         """每条已去重统一事件的后处理钩子（可选覆盖）。
 
         默认直接透传。子类可覆盖以实现文本累积、缺失 delta 补齐等。
+        Per-turn 状态应通过 ``self._turn`` 读写。
         """
         yield event
 
@@ -126,7 +136,21 @@ class RuntimeBase(ABC):
         """列出指定 agent 在 runtime 侧可见的会话。"""
         payload = self._ensure_client().list_sessions(agent_id=agent_id)
         sessions = payload.get("sessions") if isinstance(payload, dict) else None
-        return sessions if isinstance(sessions, list) else []
+        if not isinstance(sessions, list):
+            logger.warning(
+                "list_sessions returned invalid payload, runtime=%s agent_id=%s payload=%s",
+                self.runtime_type,
+                agent_id,
+                payload,
+            )
+            return []
+        logger.info(
+            "list_sessions fetched from runtime, runtime=%s agent_id=%s count=%s",
+            self.runtime_type,
+            agent_id,
+            len(sessions),
+        )
+        return [item for item in sessions if isinstance(item, dict)]
 
     def send_message(self, session_id: str, message: str) -> RuntimeResult:
         """发送一轮消息并返回最终文本结果。

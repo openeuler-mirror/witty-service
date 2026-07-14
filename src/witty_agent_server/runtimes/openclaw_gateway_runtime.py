@@ -21,11 +21,10 @@ class OpenClawGatewayRuntime(RuntimeBase):
 
     def __init__(self, *, client: ClientBase) -> None:
         super().__init__(client=client)
-        self._acc_delta: str = ""
 
     def _on_turn_begin(self, session_key: str, message: str) -> None:
         del session_key, message
-        self._acc_delta = ""
+        self._turn.acc_delta = ""
 
     def _map_events(self, raw: dict[str, Any]) -> Iterator[RuntimeTurnEvent]:
         yield from self._map_gateway_events(raw)
@@ -37,7 +36,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
         if event.get("type") == TurnEventType.MESSAGE_DELTA:
             delta = event.get("payload", {}).get("delta", "")
             if isinstance(delta, str) and delta:
-                self._acc_delta += delta
+                self._turn.acc_delta += delta
         # 上游 OpenClaw runtime 可能将最后几个字符直接打包到 session.message
         # 的完整文本中，而未通过 assistant stream 以 delta 形式下发。此处检测
         # message.completed 文本是否比累积 delta 更长，补发缺失的末尾 delta。
@@ -45,16 +44,16 @@ class OpenClawGatewayRuntime(RuntimeBase):
             full_text = event.get("payload", {}).get("text", "")
             if (
                 isinstance(full_text, str)
-                and len(full_text) > len(self._acc_delta)
-                and full_text.startswith(self._acc_delta)
+                and len(full_text) > len(self._turn.acc_delta)
+                and full_text.startswith(self._turn.acc_delta)
             ):
-                missing = full_text[len(self._acc_delta):]
+                missing = full_text[len(self._turn.acc_delta):]
                 if missing:
                     yield {
                         "type": TurnEventType.MESSAGE_DELTA,
                         "payload": {"delta": missing},
                     }
-                    self._acc_delta = full_text
+                    self._turn.acc_delta = full_text
         yield event
 
 

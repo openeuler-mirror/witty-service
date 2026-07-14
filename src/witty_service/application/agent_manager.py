@@ -930,6 +930,7 @@ class AgentManager:
                 )
                 runtime_config = self._get_runtime_config(agent.adapter_type)
                 sandbox_payload = sandbox_state.sandbox_payload_json
+                sandbox_payload.setdefault("metadata", {})["gateway_port"] = gateway_port
                 sandbox_payload.setdefault("metadata", {})[runtime_config.port_metadata_key()] = gateway_port
                 self._repository.save_sandbox_state(
                     agent_id,
