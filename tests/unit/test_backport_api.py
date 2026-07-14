@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from witty_service.api import backport as backport_api
-from witty_service.api.backport_schemas import BackportConfigPayload, BackportRunRequest
+from witty_service.api.backport_schemas import BackportConfigPayload, BackportRunRequest, TargetConfigLayoutOpts
 
 
 class State:
@@ -125,8 +125,6 @@ def test_get_run_raises_when_missing() -> None:
 
 
 # ── target_config_layout / target_config_layout_opts Schema 测试 ──
-
-from witty_service.api.backport_schemas import TargetConfigLayoutOpts
 
 
 class TestTargetConfigLayoutSchema:

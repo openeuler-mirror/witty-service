@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from witty_service.api.backport_schemas import TargetConfigLayoutOpts
 from witty_service.api.services import ServiceContainer
 from witty_service.application.backport_cvekit_client import BackportCvekitClient
 from witty_service.application.backport_git_client import BackportGitClient
@@ -104,12 +105,16 @@ class BackportService:
             value = payload.get(key, "")
             if key == "target_config_layout_opts":
                 if isinstance(value, dict):
+                    try:
+                        TargetConfigLayoutOpts(**value)
+                    except Exception:
+                        continue
                     merged = dict(config[key])
                     merged.update(value)
                     config[key] = merged
                 continue
             if key == "target_config_layout":
-                if isinstance(value, str) and value.strip():
+                if isinstance(value, str) and value.strip() in {"none", "anolis"}:
                     config[key] = value.strip()
                 continue
             config[key] = value.strip() if isinstance(value, str) else ""
@@ -1052,12 +1057,16 @@ class BackportService:
             value = raw_config.get(key)
             if key == "target_config_layout_opts":
                 if isinstance(value, dict):
+                    try:
+                        TargetConfigLayoutOpts(**value)
+                    except Exception:
+                        continue
                     merged = dict(normalized[key])
                     merged.update(value)
                     normalized[key] = merged
                 continue
             if key == "target_config_layout":
-                if isinstance(value, str) and value.strip():
+                if isinstance(value, str) and value.strip() in {"none", "anolis"}:
                     normalized[key] = value.strip()
                 continue
             if isinstance(value, str):
