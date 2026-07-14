@@ -2,20 +2,66 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
 from witty_service.application.backport_git_client import BackportGitClient
 
 
+@dataclass(slots=True)
+class BackportRuntimeConfig:
+    mcp_args: list[Any]
+    mcp_env: dict[str, Any]
+    llm_provider: str
+    api_key: str
+    llm_base_url: str = ""
+    llm_model_name: str = ""
+
+
 class BackportCvekitClient:
     REFRESH_META_SCHEMA_VERSION = 1
+    CVEKIT_OPTION_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
+    CVEKIT_OPTION_DENYLIST = {
+        "action",
+        "api_key",
+        "apply",
+        "backport_config",
+        "backport_excel",
+        "branch",
+        "clone_dir",
+        "commit_message_source",
+        "commit_message_template",
+        "debug",
+        "excel_sheet",
+        "execute",
+        "fork_repo_url",
+        "gitee_token",
+        "json",
+        "linux_repo_path",
+        "llm_base_url",
+        "llm_model_name",
+        "llm_provider",
+        "output",
+        "patch_dataset_dir",
+        "preview_commit_message",
+        "project_dir",
+        "project_url",
+        "repo_url",
+        "signer_email",
+        "signer_name",
+        "source_branch",
+        "stop_at_first_conflict",
+        "target_path",
+        "target_release",
+    }
     PATCH_KIND_TO_KEY = {
         "original": "original_patch_path",
         "current": "patch_path",
@@ -27,15 +73,15 @@ class BackportCvekitClient:
         self,
         *,
         runs_root: str | Path,
-        openclaw_config_path: str | Path | None = None,
     ) -> None:
         self._runs_root = Path(runs_root).expanduser().resolve()
-        self._openclaw_config_path = self._resolve_openclaw_config_path(openclaw_config_path)
+        self._conflict_reporter_url = ""
+        self._runtime_config: BackportRuntimeConfig | None = None
 
     # ── 初始化 ──────────────────────────────────────────────────
 
     @staticmethod
-    def _resolve_cvekit() -> Path:
+    def resolve_cvekit_path() -> Path:
         result = subprocess.run(
             ["which", "cvekit"],
             capture_output=True, text=True, encoding="utf-8", check=False,
@@ -47,36 +93,47 @@ class BackportCvekitClient:
                 return path
         raise RuntimeError("cvekit 不在 PATH 中")
 
-    def _resolve_openclaw_config_path(self, config_path: str | Path | None) -> Path:
-        from witty_service.config import get_settings
-        path = config_path or get_settings().openclaw.config_path or "~/.openclaw/openclaw.json"
-        return Path(path).expanduser().resolve(strict=False)
+    def set_conflict_reporter_url(self, url: str) -> None:
+        self._conflict_reporter_url = url.strip()
+
+    def set_runtime_config(self, runtime_config: BackportRuntimeConfig | None) -> None:
+        self._runtime_config = runtime_config
+
+    @classmethod
+    def build_cvekit_option_args(
+        cls,
+        cvekit_options: dict[str, Any] | None,
+    ) -> list[str]:
+        if not cvekit_options:
+            return []
+        args: list[str] = []
+        for key, value in cvekit_options.items():
+            normalized_key = str(key).strip().replace("-", "_")
+            if not cls.CVEKIT_OPTION_KEY_PATTERN.match(normalized_key):
+                raise ValueError(f"cvekit option 名称不合法: {key}")
+            if normalized_key in cls.CVEKIT_OPTION_DENYLIST:
+                raise ValueError(f"cvekit option 由后端管理，不能覆盖: {key}")
+            cli_name = f"--{normalized_key.replace('_', '-')}"
+            if value is True:
+                args.append(cli_name)
+            elif value is False or value is None or value == "":
+                continue
+            elif isinstance(value, (dict, list)):
+                args.extend([cli_name, json.dumps(value, ensure_ascii=False)])
+            elif isinstance(value, (str, int, float)):
+                args.extend([cli_name, str(value)])
+            else:
+                raise ValueError(f"cvekit option 类型不支持: {key}")
+        return args
 
     # ── cvekit MCP 配置 ────────────────────────────────────────
 
     def _get_cvekit_mcp_config(self) -> tuple[list[Any], dict[str, Any]]:
-        config_path = self._openclaw_config_path
-        try:
-            with config_path.open("r", encoding="utf-8") as handle:
-                config = json.load(handle)
-        except Exception as error:
-            raise RuntimeError(f"读取 openclaw.json 失败: {error}") from error
-        if not isinstance(config, dict):
-            raise RuntimeError(f"openclaw.json 顶层必须是对象: {config_path}")
-
-        mcp_config = ((config.get("mcp") or {}).get("servers") or {}).get("cvekit_mcp")
-        if not isinstance(mcp_config, dict):
-            mcp_config = ((config.get("mcpServers") or {}).get("cvekit_mcp") or {})
-        if not isinstance(mcp_config, dict):
-            raise RuntimeError(f"openclaw.json 中缺少 cvekit_mcp 配置: {config_path}")
-
-        args = mcp_config.get("args") or []
-        if not isinstance(args, list):
-            args = []
-        env_config = mcp_config.get("env") or {}
-        if not isinstance(env_config, dict):
-            env_config = {}
-        return args, env_config
+        if self._runtime_config is not None:
+            return list(self._runtime_config.mcp_args), dict(self._runtime_config.mcp_env)
+        raise RuntimeError(
+            "Backport 运行环境未配置，请在 Backport 配置区选择运行模型并确认 cvekit_mcp 已配置。"
+        )
 
     @staticmethod
     def _parse_option_values(args: list[Any], option_names: set[str]) -> dict[str, str]:
@@ -100,56 +157,15 @@ class BackportCvekitClient:
             index += 1
         return arg_values
 
-    def _get_llm_config(
-        self,
-        arg_values: dict[str, str],
-        env_config: dict[str, Any],
-    ) -> dict[str, str]:
-        selected_provider = (
-            arg_values.get("--llm-provider")
-            or str(env_config.get("LLM_PROVIDER") or "").strip()
-        ).lower()
-        api_key = (
-            arg_values.get("--api-key")
-            or str(env_config.get("API_KEY") or "").strip()
-            or str(env_config.get("OPENAI_KEY") or "").strip()
-        )
-        base_url = (
-            arg_values.get("--llm-base-url")
-            or str(env_config.get("LLM_BASE_URL") or "").strip()
-            or str(env_config.get("BASE_URL") or "").strip()
-        )
-        model_name = (
-            arg_values.get("--llm-model-name")
-            or str(env_config.get("LLM_MODEL_NAME") or "").strip()
-            or str(env_config.get("MODEL_NAME") or "").strip()
-        )
-        if not selected_provider:
-            raise RuntimeError(
-                "openclaw.json cvekit_mcp 缺少 --llm-provider 或 LLM_PROVIDER: "
-                f"{self._openclaw_config_path}"
-            )
-        if not api_key:
-            raise RuntimeError(
-                "openclaw.json cvekit_mcp 缺少 --api-key 或 API_KEY: "
-                f"{self._openclaw_config_path}"
-            )
-
-        return {
-            "provider": selected_provider,
-            "api_key": api_key,
-            "base_url": base_url,
-            "model_name": model_name,
-        }
-
     # ── 通用工具 ────────────────────────────────────────────────
 
     def _build_env(self, mcp_env: dict[str, Any]) -> dict[str, str]:
-        cvekit_bin_dir = self._resolve_cvekit().parent
+        cvekit_bin_dir = self.resolve_cvekit_path().parent
         env: dict[str, str] = {
             "PATH": os.pathsep.join(
                 [
                     str(cvekit_bin_dir),
+                    str(Path.home() / ".npm-global" / "bin"),
                     "/usr/local/bin",
                     "/usr/bin",
                     "/usr/local/sbin",
@@ -166,6 +182,20 @@ class BackportCvekitClient:
         ).strip()
         if joern_path:
             env["JOERN_PATH"] = joern_path
+        conflict_reporter_url = (
+            self._conflict_reporter_url
+            or str(mcp_env.get("CONFLICT_REPORTER_URL") or "").strip()
+            or os.environ.get("CONFLICT_REPORTER_URL", "").strip()
+        )
+        if conflict_reporter_url:
+            env["CONFLICT_REPORTER_URL"] = conflict_reporter_url
+        if self._runtime_config is not None:
+            env["API_KEY"] = self._runtime_config.api_key
+            env["LLM_PROVIDER"] = self._runtime_config.llm_provider
+            if self._runtime_config.llm_base_url:
+                env["LLM_BASE_URL"] = self._runtime_config.llm_base_url
+            if self._runtime_config.llm_model_name:
+                env["LLM_MODEL_NAME"] = self._runtime_config.llm_model_name
         return env
 
     def _run_cvekit(self, args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -179,28 +209,23 @@ class BackportCvekitClient:
         mcp_options = self._parse_option_values(
             mcp_args,
             {
-                "--llm-provider",
-                "--api-key",
-                "--llm-base-url",
-                "--llm-model-name",
                 "--backport-engine",
                 "--format-mode",
             },
         )
-        llm_config = self._get_llm_config(mcp_options, mcp_env)
+        runtime_config = cast(BackportRuntimeConfig, self._runtime_config)
         env = self._build_env(mcp_env)
         for option, value in (
-            ("--llm-provider", llm_config.get("provider")),
-            ("--llm-base-url", llm_config.get("base_url")),
-            ("--llm-model-name", llm_config.get("model_name")),
-            ("--api-key", llm_config.get("api_key")),
+            ("--llm-provider", runtime_config.llm_provider),
+            ("--llm-base-url", runtime_config.llm_base_url),
+            ("--llm-model-name", runtime_config.llm_model_name),
             ("--backport-engine", mcp_options.get("--backport-engine")),
             ("--format-mode", mcp_options.get("--format-mode")),
         ):
             if value and option not in existing_options:
                 cmd_args.extend([option, value])
 
-        cmd = [str(self._resolve_cvekit()), *cmd_args]
+        cmd = [str(self.resolve_cvekit_path()), *cmd_args]
         result = subprocess.run(
             cmd,
             cwd=str(cwd),
@@ -905,6 +930,7 @@ class BackportCvekitClient:
         commit_message_source: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
+        cvekit_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -978,6 +1004,7 @@ class BackportCvekitClient:
             "--backport-config", str(filtered_report_path),
             "-e", "--debug", "--json",
         ]
+        cmd.extend(self.build_cvekit_option_args(cvekit_options))
         result = self._run_cvekit(cmd, filtered_report_path.parent)
         combined_output = "\n".join(part for part in [result.stdout, result.stderr] if part)
 
@@ -1031,6 +1058,7 @@ class BackportCvekitClient:
         commit_message_source: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
+        cvekit_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -1079,6 +1107,7 @@ class BackportCvekitClient:
             commit_message_source=commit_message_source,
             linux_repo_path=linux_repo_path,
             working_report_path=working_report_path,
+            cvekit_options=cvekit_options,
         )
         affected_rows = [
             self._normalize_try_resolve_row(item)

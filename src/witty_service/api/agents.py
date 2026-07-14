@@ -684,12 +684,19 @@ async def enable_mcp_server(
     adaptor_client = AdaptorHttpClient(
         base_url=services.repository.get_sandbox_state(agent_id).adapter_base_url
     )
+    runtime_mcp_config = mcp_server.mcp_server_config
+    if (
+        isinstance(runtime_mcp_config, dict)
+        and isinstance(runtime_mcp_config.get(mcp_server.mcp_server_name), dict)
+    ):
+        runtime_mcp_config = runtime_mcp_config[mcp_server.mcp_server_name]
+
     try:
         await adaptor_client.post(
             "/agent/mcp/enable",
             json={
                 "mcp_server_name": mcp_server.mcp_server_name,
-                "mcp_server_config": mcp_server.mcp_server_config,
+                "mcp_server_config": runtime_mcp_config,
             },
         )
     finally:

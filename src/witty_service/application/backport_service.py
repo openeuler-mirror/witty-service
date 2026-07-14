@@ -7,8 +7,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from witty_service.api.services import ServiceContainer
-from witty_service.application.backport_cvekit_client import BackportCvekitClient
+from witty_service.application.backport_cvekit_client import (
+    BackportCvekitClient,
+    BackportRuntimeConfig,
+)
 from witty_service.application.backport_git_client import BackportGitClient
+from witty_service.application.backport_conflict_reporter_manager import ConflictReporterManager
 from witty_service.domain.errors import DomainError
 
 
@@ -23,9 +27,10 @@ commit {{commit_id}} {{source}}
 {{trailers}}"""
 
 
-def _default_config() -> dict[str, str]:
+def _default_config() -> dict[str, Any]:
     return {
         "project_url": "",
+        "backport_model_id": "",
         "project_dir": "",
         "source_branch": "",
         "target_path": "",
@@ -40,7 +45,21 @@ def _default_config() -> dict[str, str]:
         "current_excel_path": "",
         "current_report_path": "",
         "current_filtered_report_path": "",
+        "enable_conflict_summary": False,
+        "cvekit_options": {},
     }
+
+
+def _normalize_cvekit_options(config: dict[str, Any]) -> dict[str, Any]:
+    raw_options = config.get("cvekit_options")
+    options = dict(raw_options) if isinstance(raw_options, dict) else {}
+    legacy_enabled = config.get("enable_conflict_summary")
+    if legacy_enabled is True:
+        options["enable_conflict_summary"] = True
+    elif "enable_conflict_summary" not in options and isinstance(legacy_enabled, bool):
+        options["enable_conflict_summary"] = legacy_enabled
+    config["cvekit_options"] = options
+    return config
 
 
 class BackportService:
@@ -48,15 +67,19 @@ class BackportService:
         self,
         services: ServiceContainer,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        pause_checker: Callable[[], bool] | None = None,
     ) -> None:
         self._config_path = services.workspace_store.base_dir / "config" / "backport.json"
+        self._repository = services.repository
         self._git_client = BackportGitClient()
         self._cvekit_client = BackportCvekitClient(
             runs_root=services.workspace_store.base_dir / "backport-runs",
         )
+        self._conflict_reporter_manager = ConflictReporterManager()
         self._progress_callback = progress_callback
+        self._pause_checker = pause_checker
 
-    def get_config(self) -> dict[str, str]:
+    def get_config(self) -> dict[str, Any]:
         if not self._config_path.exists():
             logger.info("Backport config not found, using defaults: path=%s", self._config_path)
             return _default_config()
@@ -73,10 +96,17 @@ class BackportService:
         config = _default_config()
         for key in config:
             value = loaded.get(key, "")
-            config[key] = value if isinstance(value, str) else ""
+            default_value = config[key]
+            if isinstance(default_value, bool):
+                config[key] = value if isinstance(value, bool) else False
+            elif isinstance(default_value, dict):
+                config[key] = value if isinstance(value, dict) else {}
+            else:
+                config[key] = value if isinstance(value, str) else ""
         config["commit_message_source"] = self._normalize_commit_message_source(
             config.get("commit_message_source", "")
         )
+        _normalize_cvekit_options(config)
         logger.info(
             "Backport config loaded: path=%s target_path=%s target_release=%s current_report=%s",
             self._config_path,
@@ -86,14 +116,21 @@ class BackportService:
         )
         return config
 
-    def update_config(self, payload: dict[str, str]) -> None:
+    def update_config(self, payload: dict[str, Any]) -> None:
         config = _default_config()
         for key in config:
             value = payload.get(key, "")
-            config[key] = value.strip() if isinstance(value, str) else ""
+            default_value = config[key]
+            if isinstance(default_value, bool):
+                config[key] = value if isinstance(value, bool) else False
+            elif isinstance(default_value, dict):
+                config[key] = value if isinstance(value, dict) else {}
+            else:
+                config[key] = value.strip() if isinstance(value, str) else ""
         config["commit_message_source"] = self._normalize_commit_message_source(
             config.get("commit_message_source", "")
         )
+        _normalize_cvekit_options(config)
 
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
         self._config_path.write_text(
@@ -142,6 +179,61 @@ class BackportService:
         parent_path = str(current_path.parent) if current_path != root else None
         return {"current_path": str(current_path), "parent_path": parent_path, "entries": entries}
 
+    def get_runtime_status(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        config = self._extract_config({"config": payload}) if isinstance(payload, dict) else self.get_config()
+        errors: list[str] = []
+        status: dict[str, Any] = {
+            "ok": False,
+            "model_configured": False,
+            "model_name": "",
+            "model_provider": "",
+            "api_key_available": False,
+            "mcp_configured": False,
+            "cvekit_available": False,
+            "cvekit_path": "",
+            "errors": errors,
+        }
+
+        try:
+            model = self._resolve_backport_model(config)
+            provider = self._resolve_cvekit_llm_provider(model.provider, model.compatibility)
+            status["model_configured"] = True
+            status["model_name"] = model.name
+            status["model_provider"] = provider
+            status["api_key_available"] = bool(model.api_key.strip()) or provider == "local"
+            if not model.name.strip():
+                errors.append("Backport 运行模型缺少模型 ID。")
+            if not status["api_key_available"]:
+                errors.append("Backport 运行模型缺少 API Key。")
+            if provider not in {"openai", "deepseek", "siliconflow", "minimax", "local"} and not (
+                model.api_base_url or ""
+            ).strip():
+                errors.append("Backport 运行模型缺少 API Base URL。")
+        except RuntimeError as error:
+            errors.append(str(error))
+
+        try:
+            self._resolve_cvekit_mcp_args_env()
+            status["mcp_configured"] = True
+        except RuntimeError as error:
+            errors.append(str(error))
+
+        try:
+            cvekit_path = self._cvekit_client.resolve_cvekit_path()
+            status["cvekit_available"] = True
+            status["cvekit_path"] = str(cvekit_path)
+        except (FileNotFoundError, RuntimeError) as error:
+            errors.append(str(error))
+
+        status["ok"] = (
+            status["model_configured"]
+            and status["api_key_available"]
+            and status["mcp_configured"]
+            and status["cvekit_available"]
+            and not errors
+        )
+        return status
+
     def run_action(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         normalized_action = action.strip()
         handlers = self._build_handlers()
@@ -159,7 +251,32 @@ class BackportService:
             normalized_action,
             sorted(normalized_payload.keys()),
         )
+        conflict_reporter_started = False
+        runtime_configured = False
         try:
+            action_config: dict[str, Any] | None = None
+            needs_config = (
+                normalized_action in self._cvekit_runtime_actions()
+                or normalized_action in {"run_all", "execute_selected", "try_resolve"}
+            )
+            if needs_config:
+                action_config = self._extract_config(normalized_payload)
+            if normalized_action in self._cvekit_runtime_actions():
+                self._cvekit_client.set_runtime_config(
+                    self._resolve_cvekit_runtime_config(action_config or {})
+                )
+                runtime_configured = True
+            if normalized_action in {"run_all", "execute_selected", "try_resolve"}:
+                cvekit_options = (
+                    action_config.get("cvekit_options")
+                    if action_config and isinstance(action_config.get("cvekit_options"), dict)
+                    else {}
+                )
+                conflict_reporter_url = self._conflict_reporter_manager.start(
+                    enabled=bool(cvekit_options.get("enable_conflict_summary")),
+                )
+                self._cvekit_client.set_conflict_reporter_url(conflict_reporter_url)
+                conflict_reporter_started = True
             parsed_result = handler(normalized_payload)
             self._persist_runtime_state(normalized_action, normalized_payload, parsed_result)
             elapsed = time.monotonic() - started_at
@@ -178,6 +295,12 @@ class BackportService:
                 time.monotonic() - started_at,
             )
             raise
+        finally:
+            if conflict_reporter_started:
+                self._cvekit_client.set_conflict_reporter_url("")
+                self._conflict_reporter_manager.stop()
+            if runtime_configured:
+                self._cvekit_client.set_runtime_config(None)
 
     def _build_handlers(self) -> dict[str, Callable[[dict[str, Any]], dict[str, Any]]]:
         return {
@@ -195,6 +318,21 @@ class BackportService:
             "try_resolve": self._run_try_resolve,
             "check_manual_patch": self._run_check_manual_patch,
             "apply_manual_patch": self._run_apply_manual_patch,
+        }
+
+    @staticmethod
+    def _cvekit_runtime_actions() -> set[str]:
+        return {
+            "run_all",
+            "generate_report",
+            "continue_report",
+            "recheck_conflict",
+            "preview_commit_message",
+            "execute_selected",
+            "apply_row",
+            "try_resolve",
+            "check_manual_patch",
+            "apply_manual_patch",
         }
 
     # ── 业务方法 ──────────────────────────────────────────────
@@ -266,6 +404,14 @@ class BackportService:
         step_count = 0
         max_steps = int(payload.get("max_steps") or max(len(current_commits) * 4, 20))
 
+        if self._is_run_all_pause_requested():
+            return self._build_run_all_paused_result(
+                current_report_path=current_report_path,
+                current_commits=current_commits,
+                failed_count=failed_count,
+                processed_count=processed_count,
+            )
+
         # 一键运行必须按顺序推进：前序 commit 合入后会改变目标仓状态，
         # 后序 commit 不能依赖一次性整表预检查的结果。
         while index < len(current_commits) and step_count < max_steps:
@@ -274,6 +420,14 @@ class BackportService:
             current_commits = self._resolve_result_commits(loaded)
             if index >= len(current_commits):
                 break
+
+            if self._is_run_all_pause_requested():
+                return self._build_run_all_paused_result(
+                    current_report_path=current_report_path,
+                    current_commits=current_commits,
+                    failed_count=failed_count,
+                    processed_count=processed_count,
+                )
 
             row = current_commits[index]
             row_status = str(row.get("status") or "").strip().lower()
@@ -751,6 +905,7 @@ class BackportService:
                 commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
+                cvekit_options=config["cvekit_options"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("execute_selected failed")
@@ -878,6 +1033,7 @@ class BackportService:
                 commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
+                cvekit_options=config["cvekit_options"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("try_resolve failed")
@@ -1014,7 +1170,7 @@ class BackportService:
 
     # ── 辅助方法 ──────────────────────────────────────────────
 
-    def _extract_config(self, payload: dict[str, Any]) -> dict[str, str]:
+    def _extract_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         raw_config = payload.get("config")
         normalized = self.get_config()
         if not isinstance(raw_config, dict):
@@ -1022,10 +1178,107 @@ class BackportService:
 
         for key in _default_config():
             value = raw_config.get(key)
+            if isinstance(normalized.get(key), bool):
+                if isinstance(value, bool):
+                    normalized[key] = value
+                continue
+            if isinstance(normalized.get(key), dict):
+                if isinstance(value, dict):
+                    normalized[key] = dict(value)
+                continue
             if isinstance(value, str):
                 stripped = value.strip()
                 if stripped or key.startswith("current_"):
                     normalized[key] = stripped
+        _normalize_cvekit_options(normalized)
+        return normalized
+
+    def _resolve_cvekit_runtime_config(self, config: dict[str, Any]) -> BackportRuntimeConfig:
+        model = self._resolve_backport_model(config)
+        mcp_args, mcp_env = self._resolve_cvekit_mcp_args_env()
+        provider = self._resolve_cvekit_llm_provider(model.provider, model.compatibility)
+        base_url = (model.api_base_url or "").strip()
+        model_name = model.name.strip()
+        api_key = model.api_key.strip()
+
+        if not model_name:
+            raise RuntimeError("Backport 运行模型缺少模型 ID，请在 Backport 配置区选择有效模型。")
+        if not api_key and provider != "local":
+            raise RuntimeError("Backport 运行模型缺少 API Key，请在模型设置页补全密钥。")
+        if provider not in {"openai", "deepseek", "siliconflow", "minimax", "local"} and not base_url:
+            raise RuntimeError(
+                "Backport 运行模型缺少 API Base URL，无法作为 cvekit 自定义模型启动。"
+            )
+
+        return BackportRuntimeConfig(
+            mcp_args=mcp_args,
+            mcp_env=mcp_env,
+            llm_provider=provider,
+            api_key=api_key,
+            llm_base_url=base_url,
+            llm_model_name=model_name,
+        )
+
+    def _resolve_backport_model(self, config: dict[str, Any]) -> Any:
+        model_id = str(config.get("backport_model_id") or "").strip()
+        if model_id:
+            model = self._repository.get_model(model_id)
+            if model is None:
+                raise RuntimeError("Backport 运行模型不存在，请重新选择模型。")
+            if not model.enabled:
+                raise RuntimeError("Backport 运行模型已禁用，请重新选择模型。")
+            return model
+
+        models = [model for model in self._repository.list_models() if model.enabled]
+        default_models = [model for model in models if model.is_default]
+        if default_models:
+            return default_models[-1]
+        if len(models) == 1:
+            return models[0]
+        raise RuntimeError("Backport 未选择运行模型，请在 Backport 配置区选择模型。")
+
+    def _resolve_cvekit_mcp_args_env(self) -> tuple[list[Any], dict[str, Any]]:
+        for server in self._repository.list_mcp_servers():
+            if server.mcp_server_name != "cvekit_mcp":
+                continue
+            raw_config = server.mcp_server_config if isinstance(server.mcp_server_config, dict) else {}
+            server_config = raw_config.get(server.mcp_server_name)
+            if not isinstance(server_config, dict) and (
+                "args" in raw_config or "env" in raw_config or "command" in raw_config
+            ):
+                server_config = raw_config
+            if not isinstance(server_config, dict):
+                raise RuntimeError("Backport cvekit_mcp 配置格式无效，请在 MCP 设置页重新配置。")
+            args = server_config.get("args") or []
+            env = server_config.get("env") or {}
+            return (
+                list(args) if isinstance(args, list) else [],
+                dict(env) if isinstance(env, dict) else {},
+            )
+        raise RuntimeError("Backport 缺少 cvekit_mcp 配置，请先在 MCP 设置页添加 cvekit_mcp。")
+
+    @staticmethod
+    def _resolve_cvekit_llm_provider(provider: str, compatibility: str | None) -> str:
+        normalized = provider.strip().lower()
+        if normalized == "custom":
+            if (compatibility or "").strip().lower() != "openai":
+                raise RuntimeError("Backport 只支持 OpenAI-compatible 的自定义模型。")
+            return "custom"
+        supported = {
+            "openai",
+            "deepseek",
+            "siliconflow",
+            "minimax",
+            "local",
+            "moonshotai",
+            "zhipuai",
+            "xai",
+            "alibaba",
+        }
+        if normalized not in supported:
+            raise RuntimeError(
+                f"Backport 暂不支持 provider={provider!r} 的模型，请选择 OpenAI-compatible 模型。"
+            )
         return normalized
 
     def _persist_runtime_state(
@@ -1100,6 +1353,50 @@ class BackportService:
             self._progress_callback(progress)
         except Exception:
             logger.exception("Backport run_all progress callback failed")
+
+    def _is_run_all_pause_requested(self) -> bool:
+        checker = getattr(self, "_pause_checker", None)
+        if checker is None:
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            logger.exception("Backport run_all pause checker failed")
+            return False
+
+    def _build_run_all_paused_result(
+        self,
+        *,
+        current_report_path: str,
+        current_commits: list[dict[str, Any]],
+        failed_count: int,
+        processed_count: int,
+    ) -> dict[str, Any]:
+        self._emit_run_all_progress(
+            phase="paused",
+            message="已暂停，report 已保存，可继续。",
+            current_report_path=current_report_path,
+            commits=current_commits,
+            updated_commits=[],
+            current_index=min(processed_count + 1, len(current_commits)) if current_commits else 0,
+            total=len(current_commits),
+            failed_count=failed_count,
+            processed_count=processed_count,
+        )
+        return {
+            "operation": "run_all",
+            "status": "success",
+            "stage": "paused",
+            "summary": "一键运行已暂停，当前 report 已保存，可继续。",
+            "artifacts": {"base_report_path": current_report_path},
+            "report": {
+                "report_path": current_report_path,
+                "commit_count": len(current_commits),
+                "commits": current_commits,
+            },
+            "report_artifacts": {},
+            "conflict_report_summary": None,
+        }
 
     @staticmethod
     def _is_skipped_commit(item: dict[str, Any]) -> bool:
