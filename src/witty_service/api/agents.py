@@ -689,18 +689,28 @@ async def uninstall_agent_skill(
             code=SKILL_NOT_FOUND,
             message="Installed skill was not found.",
             details={"agent_id": agent_id, "skill_id": payload.skill_id},
-        )
+    )
 
     skill_manager = SkillManager(repository=services.repository)
-    skill = skill_manager.get_skill_by_skill_id(payload.skill_id)
-    skill_source_path = skill_manager.get_skill_source_path(skill) if skill else None
+    skill_source_path = None
+    if installed_record.source_type != "wittyhub":
+        skill = skill_manager.get_skill_by_skill_id(payload.skill_id)
+        if skill is not None:
+            skill_source_path = skill_manager.get_skill_source_path(skill)
+        elif installed_record.relative_path and os.path.isabs(installed_record.relative_path):
+            skill_source_path = str(Path(installed_record.relative_path).expanduser().parent)
 
     agent_manager = services.get_agent_manager_for_agent(agent_id)
+    uninstall_kwargs: dict[str, Any] = {
+        "agent_id": agent_id,
+        "skill_name": installed_record.skill_name,
+        "source_type": installed_record.source_type,
+        "source_path": skill_source_path,
+    }
+    if installed_record.source_type == "builtin" and installed_record.skill_source:
+        uninstall_kwargs["runtime_source"] = installed_record.skill_source
     await agent_manager.uninstall_agent_skill(
-        agent_id=agent_id,
-        skill_name=installed_record.skill_name,
-        source_type=installed_record.source_type,
-        source_path=skill_source_path,
+        **uninstall_kwargs,
     )
 
     try:

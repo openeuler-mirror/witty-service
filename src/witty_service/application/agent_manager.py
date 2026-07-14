@@ -562,7 +562,14 @@ class AgentManager:
             return {"status": "accepted"}
         return payload
 
-    async def uninstall_agent_skill(self, agent_id: str, skill_name: str, source_type: str | None = None, source_path: str | None = None) -> dict[str, Any]:
+    async def uninstall_agent_skill(
+        self,
+        agent_id: str,
+        skill_name: str,
+        source_type: str | None = None,
+        source_path: str | None = None,
+        runtime_source: str | None = None,
+    ) -> dict[str, Any]:
         """从 runtime 卸载 skill。"""
         agent = self._get_agent(agent_id)
 
@@ -583,19 +590,22 @@ class AgentManager:
                     request_body["source_type"] = source_type
                 if source_path:
                     request_body["source_path"] = source_path
+                if runtime_source:
+                    request_body["runtime_source"] = runtime_source
                 payload = await adaptor_client.post(
                     f"/agent/skills/uninstall?id={agent_id}",
                     json=request_body,
                 )
             except httpx.HTTPError as exc:
+                details = self._build_runtime_skill_error_details(
+                    agent_id=agent_id,
+                    skill_name=skill_name,
+                    exc=exc,
+                )
                 raise DomainError(
                     code=AGENT_SKILL_UNINSTALL_FAILED,
                     message="Failed to uninstall skill on runtime.",
-                    details={
-                        "agent_id": agent_id,
-                        "skill_name": skill_name,
-                        "error": str(exc),
-                    },
+                    details=details,
                 ) from exc
         finally:
             await adaptor_client.close()

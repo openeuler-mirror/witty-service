@@ -10,6 +10,7 @@ from typing import Any
 
 from witty_agent_server.application.services.skill.base import AgentSkillServiceBase
 from witty_agent_server.application.services.skill.errors import (
+    OpenClawSkillNotRemovableError,
     OpenClawSkillsInstallError,
     OpenClawSkillsQueryError,
     OpenClawSkillsUninstallError,
@@ -480,16 +481,127 @@ class OpenClawSkillService(AgentSkillServiceBase):
         skill_name: str,
         source_type: str | None = None,
         source_path: str | None = None,
+        runtime_source: str | None = None,
     ) -> dict[str, Any]:
         normalized_name = self._normalize_skill_name(
             skill_name=skill_name,
             error_cls=OpenClawSkillsUninstallError,
         )
 
-        if source_type == "builtin" and source_path:
-            return self._uninstall_builtin_skill(normalized_name, source_path, agent_id=agent_id)
+        if source_type == "builtin":
+            if not source_path:
+                raise OpenClawSkillsUninstallError(
+                    runtime_type=self.runtime_type,
+                    skill_name=normalized_name,
+                    reason="source_path is required for runtime-discovered skill uninstall",
+                )
+            return self._uninstall_runtime_discovered_skill(
+                normalized_name,
+                source_path,
+                agent_id=agent_id,
+                runtime_source=runtime_source,
+            )
+        if source_type == "wittyhub":
+            return self._uninstall_wittyhub_skill(normalized_name, agent_id=agent_id)
 
         return self._uninstall_local_skill(normalized_name, agent_id=agent_id)
+
+    def _uninstall_runtime_discovered_skill(
+        self,
+        skill_name: str,
+        source_path: str,
+        *,
+        agent_id: str | None = None,
+        runtime_source: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_runtime_source = self._resolve_runtime_source(
+            Path(source_path),
+            agent_id=agent_id,
+            runtime_source=runtime_source,
+        )
+        if resolved_runtime_source == "openclaw-bundled":
+            raise OpenClawSkillNotRemovableError(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason="bundled skill cannot be uninstalled",
+            )
+
+        uninstall_channel = {
+            "agents-skills-personal": "runtime_personal_remove",
+            "openclaw-extra": "runtime_extra_remove",
+            "openclaw-workspace": "runtime_workspace_remove",
+        }.get(resolved_runtime_source, "builtin_remove")
+        return self._uninstall_builtin_skill(
+            skill_name,
+            source_path,
+            agent_id=agent_id,
+            runtime_source=resolved_runtime_source,
+            uninstall_channel=uninstall_channel,
+        )
+
+    def _uninstall_wittyhub_skill(
+        self,
+        skill_name: str,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        workspace_root = self._get_workspace_root(agent_id)
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        command = [
+            "npx",
+            "wittyhub",
+            "remove",
+            skill_name,
+            "--agent",
+            "openclaw",
+            "-y",
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=workspace_root,
+            )
+            logger.info(
+                (
+                    "uninstall_wittyhub_skill success, runtime_type=%s agent_id=%s "
+                    "skill_name=%s cwd=%s stdout=%s stderr=%s"
+                ),
+                self.runtime_type,
+                agent_id,
+                skill_name,
+                workspace_root,
+                result.stdout.strip(),
+                result.stderr.strip(),
+            )
+            return {
+                "runtime_type": self.runtime_type,
+                "skill_name": skill_name,
+                "uninstalled": True,
+                "uninstall_channel": "wittyhub",
+            }
+        except FileNotFoundError as exc:
+            raise OpenClawSkillsUninstallError(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason="npx command not found",
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            reason = stderr or stdout or f"wittyhub exited with code {exc.returncode}"
+            raise OpenClawSkillsUninstallError(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason=reason,
+            ) from exc
+        except Exception as exc:
+            raise OpenClawSkillsUninstallError(
+                runtime_type=self.runtime_type,
+                skill_name=skill_name,
+                reason=str(exc),
+            ) from exc
 
     def _uninstall_skill_via_clawhub(self, skill_name: str) -> None:
         command = ["clawhub", "uninstall", skill_name, "--yes"]
@@ -534,8 +646,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 reason=str(exc),
             ) from exc
         
-        if dst.exists():
-            shutil.rmtree(dst)
+        self._remove_installed_path(dst)
 
         logger.info(
             "uninstall_local_skill success, runtime_type=%s agent_id=%s skill_name=%s dst=%s",
@@ -551,30 +662,85 @@ class OpenClawSkillService(AgentSkillServiceBase):
             "uninstall_channel": "local_remove",
         }
 
-    def _uninstall_builtin_skill(self, skill_name: str, source_path: str, agent_id: str | None = None) -> dict[str, Any]:
+    @classmethod
+    def _resolve_runtime_source(
+        cls,
+        source_path: Path,
+        *,
+        agent_id: str | None,
+        runtime_source: str | None,
+    ) -> str | None:
+        if runtime_source:
+            return runtime_source
+
+        resolved = cls._normalize_delete_target(source_path)
+        candidates: tuple[tuple[str, list[Path]], ...] = (
+            ("openclaw-workspace", cls._build_allowed_delete_bases(agent_id, "openclaw-workspace")),
+            ("openclaw-extra", cls._build_allowed_delete_bases(agent_id, "openclaw-extra")),
+            ("agents-skills-personal", cls._build_allowed_delete_bases(agent_id, "agents-skills-personal")),
+        )
+        for source_name, bases in candidates:
+            for base in bases:
+                try:
+                    resolved.relative_to(cls._normalize_delete_target(base))
+                    return source_name
+                except ValueError:
+                    continue
+        return None
+
+    def _uninstall_builtin_skill(
+        self,
+        skill_name: str,
+        source_path: str,
+        agent_id: str | None = None,
+        runtime_source: str | None = None,
+        uninstall_channel: str = "builtin_remove",
+    ) -> dict[str, Any]:
         try:
-            dst = self._validate_path_under_allowed_bases(Path(source_path), agent_id=agent_id)
+            dst = self._validate_path_under_allowed_bases(
+                Path(source_path),
+                agent_id=agent_id,
+                runtime_source=runtime_source,
+            )
         except ValueError as exc:
             raise OpenClawSkillsUninstallError(
                 runtime_type=self.runtime_type,
                 skill_name=skill_name,
                 reason=str(exc),
             ) from exc
-        if dst.exists():
-            shutil.rmtree(dst)
+        self._remove_installed_path(dst)
 
         logger.info(
-            "uninstall_builtin_skill success, runtime_type=%s skill_name=%s dst=%s",
+            (
+                "uninstall_builtin_skill success, runtime_type=%s skill_name=%s "
+                "runtime_source=%s dst=%s"
+            ),
             self.runtime_type,
             skill_name,
+            runtime_source,
             dst,
         )
         return {
             "runtime_type": self.runtime_type,
             "skill_name": skill_name,
             "uninstalled": True,
-            "uninstall_channel": "builtin_remove",
+            "uninstall_channel": uninstall_channel,
         }
+
+    @staticmethod
+    def _normalize_delete_target(target: Path) -> Path:
+        candidate = target.expanduser()
+        if candidate.name.lower() == "skill.md":
+            candidate = candidate.parent
+        return Path(os.path.abspath(str(candidate)))
+
+    @staticmethod
+    def _remove_installed_path(target: Path) -> None:
+        if target.is_symlink() or target.is_file():
+            target.unlink(missing_ok=True)
+            return
+        if target.exists():
+            shutil.rmtree(target)
 
     def _normalize_skill_name(
         self,

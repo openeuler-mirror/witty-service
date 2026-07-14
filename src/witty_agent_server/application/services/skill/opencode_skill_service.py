@@ -34,6 +34,7 @@ class OpenCodeSkillService(AgentSkillServiceBase):
         skill_name: str,
         source_type: str | None = None,
         source_path: str | None = None,
+        runtime_source: str | None = None,
     ) -> dict[str, Any]:
-        del agent_id, skill_name, source_type, source_path
+        del agent_id, skill_name, source_type, source_path, runtime_source
         raise RuntimeSkillsNotSupportedError(runtime_type=self.runtime_type)

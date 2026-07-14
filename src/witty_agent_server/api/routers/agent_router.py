@@ -30,6 +30,7 @@ class UninstallSkillRequest(BaseModel):
     skill_name: str = Field(min_length=1)
     source_type: str | None = None
     source_path: str | None = None
+    runtime_source: str | None = None
 
 
 def create_agent_router(
@@ -214,6 +215,7 @@ def create_agent_router(
                 skill_name=payload.skill_name,
                 source_type=payload.source_type,
                 source_path=payload.source_path,
+                runtime_source=payload.runtime_source,
             )
             return {
                 "agent_id": agent.id,

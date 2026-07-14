@@ -87,3 +87,23 @@ class OpenClawSkillsUninstallError(AgentSkillServiceError):
                 "reason": reason,
             },
         )
+
+
+class OpenClawSkillNotRemovableError(AgentSkillServiceError):
+    def __init__(
+        self,
+        *,
+        runtime_type: str,
+        skill_name: str,
+        reason: str,
+    ) -> None:
+        super().__init__(
+            code="OPENCLAW_SKILL_NOT_REMOVABLE",
+            message="openclaw skill cannot be uninstalled",
+            status_code=400,
+            details={
+                "runtime_type": runtime_type,
+                "skill_name": skill_name,
+                "reason": reason,
+            },
+        )
