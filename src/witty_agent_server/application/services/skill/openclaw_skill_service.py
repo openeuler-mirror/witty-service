@@ -103,12 +103,16 @@ class OpenClawSkillService(AgentSkillServiceBase):
             except ValueError:
                 continue
             current = base_resolved
-            for part in resolved.relative_to(base_resolved).parts[:-1]:
+            for part in resolved.relative_to(base_resolved).parts:
                 current = current / part
                 if current.is_symlink():
                     raise ValueError(
                         f"Path {resolved} traverses symbolic link outside allowed directories"
                     )
+            if resolved.is_symlink():
+                raise ValueError(
+                    f"Path {resolved} traverses symbolic link outside allowed directories"
+                )
             return resolved
         raise ValueError(
             f"Path {resolved} is outside allowed directories: "
