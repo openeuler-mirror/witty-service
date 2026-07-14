@@ -1649,7 +1649,10 @@ class SqliteRepository:
                 for item in normalized_skills
             }
             non_builtin_keys = {
-                (row.skill_name.strip(), row.relative_path)
+                (
+                    row.skill_name.strip(),
+                    row.relative_path.strip() if row.relative_path else None,
+                )
                 for row in installed_rows
                 if row.source_type != 'builtin'
             }
@@ -1671,7 +1674,10 @@ class SqliteRepository:
                 )
 
             existing_keys = {
-                (row.skill_name.strip(), row.relative_path)
+                (
+                    row.skill_name.strip(),
+                    row.relative_path.strip() if row.relative_path else None,
+                )
                 for row in installed_rows
                 if row not in obsolete_builtin_rows
             }
