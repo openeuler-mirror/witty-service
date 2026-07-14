@@ -209,7 +209,7 @@ Insight BFF 接口说明：
 | `local` | 从本地 ZIP 归档注册技能目录 | `local_path`（通常由上传接口生成） |
 
 说明：
-- `builtin`、`clawhub` 会出现在技能记录的来源字段中，但当前不作为 `POST /skills/repos`、`PATCH /skills/repos/{repo_id}` 的可写入来源。
+- `builtin`、`clawhub`、`wittyhub` 会出现在技能记录的来源字段中，但当前不作为 `POST /skills/repos`、`PATCH /skills/repos/{repo_id}` 的可写入来源。
 - Git 仓库名会按 `url[@branch]` 归一化后生成，重复注册会返回 `400`。
 - 上传 ZIP 时会校验压缩包格式、大小、文件数量和解压后总体积。
 
@@ -355,7 +355,7 @@ stateDiagram-v2
     "metadata": {
       "title": "Terminal Helper"
     },
-    "skill_source": "git",
+    "skill_source": "https://github.com/example/skills",
     "skill_md_url": "https://github.com/example/skills/blob/main/skills/terminal-helper/SKILL.md"
   }
 ]
@@ -370,7 +370,7 @@ stateDiagram-v2
 | `skill_name` | string | 技能名 |
 | `relative_path` | string \| null | `SKILL.md` 相对路径或绝对路径 |
 | `metadata` | object | 技能元数据 |
-| `skill_source` | string \| null | 技能来源，如 `git`、`local`、`builtin`、`clawhub` |
+| `skill_source` | string \| null | 技能来源地址；Git 技能通常为仓库 URL，本地技能可能为本地路径 |
 | `skill_md_url` | string \| null | 技能说明文档地址 |
 
 ### 3.4 Agent 生命周期接口
@@ -656,27 +656,30 @@ flowchart LR
 
 #### 1. `POST /agents/{agent_id}/skills/`
 
-- 接口描述：为指定 agent 安装一个已发现技能
+- 接口描述：为指定 agent 安装一个技能；支持本地已发现技能和 WittyHub 技能
 - 输入（`InstallAgentSkillRequest`）：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `skill_id` | string | 是 | 技能唯一标识 |
 | `skill_name` | string | 是 | 技能名；主要用于错误详情和日志 |
+| `source_type` | string | 否 | 安装来源类型；安装 WittyHub 技能时传 `wittyhub` |
+| `skill_source` | string | 否 | 技能来源地址；`source_type=wittyhub` 时必填 |
 
 - 输出 `202`：`AgentSkillResponse`
 - 执行流程：
-  1. 按 `skill_id` 校验技能是否存在
-  2. 解析技能来源目录 `source_path`
+  1. 若 `source_type != wittyhub`，按 `skill_id` 校验技能是否存在
+  2. 解析技能来源目录 `source_path`（仅本地已发现技能需要）
   3. 调用 runtime 执行安装
   4. 安装成功后写入本地安装记录
 
 - 关键行为说明：
   - 若 runtime 已安装成功，但本地安装记录写入失败，会返回业务错误 `SKILL_INSTALL_RECORD_FAILED`
+  - WittyHub 安装走独立分支：直接使用 `skill_source + skill_name` 调用 runtime，不依赖本地已发现 skill 表
   - `source_path` 的解析规则：
     - `relative_path` 为绝对路径：直接取其父目录
     - Git / 本地 ZIP 技能：由仓库 `local_path` 与 `relative_path` 拼接得到
-    - `clawhub` 等无本地目录技能：返回 `None`
+    - `clawhub`、`wittyhub` 等无本地目录技能：返回 `None`
 
 请求示例：
 
@@ -684,6 +687,17 @@ flowchart LR
 {
   "skill_id": "skill-uuid",
   "skill_name": "terminal-helper"
+}
+```
+
+WittyHub 请求示例：
+
+```json
+{
+  "skill_id": "openeuler/IB_Robot/ibrobot-lerobot-patch",
+  "skill_name": "ibrobot-lerobot-patch",
+  "source_type": "wittyhub",
+  "skill_source": "https://gitcode.com/openeuler/IB_Robot"
 }
 ```
 
