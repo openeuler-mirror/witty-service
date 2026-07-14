@@ -322,12 +322,12 @@ class AgentSkillORM(Base):
     __tablename__ = 'agent_skills'
     __table_args__ = (
         CheckConstraint(
-            "source_type IN ('builtin', 'git', 'local', 'clawhub')",
+            "source_type IN ('builtin', 'git', 'local', 'clawhub', 'wittyhub')",
             name='ck_agent_skills_source_type',
         ),
         CheckConstraint(
-            "(source_type = 'builtin' AND repo_id IS NULL) OR "
-            "source_type IN ('git', 'local', 'clawhub')",
+            "(source_type IN ('git', 'local', 'clawhub') AND repo_id IS NOT NULL) OR "
+            "(source_type IN ('builtin', 'wittyhub') AND repo_id IS NULL)",
             name='ck_agent_skills_repo_id_by_source',
         ),
     )

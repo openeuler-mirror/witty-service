@@ -20,9 +20,11 @@ class OpenCodeSkillService(AgentSkillServiceBase):
         *,
         agent_id: str | None = None,
         skill_name: str,
+        source_type: str | None = None,
         source_path: str | None = None,
+        skill_source: str | None = None,
     ) -> dict[str, Any]:
-        del agent_id, skill_name, source_path
+        del agent_id, skill_name, source_type, source_path, skill_source
         raise RuntimeSkillsNotSupportedError(runtime_type=self.runtime_type)
 
     def uninstall_skill(

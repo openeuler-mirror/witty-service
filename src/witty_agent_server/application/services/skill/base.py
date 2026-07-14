@@ -41,7 +41,9 @@ class AgentSkillServiceBase(ABC):
         *,
         agent_id: str | None = None,
         skill_name: str,
+        source_type: str | None = None,
         source_path: str | None = None,
+        skill_source: str | None = None,
     ) -> dict[str, Any]:
         """安装技能到当前 runtime。source_path 非空时为本地技能目录。"""
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, model_validator
 
 
 def _format_utc_datetime(dt: datetime) -> str:
@@ -47,8 +47,29 @@ class SendMessageRequest(BaseModel):
 
 
 class InstallAgentSkillRequest(BaseModel):
-    skill_id: str = Field(min_length=1)
-    skill_name: str = Field(min_length=1)
+    skill_id: str = Field(
+        min_length=1,
+        description="技能唯一标识；WittyHub 安装时可传远端 skill_id 用于记录元数据",
+    )
+    skill_name: str = Field(min_length=1, description="技能名；主要用于安装和日志定位")
+    source_type: str | None = Field(
+        default=None,
+        description="安装来源类型；安装 WittyHub 技能时传 wittyhub",
+    )
+    skill_source: str | None = Field(
+        default=None,
+        description="技能来源仓库地址；source_type 为 wittyhub 时必填",
+    )
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="技能元数据；安装 WittyHub 技能时持久化到安装记录",
+    )
+
+    @model_validator(mode="after")
+    def validate_wittyhub_payload(self) -> "InstallAgentSkillRequest":
+        if self.source_type == "wittyhub" and not (self.skill_source and self.skill_source.strip()):
+            raise ValueError("skill_source is required when source_type is wittyhub")
+        return self
 
 
 class UninstallAgentSkillRequest(BaseModel):
@@ -58,13 +79,16 @@ class UninstallAgentSkillRequest(BaseModel):
 class AgentSkillResponse(BaseModel):
     agent_id: str
     skill_id: str
-    source_type: str
+    source_type: str = Field(description="安装来源类型，如 builtin、git、local、clawhub、wittyhub")
     repo_id: str | None
     skill_name: str
     installed_at: UtcDatetime
     relative_path: str | None = None
     metadata: dict[str, Any] | None = None
-    skill_source: str | None = None
+    skill_source: str | None = Field(
+        default=None,
+        description="技能来源仓库地址；source_type 为 wittyhub 时必填",
+    )
     skill_md_url: str | None = None
 
 
@@ -233,6 +257,7 @@ class SkillSourceType:
     LOCAL = 'local'
     BUILDIN = 'builtin'
     CLAWHUB = 'clawhub'
+    WITTYHUB = 'wittyhub'
 
 
 class SkillRepositoryRequest(BaseModel):
@@ -247,7 +272,7 @@ class SkillRepositoryResponse(BaseModel):
 
     repo_id: str
     repo_name: str = Field(min_length=1, max_length=255)
-    source_type: str
+    source_type: str = Field(description="仓库来源类型；当前可能为 git、local、clawhub")
     branch: str | None = None
     url: str | None = None
     local_path: str | None = None
@@ -263,5 +288,7 @@ class SkillResponse(BaseModel):
     skill_name: str
     relative_path: str | None
     metadata: dict[str, Any]
-    skill_source: str | None
+    skill_source: str | None = Field(
+        default=None,
+        description="技能来源地址；可能为远程仓库 URL、本地路径或 runtime 来源标识")
     skill_md_url: str | None
