@@ -58,6 +58,8 @@ SKILL_SYNC_FAILED = "SKILL_SYNC_FAILED"
 AGENT_SKILL_INSTALL_FAILED = "AGENT_SKILL_INSTALL_FAILED"
 AGENT_SKILL_UNINSTALL_FAILED = "AGENT_SKILL_UNINSTALL_FAILED"
 
+SKILL_INSTALL_TIMEOUT_SECONDS = 180.0
+
 INTERRUPTION_PREFIX = """[CRITICAL SYSTEM INSTRUCTION - OVERRIDE ALL PREVIOUS CONTEXT]
 
 The assistant's previous response in the conversation history was INTERRUPTED and INCOMPLETE before being sent to you.
@@ -507,7 +509,14 @@ class AgentManager:
     def _build_builtin_skill_id(self, agent_id: str, skill_name: str) -> str:
         return str(uuid5(NAMESPACE_URL, f"builtin:{agent_id}:{skill_name}"))
 
-    async def install_agent_skill(self, agent_id: str, skill_name: str, source_path: str | None = None) -> dict[str, Any]:
+    async def install_agent_skill(
+        self,
+        agent_id: str,
+        skill_name: str,
+        source_type: str | None = None,
+        source_path: str | None = None,
+        skill_source: str | None = None,
+    ) -> dict[str, Any]:
         """下发 skill 到 runtime。"""
         agent = self._get_agent(agent_id)
 
@@ -524,21 +533,27 @@ class AgentManager:
         try:
             try:
                 request_body: dict[str, Any] = {"skill_name": skill_name}
+                if source_type:
+                    request_body["source_type"] = source_type
                 if source_path:
                     request_body["source_path"] = source_path
+                if skill_source:
+                    request_body["skill_source"] = skill_source
                 payload = await adaptor_client.post(
                     f"/agent/skills/install?id={agent_id}",
                     json=request_body,
+                    timeout=SKILL_INSTALL_TIMEOUT_SECONDS,
                 )
             except httpx.HTTPError as exc:
+                details = self._build_runtime_skill_error_details(
+                    agent_id=agent_id,
+                    skill_name=skill_name,
+                    exc=exc,
+                )
                 raise DomainError(
                     code=AGENT_SKILL_INSTALL_FAILED,
                     message="Failed to install skill on runtime.",
-                    details={
-                        "agent_id": agent_id,
-                        "skill_name": skill_name,
-                        "error": str(exc),
-                    },
+                    details=details,
                 ) from exc
         finally:
             await adaptor_client.close()
@@ -547,7 +562,14 @@ class AgentManager:
             return {"status": "accepted"}
         return payload
 
-    async def uninstall_agent_skill(self, agent_id: str, skill_name: str, source_type: str | None = None, source_path: str | None = None) -> dict[str, Any]:
+    async def uninstall_agent_skill(
+        self,
+        agent_id: str,
+        skill_name: str,
+        source_type: str | None = None,
+        source_path: str | None = None,
+        runtime_source: str | None = None,
+    ) -> dict[str, Any]:
         """从 runtime 卸载 skill。"""
         agent = self._get_agent(agent_id)
 
@@ -568,19 +590,22 @@ class AgentManager:
                     request_body["source_type"] = source_type
                 if source_path:
                     request_body["source_path"] = source_path
+                if runtime_source:
+                    request_body["runtime_source"] = runtime_source
                 payload = await adaptor_client.post(
                     f"/agent/skills/uninstall?id={agent_id}",
                     json=request_body,
                 )
             except httpx.HTTPError as exc:
+                details = self._build_runtime_skill_error_details(
+                    agent_id=agent_id,
+                    skill_name=skill_name,
+                    exc=exc,
+                )
                 raise DomainError(
                     code=AGENT_SKILL_UNINSTALL_FAILED,
                     message="Failed to uninstall skill on runtime.",
-                    details={
-                        "agent_id": agent_id,
-                        "skill_name": skill_name,
-                        "error": str(exc),
-                    },
+                    details=details,
                 ) from exc
         finally:
             await adaptor_client.close()
@@ -2128,6 +2153,79 @@ class AgentManager:
     @staticmethod
     def _error_message(exc: Exception) -> str:
         return exc.message if isinstance(exc, DomainError) else str(exc)
+
+    @staticmethod
+    def _build_runtime_skill_error_details(
+        *,
+        agent_id: str,
+        skill_name: str,
+        exc: httpx.HTTPError,
+    ) -> dict[str, Any]:
+        details: dict[str, Any] = {
+            "agent_id": agent_id,
+            "skill_name": skill_name,
+            "error": str(exc),
+        }
+        if not isinstance(exc, httpx.HTTPStatusError):
+            return details
+
+        response = exc.response
+        details["upstream_status_code"] = response.status_code
+
+        payload = AgentManager._parse_http_error_payload(response)
+        if payload is None:
+            response_text = response.text.strip()
+            if response_text:
+                details["error"] = response_text
+                details["upstream_response_text"] = response_text
+            return details
+
+        error_payload = AgentManager._extract_error_payload(payload)
+        if error_payload is None:
+            details["upstream_response"] = payload
+            return details
+
+        upstream_code = error_payload.get("code")
+        if isinstance(upstream_code, str) and upstream_code:
+            details["upstream_error_code"] = upstream_code
+
+        upstream_request_id = error_payload.get("request_id")
+        if isinstance(upstream_request_id, str) and upstream_request_id:
+            details["upstream_request_id"] = upstream_request_id
+
+        upstream_message = error_payload.get("message")
+        if isinstance(upstream_message, str) and upstream_message:
+            details["upstream_error_message"] = upstream_message
+
+        upstream_details = error_payload.get("details")
+        if isinstance(upstream_details, dict):
+            details["upstream_error_details"] = upstream_details
+            reason = upstream_details.get("reason")
+            if isinstance(reason, str) and reason:
+                details["error"] = reason
+                return details
+
+        if isinstance(upstream_message, str) and upstream_message:
+            details["error"] = upstream_message
+
+        return details
+
+    @staticmethod
+    def _parse_http_error_payload(response: httpx.Response) -> dict[str, Any] | None:
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _extract_error_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+        nested_error = payload.get("error")
+        if isinstance(nested_error, dict):
+            return nested_error
+        if isinstance(payload.get("code"), str) and isinstance(payload.get("message"), str):
+            return payload
+        return None
 
     def _raise_operation_failed(
         self,

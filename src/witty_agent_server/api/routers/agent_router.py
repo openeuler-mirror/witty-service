@@ -21,13 +21,16 @@ logger = logging.getLogger(__name__)
 
 class InstallSkillRequest(BaseModel):
     skill_name: str = Field(min_length=1)
+    source_type: str | None = None
     source_path: str | None = None
+    skill_source: str | None = None
 
 
 class UninstallSkillRequest(BaseModel):
     skill_name: str = Field(min_length=1)
     source_type: str | None = None
     source_path: str | None = None
+    runtime_source: str | None = None
 
 
 def create_agent_router(
@@ -140,16 +143,21 @@ def create_agent_router(
         except AgentServiceError as exc:
             return _map_agent_error(request=request, exc=exc)
         logger.info(
-            "install_agent_skill called, agent_id=%s runtime_type=%s skill_name=%s",
+            "install_agent_skill called, agent_id=%s runtime_type=%s skill_name=%s source_type=%s source_path=%s skill_source=%s",
             agent.id,
             agent.runtime_type,
             payload.skill_name,
+            payload.source_type,
+            payload.source_path,
+            payload.skill_source,
         )
         try:
             install_result = skill_service.install_skill(
                 agent_id=agent.id,
                 skill_name=payload.skill_name,
+                source_type=payload.source_type,
                 source_path=payload.source_path,
+                skill_source=payload.skill_source,
             )
 
             return {
@@ -207,6 +215,7 @@ def create_agent_router(
                 skill_name=payload.skill_name,
                 source_type=payload.source_type,
                 source_path=payload.source_path,
+                runtime_source=payload.runtime_source,
             )
             return {
                 "agent_id": agent.id,
