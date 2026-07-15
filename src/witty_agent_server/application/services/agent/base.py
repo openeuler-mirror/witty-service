@@ -58,7 +58,7 @@ class OpenClawLifecycleControlPort(RuntimeLifecyclePort, Protocol):
 
 @runtime_checkable
 class OpenCodeLifecycleControlPort(RuntimeLifecyclePort, Protocol):
-    def update_config(self, *, config_dir: str | None = None) -> None: ...
+    def update_config(self, *, profile: str | None = None) -> None: ...
 
     def configure_model(
         self,

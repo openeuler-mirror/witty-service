@@ -59,7 +59,7 @@ class OpencodeConfig(RuntimeConfig):
                 "username": "opencode",
                 "password": "",
                 "timeout": 30.0,
-                "config_dir": "~/.config/opencode",
+                "profile": profile,
             },
         }
 

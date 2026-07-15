@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import logging
+from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -33,7 +35,7 @@ def _lifecycle_with_http_handler(
     serve_port: int = 4096,
     username: str = "opencode",
     password: str = "",
-    config_dir: str = "/tmp/oc-cfg",
+    profile: str | None = None,
 ) -> OpenCodeLifecycleService:
     """构造 lifecycle，把长持有 httpx.Client 直接注入 client._http_client。
 
@@ -50,7 +52,7 @@ def _lifecycle_with_http_handler(
         transport=httpx.MockTransport(handler),
         timeout=3.0,
     )
-    return OpenCodeLifecycleService(client=client, config_dir=config_dir)
+    return OpenCodeLifecycleService(client=client, profile=profile)
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +73,6 @@ class FakeLifecycleService(OpenCodeLifecycleService):
     ) -> None:
         super().__init__(
             client=client or OpenCodeClient(),
-            config_dir="/tmp/oc-cfg",
         )
         self._probe_returns = list(probe_returns) if probe_returns is not None else []
         self.start_calls = start_calls
@@ -510,15 +511,15 @@ def test_agent_service_resolve_default_agent() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_lifecycle_update_config_only_takes_config_dir() -> None:
-    """lifecycle.update_config 只接收 config_dir，连接参数归 client。"""
+def test_lifecycle_update_config_only_takes_profile() -> None:
+    """lifecycle.update_config 接收 profile，连接参数归 client。"""
     client = OpenCodeClient(serve_port=4096)
-    svc = OpenCodeLifecycleService(client=client, config_dir="/tmp/oc-cfg-orig")
+    svc = OpenCodeLifecycleService(client=client)
 
-    svc.update_config(config_dir="/tmp/oc-cfg-x")
+    svc.update_config(profile="agent-001")
 
-    # lifecycle 自身只存 config_dir
-    # 连接参数仍由 client 持有，未受影响
+    # profile stored, connection params unaffected
+    assert svc._profile == "agent-001"
     assert svc.serve_port == 4096
     assert svc.server_url == "http://127.0.0.1:4096"
 
@@ -526,19 +527,19 @@ def test_lifecycle_update_config_only_takes_config_dir() -> None:
 def test_agent_service_start_applies_opencode_config_to_lifecycle_and_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_apply_config 拆成两条管线：连接字段喂 client、config_dir 喂 lifecycle。"""
+    """_apply_config：连接字段喂 client、profile 喂 lifecycle。"""
     received: dict[str, object] = {}
 
     class RecordingLifecycle(FakeLifecycleService):
-        def update_config(self, *, config_dir: str | None = None) -> None:
-            received["config_dir"] = config_dir
+        def update_config(self, *, profile: str | None = None) -> None:
+            received["profile"] = profile
 
     client = OpenCodeClient()
 
     def client_update_config(**kwargs: object) -> None:
         received["client_kwargs"] = kwargs
 
-    client.update_config = client_update_config  
+    client.update_config = client_update_config
 
     svc = RecordingLifecycle(probe_returns=[True], client=client)  # reuse path
     service = OpenCodeAgentService(lifecycle_service=svc, client=client)
@@ -548,7 +549,7 @@ def test_agent_service_start_applies_opencode_config_to_lifecycle_and_client(
         config={
             "opencode": {
                 "serve_port": 7070,
-                "config_dir": "/tmp/oc-cfg-cfg",
+                "profile": "agent-cfg-inst",
                 "password": "secret",
                 "username": "ocuser",
             }
@@ -562,8 +563,8 @@ def test_agent_service_start_applies_opencode_config_to_lifecycle_and_client(
         "password": "secret",
         "username": "ocuser",
     }
-    # config_dir 下推给 lifecycle
-    assert received["config_dir"] == "/tmp/oc-cfg-cfg"
+    # profile 下推给 lifecycle
+    assert received["profile"] == "agent-cfg-inst"
 
 
 def test_agent_service_start_without_opencode_config_does_not_call_update_config() -> None:
@@ -571,7 +572,7 @@ def test_agent_service_start_without_opencode_config_does_not_call_update_config
     client_calls: list[bool] = []
 
     class NoopLifecycle(FakeLifecycleService):
-        def update_config(self, *, config_dir: str | None = None) -> None:
+        def update_config(self, *, profile: str | None = None) -> None:
             lifecycle_calls.append(True)
 
     client = OpenCodeClient()
@@ -579,7 +580,7 @@ def test_agent_service_start_without_opencode_config_does_not_call_update_config
     def client_update_config(**kwargs: object) -> None:
         client_calls.append(True)
 
-    client.update_config = client_update_config  
+    client.update_config = client_update_config
 
     svc = NoopLifecycle(probe_returns=[True], client=client)
     service = OpenCodeAgentService(lifecycle_service=svc, client=client)
@@ -638,3 +639,54 @@ def test_agent_service_start_server_error_after_stop_marks_failed() -> None:
 
     assert svc.stop_calls == 1  # 旧进程已被 stop
     assert service.agent.status == AgentStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# _setup_xdg_env
+# ---------------------------------------------------------------------------
+
+
+def test_setup_xdg_env_sets_all_xdg_variables(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """_setup_xdg_env 应设置全部 4 个 XDG 环境变量到正确路径。"""
+    mock_settings = MagicMock()
+    mock_settings.workspace.root_path.return_value = tmp_path
+    monkeypatch.setattr(
+        "witty_agent_server.application.services.agent.opencode_lifecycle_service.get_settings",
+        lambda: mock_settings,
+    )
+
+    svc = OpenCodeLifecycleService(client=OpenCodeClient())
+    env: dict[str, str] = {}
+
+    svc._setup_xdg_env(env, "agent-001")
+
+    inst_root = tmp_path / "opencode-instances" / "agent-001"
+    assert env["XDG_DATA_HOME"] == str(inst_root / "data")
+    assert env["XDG_STATE_HOME"] == str(inst_root / "state")
+    assert env["XDG_CONFIG_HOME"] == str(inst_root / "config")
+    assert env["XDG_CACHE_HOME"] == str(inst_root / "cache")
+
+
+def test_setup_xdg_env_creates_directories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """_setup_xdg_env 应创建 data/state/config/cache 目录。"""
+    mock_settings = MagicMock()
+    mock_settings.workspace.root_path.return_value = tmp_path
+    monkeypatch.setattr(
+        "witty_agent_server.application.services.agent.opencode_lifecycle_service.get_settings",
+        lambda: mock_settings,
+    )
+
+    svc = OpenCodeLifecycleService(client=OpenCodeClient())
+    env: dict[str, str] = {}
+
+    svc._setup_xdg_env(env, "agent-002")
+
+    inst_root = tmp_path / "opencode-instances" / "agent-002"
+    assert (inst_root / "data").is_dir()
+    assert (inst_root / "state").is_dir()
+    assert (inst_root / "config").is_dir()
+    assert (inst_root / "cache").is_dir()
