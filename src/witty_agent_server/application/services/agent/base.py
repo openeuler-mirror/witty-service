@@ -60,6 +60,16 @@ class OpenClawLifecycleControlPort(RuntimeLifecyclePort, Protocol):
 class OpenCodeLifecycleControlPort(RuntimeLifecyclePort, Protocol):
     def update_config(self, *, config_dir: str | None = None) -> None: ...
 
+    def configure_model(
+        self,
+        *,
+        model_provider: str,
+        model_name: str | None,
+        api_key: str,
+        api_base_url: str | None,
+        compatibility: str | None = None,
+    ) -> None: ...
+
 
 @runtime_checkable
 class GatewayAgentClientPort(Protocol):

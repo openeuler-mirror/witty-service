@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
 from subprocess import Popen
+from typing import Any
 
 import httpx
 
@@ -27,6 +30,68 @@ _DEFAULT_CONFIG_DIR = "~/.config/opencode"
 _HEALTH_TIMEOUT = 3.0
 _STARTUP_DEADLINE_SECONDS = 30.0
 _STARTUP_POLL_INTERVAL = 1.0
+
+
+# openclaw ``compatibility`` → opencode ``npm`` (AI SDK 包) 映射。
+#   openai            → /v1/chat/completions
+#   anthropic         → Anthropic Messages 格式
+_COMPATIBILITY_TO_NPM: dict[str, str] = {
+    "openai": "@ai-sdk/openai-compatible",
+    "anthropic": "@ai-sdk/anthropic",
+}
+
+
+def _build_opencode_config_content(
+    *,
+    model_provider: str,
+    model_name: str | None,
+    api_key: str,
+    api_base_url: str | None,
+    compatibility: str | None = None,
+) -> str | None:
+    """构建 ``OPENCODE_CONFIG_CONTENT`` 内联配置 JSON。
+
+    依据 opencode 文档 (https://opencode.ai/docs/providers#custom)：
+
+    - 内置 provider（openai/anthropic 等）：仅设置 ``options.apiKey``
+    - 自定义 endpoint（有 ``api_base_url``）：设置 ``npm``、``options.baseURL``、
+      ``models``，``npm`` 按 ``compatibility`` 选择 AI SDK 包：
+        * ``openai`` / 默认 → ``@ai-sdk/openai-compatible``（``/v1/chat/completions``）
+        * ``anthropic`` → ``@ai-sdk/anthropic``（Anthropic Messages 格式）
+    - ``model`` 字段格式为 ``"provider_id/model_id"``
+    """
+    if not model_provider or not model_name:
+        logger.warning(
+            "opencode model config skipped: missing model_provider=%r or model_name=%r",
+            model_provider,
+            model_name,
+        )
+        return None
+
+    provider_config: dict[str, Any] = {}
+    options: dict[str, Any] = {}
+
+    if api_base_url:
+        provider_config["npm"] = _COMPATIBILITY_TO_NPM.get(
+            compatibility or "openai", "@ai-sdk/openai-compatible"
+        )
+        options["baseURL"] = api_base_url
+        provider_config["models"] = {model_name: {"name": model_name}}
+
+    if api_key:
+        options["apiKey"] = api_key
+
+    if options:
+        provider_config["options"] = options
+
+    if not provider_config:
+        return None
+
+    config = {
+        "model": f"{model_provider}/{model_name}",
+        "provider": {model_provider: provider_config},
+    }
+    return json.dumps(config, ensure_ascii=False)
 
 
 class OpenCodeLifecycleError(Exception):
@@ -64,6 +129,7 @@ class OpenCodeLifecycleService:
         self._config_dir = config_dir if config_dir is not None else _DEFAULT_CONFIG_DIR
         self._serve_process: Popen[str] | None = None
         self._stderr_drainer: threading.Thread | None = None
+        self._model_config_content: str | None = None
 
     @property
     def client(self) -> OpenCodeClient:
@@ -82,6 +148,28 @@ class OpenCodeLifecycleService:
         if config_dir is not None:
             self._config_dir = config_dir
 
+    def configure_model(
+        self,
+        *,
+        model_provider: str,
+        model_name: str | None,
+        api_key: str,
+        api_base_url: str | None,
+        compatibility: str | None = None,
+    ) -> None:
+        """配置 opencode 使用的模型与凭据。
+        
+        依据 https://opencode.ai/docs/config：``OPENCODE_CONFIG_CONTENT`` 为
+        内联配置（最高优先级），覆盖全局/项目配置。
+        """
+        self._model_config_content = _build_opencode_config_content(
+            model_provider=model_provider,
+            model_name=model_name,
+            api_key=api_key,
+            api_base_url=api_base_url,
+            compatibility=compatibility,
+        )
+
     def start_server(self) -> None:
         """启动 ``opencode serve`` 子进程。"""
         self._stop_serve_process()
@@ -95,6 +183,8 @@ class OpenCodeLifecycleService:
         }
         if self._client.password:
             env["OPENCODE_SERVER_PASSWORD"] = self._client.password
+        if self._model_config_content:
+            env["OPENCODE_CONFIG_CONTENT"] = self._model_config_content
 
         serve_port = self._client.serve_port
         command: list[str] = [
