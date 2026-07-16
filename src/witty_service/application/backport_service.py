@@ -1046,6 +1046,7 @@ class BackportService:
                 elif isinstance(value, str) and value.strip():
                     # 显式传入了非法值 → 重置为安全默认
                     config[key] = "none"
+                    config["target_config_layout_opts"] = {"default_level": "L1-RECOMMEND"}
                 continue
             if key == "target_config_layout_opts":
                 if isinstance(value, dict):
