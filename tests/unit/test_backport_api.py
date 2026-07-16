@@ -193,3 +193,12 @@ class TestTargetConfigLayoutSchema:
         payload = BackportConfigPayload(**old_payload)
         assert payload.target_config_layout == "none"
         assert payload.target_config_layout_opts.default_level == "L1-RECOMMEND"
+
+    def test_target_config_layout_opts_rejects_extra_fields(self) -> None:
+        """extra 字段被 Pydantic 拒绝"""
+        import pydantic
+        with pytest.raises(pydantic.ValidationError):
+            TargetConfigLayoutOpts(
+                default_level="L1-RECOMMEND",
+                unexpected_field="should_be_rejected",
+            )

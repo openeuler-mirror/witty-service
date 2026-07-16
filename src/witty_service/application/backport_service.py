@@ -1031,7 +1031,11 @@ class BackportService:
 
     @staticmethod
     def _normalize_layout_fields(config: dict[str, Any], source: dict[str, Any]) -> None:
-        """校验并合并 source 中的 layout 字段到 config，非法值被静默丢弃。"""
+        """校验并合并 source 中的 layout 字段到 config。
+
+        合法值：写入 config。source 中显式传入但非法：重置为安全默认。
+        source 中未包含该 key：保持 config 现有值。
+        """
         for key in ("target_config_layout", "target_config_layout_opts"):
             if key not in source:
                 continue
@@ -1039,12 +1043,17 @@ class BackportService:
             if key == "target_config_layout":
                 if isinstance(value, str) and value.strip() in {"none", "anolis"}:
                     config[key] = value.strip()
+                elif isinstance(value, str) and value.strip():
+                    # 显式传入了非法值 → 重置为安全默认
+                    config[key] = "none"
                 continue
             if key == "target_config_layout_opts":
                 if isinstance(value, dict):
                     try:
                         validated = TargetConfigLayoutOpts(**value)
                     except Exception:
+                        # 非法 opts → 重置为默认
+                        config[key] = {"default_level": "L1-RECOMMEND"}
                         continue
                     merged = dict(config[key])
                     merged.update(validated.model_dump())

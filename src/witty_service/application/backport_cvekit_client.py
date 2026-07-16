@@ -1390,17 +1390,18 @@ class BackportCvekitClient:
         else:
             layout = layout.strip()
 
-        opts = target_config_layout_opts
         if layout == "none":
             return layout, None
-        if isinstance(opts, dict):
+
+        # 非 none layout：opts 缺失或非法时补默认值
+        if isinstance(target_config_layout_opts, dict):
             try:
                 from witty_service.api.backport_schemas import TargetConfigLayoutOpts
-                opts = TargetConfigLayoutOpts(**opts).model_dump()
+                opts: dict[str, Any] | None = TargetConfigLayoutOpts(**target_config_layout_opts).model_dump()
             except Exception:
-                opts = None
+                opts = {"default_level": "L1-RECOMMEND"}
         else:
-            opts = None
+            opts = {"default_level": "L1-RECOMMEND"}
         return layout, opts
 
     @staticmethod

@@ -14,6 +14,7 @@ commit {{commit_id}} {{source}}
 
 
 class TargetConfigLayoutOpts(BaseModel):
+    model_config = {"extra": "forbid"}
     default_level: Literal["L0-MANDATORY", "L1-RECOMMEND", "L2-OPTIONAL"] = Field(
         default_factory=lambda: "L1-RECOMMEND"
     )
