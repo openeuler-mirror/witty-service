@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -973,6 +974,44 @@ class TestTargetConfigLayoutYaml:
         """execute_selected layout=none 时 filtered config 不含 layout 字段"""
         base = tmp_path / "b.yml"
         _write_report(base, commits=[{"row_id": "1", "status": "pending", "patch_path": "/p"}])
+
+        captured_config: dict[str, Any] = {}
+
+        def fake_run(self, args, cwd):
+            for a in args:
+                if a.endswith(".yml") and "filtered" in a:
+                    captured_config.update(
+                        yaml.safe_load(Path(a).read_text(encoding="utf-8")) or {}
+                    )
+            cfg = next(a for a in args if a.endswith(".yml"))
+            Path(cfg).write_text(
+                yaml.safe_dump({"commits": [{"row_id": "1", "status": "success"}]}),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+        client.execute_selected(
+            base_report_path=str(base), selected_commits=[{"row_id": "1"}],
+            target_path="/t", patch_dataset_dir="pd", signer_name="n", signer_email="e",
+            commit_message_template="tpl", commit_message_source="openEuler", linux_repo_path="lr",
+            target_config_layout="none",
+            target_config_layout_opts=None,
+        )
+        assert "target_config_layout" not in captured_config
+        assert "target_config_layout_opts" not in captured_config
+
+    def test_execute_selected_strips_old_layout_when_current_is_none(
+        self, client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """原 report 有 layout，当前传 none 时 filtered config 不含 layout 字段"""
+        base = tmp_path / "b.yml"
+        _write_report(
+            base,
+            commits=[{"row_id": "1", "status": "pending", "patch_path": "/p"}],
+            target_config_layout="anolis",
+            target_config_layout_opts={"default_level": "L2-OPTIONAL"},
+        )
 
         captured_config: dict[str, Any] = {}
 

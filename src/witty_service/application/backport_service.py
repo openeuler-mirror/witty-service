@@ -76,17 +76,10 @@ class BackportService:
         config = _default_config()
         for key in config:
             value = loaded.get(key, "")
-            if key == "target_config_layout_opts":
-                if isinstance(value, dict):
-                    merged = dict(config[key])
-                    merged.update(value)
-                    config[key] = merged
-                continue
-            if key == "target_config_layout":
-                if isinstance(value, str) and value.strip():
-                    config[key] = value.strip()
-                continue
+            if key in ("target_config_layout", "target_config_layout_opts"):
+                continue  # handled by _normalize_layout_fields below
             config[key] = value if isinstance(value, str) else ""
+        self._normalize_layout_fields(config, loaded)
         config["commit_message_source"] = self._normalize_commit_message_source(
             config.get("commit_message_source", "")
         )
@@ -102,22 +95,11 @@ class BackportService:
     def update_config(self, payload: dict[str, Any]) -> None:
         config = _default_config()
         for key in config:
+            if key in ("target_config_layout", "target_config_layout_opts"):
+                continue
             value = payload.get(key, "")
-            if key == "target_config_layout_opts":
-                if isinstance(value, dict):
-                    try:
-                        TargetConfigLayoutOpts(**value)
-                    except Exception:
-                        continue
-                    merged = dict(config[key])
-                    merged.update(value)
-                    config[key] = merged
-                continue
-            if key == "target_config_layout":
-                if isinstance(value, str) and value.strip() in {"none", "anolis"}:
-                    config[key] = value.strip()
-                continue
             config[key] = value.strip() if isinstance(value, str) else ""
+        self._normalize_layout_fields(config, payload)
         config["commit_message_source"] = self._normalize_commit_message_source(
             config.get("commit_message_source", "")
         )
@@ -1047,6 +1029,28 @@ class BackportService:
 
     # ── 辅助方法 ──────────────────────────────────────────────
 
+    @staticmethod
+    def _normalize_layout_fields(config: dict[str, Any], source: dict[str, Any]) -> None:
+        """校验并合并 source 中的 layout 字段到 config，非法值被静默丢弃。"""
+        for key in ("target_config_layout", "target_config_layout_opts"):
+            if key not in source:
+                continue
+            value = source[key]
+            if key == "target_config_layout":
+                if isinstance(value, str) and value.strip() in {"none", "anolis"}:
+                    config[key] = value.strip()
+                continue
+            if key == "target_config_layout_opts":
+                if isinstance(value, dict):
+                    try:
+                        TargetConfigLayoutOpts(**value)
+                    except Exception:
+                        continue
+                    merged = dict(config[key])
+                    merged.update(value)
+                    config[key] = merged
+                continue
+
     def _extract_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         raw_config = payload.get("config")
         normalized = self.get_config()
@@ -1054,25 +1058,14 @@ class BackportService:
             return normalized
 
         for key in _default_config():
+            if key in ("target_config_layout", "target_config_layout_opts"):
+                continue
             value = raw_config.get(key)
-            if key == "target_config_layout_opts":
-                if isinstance(value, dict):
-                    try:
-                        TargetConfigLayoutOpts(**value)
-                    except Exception:
-                        continue
-                    merged = dict(normalized[key])
-                    merged.update(value)
-                    normalized[key] = merged
-                continue
-            if key == "target_config_layout":
-                if isinstance(value, str) and value.strip() in {"none", "anolis"}:
-                    normalized[key] = value.strip()
-                continue
             if isinstance(value, str):
                 stripped = value.strip()
                 if stripped or key.startswith("current_"):
                     normalized[key] = stripped
+        self._normalize_layout_fields(normalized, raw_config)
         return normalized
 
     def _persist_runtime_state(

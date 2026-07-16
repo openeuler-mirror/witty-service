@@ -966,6 +966,8 @@ class BackportCvekitClient:
         config_data = dict(orig_report)
         config_data["commits"] = actionable_commits
         config_data.pop("api_key", None)
+        config_data.pop("target_config_layout", None)
+        config_data.pop("target_config_layout_opts", None)
         if patch_dataset_dir.strip():
             config_data["patch_dataset_dir"] = patch_dataset_dir.strip()
         if signer_name.strip():
