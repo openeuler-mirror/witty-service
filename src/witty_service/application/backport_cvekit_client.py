@@ -9,7 +9,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import yaml
 
@@ -18,12 +18,12 @@ from witty_service.application.backport_git_client import BackportGitClient
 
 @dataclass(slots=True)
 class BackportRuntimeConfig:
-    mcp_args: list[Any]
-    mcp_env: dict[str, Any]
     llm_provider: str
     api_key: str
     llm_base_url: str = ""
     llm_model_name: str = ""
+    backport_engine: str = "mystique"
+    format_mode: str = "changed"
 
 
 class BackportCvekitClient:
@@ -34,6 +34,7 @@ class BackportCvekitClient:
         "api_key",
         "apply",
         "backport_config",
+        "backport_engine",
         "backport_excel",
         "branch",
         "clone_dir",
@@ -42,6 +43,7 @@ class BackportCvekitClient:
         "debug",
         "excel_sheet",
         "execute",
+        "format_mode",
         "fork_repo_url",
         "gitee_token",
         "json",
@@ -59,6 +61,8 @@ class BackportCvekitClient:
         "signer_name",
         "source_branch",
         "stop_at_first_conflict",
+        "target_config_layout",
+        "target_config_layout_opts",
         "target_path",
         "target_release",
     }
@@ -126,40 +130,9 @@ class BackportCvekitClient:
                 raise ValueError(f"cvekit option 类型不支持: {key}")
         return args
 
-    # ── cvekit MCP 配置 ────────────────────────────────────────
-
-    def _get_cvekit_mcp_config(self) -> tuple[list[Any], dict[str, Any]]:
-        if self._runtime_config is not None:
-            return list(self._runtime_config.mcp_args), dict(self._runtime_config.mcp_env)
-        raise RuntimeError(
-            "Backport 运行环境未配置，请在 Backport 配置区选择运行模型并确认 cvekit_mcp 已配置。"
-        )
-
-    @staticmethod
-    def _parse_option_values(args: list[Any], option_names: set[str]) -> dict[str, str]:
-        arg_values: dict[str, str] = {}
-        index = 0
-        while index < len(args):
-            item = str(args[index]).strip()
-            if item in option_names and index + 1 < len(args):
-                value = str(args[index + 1]).strip()
-                if value:
-                    arg_values[item] = value
-                index += 2
-                continue
-            for option_name in option_names:
-                prefix = f"{option_name}="
-                if item.startswith(prefix):
-                    value = item[len(prefix) :].strip()
-                    if value:
-                        arg_values[option_name] = value
-                    break
-            index += 1
-        return arg_values
-
     # ── 通用工具 ────────────────────────────────────────────────
 
-    def _build_env(self, mcp_env: dict[str, Any]) -> dict[str, str]:
+    def _build_env(self) -> dict[str, str]:
         cvekit_bin_dir = self.resolve_cvekit_path().parent
         env: dict[str, str] = {
             "PATH": os.pathsep.join(
@@ -177,14 +150,11 @@ class BackportCvekitClient:
             value = os.environ.get(key)
             if value:
                 env[key] = value
-        joern_path = str(
-            mcp_env.get("JOERN_PATH") or os.environ.get("JOERN_PATH") or ""
-        ).strip()
+        joern_path = os.environ.get("JOERN_PATH", "").strip()
         if joern_path:
             env["JOERN_PATH"] = joern_path
         conflict_reporter_url = (
             self._conflict_reporter_url
-            or str(mcp_env.get("CONFLICT_REPORTER_URL") or "").strip()
             or os.environ.get("CONFLICT_REPORTER_URL", "").strip()
         )
         if conflict_reporter_url:
@@ -199,28 +169,22 @@ class BackportCvekitClient:
         return env
 
     def _run_cvekit(self, args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        if self._runtime_config is None:
+            raise RuntimeError("Backport 运行环境未配置，请在 Backport 配置区选择运行模型。")
         cmd_args = list(args)
         existing_options = {
             item.split("=", 1)[0]
             for item in cmd_args
             if isinstance(item, str) and item.startswith("--")
         }
-        mcp_args, mcp_env = self._get_cvekit_mcp_config()
-        mcp_options = self._parse_option_values(
-            mcp_args,
-            {
-                "--backport-engine",
-                "--format-mode",
-            },
-        )
-        runtime_config = cast(BackportRuntimeConfig, self._runtime_config)
-        env = self._build_env(mcp_env)
+        runtime_config = self._runtime_config
+        env = self._build_env()
         for option, value in (
             ("--llm-provider", runtime_config.llm_provider),
             ("--llm-base-url", runtime_config.llm_base_url),
             ("--llm-model-name", runtime_config.llm_model_name),
-            ("--backport-engine", mcp_options.get("--backport-engine")),
-            ("--format-mode", mcp_options.get("--format-mode")),
+            ("--backport-engine", runtime_config.backport_engine),
+            ("--format-mode", runtime_config.format_mode),
         ):
             if value and option not in existing_options:
                 cmd_args.extend([option, value])
