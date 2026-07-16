@@ -21,12 +21,12 @@ from witty_agent_server.application.services.agent._process_utils import (
     start_stderr_drainer,
 )
 from witty_agent_server.infra.clients.opencode_client import OpenCodeClient
+from witty_service.config import get_settings
 
 
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_CONFIG_DIR = "~/.config/opencode"
 _HEALTH_TIMEOUT = 3.0
 _STARTUP_DEADLINE_SECONDS = 30.0
 _STARTUP_POLL_INTERVAL = 1.0
@@ -111,7 +111,7 @@ class OpenCodeServeStartError(OpenCodeLifecycleError):
 class OpenCodeLifecycleService:
     """OpenCode ``serve`` 子进程生命周期控制。
 
-    本类只持有进程环境字段（``config_dir``）与 ``_serve_process``。
+    本类持有 ``profile`` 与 ``_serve_process``。
     HTTP 探测/停止通过 ``self._client.http_client()`` 取带 Basic Auth 的 client
     ``http_client()`` 返回的是长持有实例，**禁止 ``with``**。
 
@@ -123,10 +123,10 @@ class OpenCodeLifecycleService:
         self,
         client: OpenCodeClient,
         *,
-        config_dir: str | None = None,
+        profile: str | None = None,
     ) -> None:
         self._client = client
-        self._config_dir = config_dir if config_dir is not None else _DEFAULT_CONFIG_DIR
+        self._profile = profile
         self._serve_process: Popen[str] | None = None
         self._stderr_drainer: threading.Thread | None = None
         self._model_config_content: str | None = None
@@ -143,10 +143,14 @@ class OpenCodeLifecycleService:
     def serve_port(self) -> int:
         return self._client.serve_port
 
-    def update_config(self, *, config_dir: str | None = None) -> None:
+    def update_config(
+        self,
+        *,
+        profile: str | None = None,
+    ) -> None:
         """运行时更新进程环境参数。"""
-        if config_dir is not None:
-            self._config_dir = config_dir
+        if profile is not None:
+            self._profile = profile
 
     def configure_model(
         self,
@@ -174,17 +178,18 @@ class OpenCodeLifecycleService:
         """启动 ``opencode serve`` 子进程。"""
         self._stop_serve_process()
 
-        config_dir = str(Path(self._config_dir).expanduser())
-
         env = {
             **os.environ,
-            "OPENCODE_CONFIG_DIR": config_dir,
             "OPENCODE_PERMISSION": '{"*":"allow"}',
         }
         if self._client.password:
             env["OPENCODE_SERVER_PASSWORD"] = self._client.password
         if self._model_config_content:
             env["OPENCODE_CONFIG_CONTENT"] = self._model_config_content
+
+        if self._profile:
+            # XDG isolation: per-profile data, state, config, cache.
+            self._setup_xdg_env(env, self._profile)
 
         serve_port = self._client.serve_port
         command: list[str] = [
@@ -313,6 +318,42 @@ class OpenCodeLifecycleService:
         self._stderr_drainer = None
         if drainer is not None and drainer.is_alive():
             drainer.join(timeout=_STDERR_DRAIN_JOIN_TIMEOUT)
+
+    def _setup_xdg_env(self, env: dict[str, str], profile: str) -> None:
+        """为指定 *profile* 填充 XDG 环境变量。
+
+        所有目录均创建于 ``<WITTY_WORKSPACE_ROOT>/opencode-instances/<profile>/`` 下。
+        opencode 会自动在每个 XDG 路径后追加 ``/opencode``，例如
+        ``$XDG_DATA_HOME/opencode/opencode.db``。
+        """
+
+        workspace_root = get_settings().workspace.root_path()
+        inst_root = workspace_root / "opencode-instances" / profile
+
+        xdg_dirs: dict[str, Path] = {
+            "XDG_DATA_HOME": inst_root / "data",
+            "XDG_STATE_HOME": inst_root / "state",
+            "XDG_CONFIG_HOME": inst_root / "config",
+            "XDG_CACHE_HOME": inst_root / "cache",
+        }
+
+        for env_var, dir_path in xdg_dirs.items():
+            try:
+                dir_path.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise OpenCodeServeStartError(
+                    message=(
+                        f"Failed to create XDG directory {dir_path} "
+                        f"(profile={profile}): {exc}"
+                    )
+                ) from exc
+            env[env_var] = str(dir_path)
+            logger.debug(
+                "opencode XDG isolation: %s=%s (profile=%s)",
+                env_var,
+                dir_path,
+                profile,
+            )
 
 
 

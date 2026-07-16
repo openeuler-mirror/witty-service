@@ -120,9 +120,9 @@ class OpenCodeAgentService(AgentServiceBase):
         if client_kwargs:
             self._client.update_config(**client_kwargs)
 
-        config_dir = oc_cfg.get("config_dir")
-        if config_dir is not None:
-            self._lifecycle_service.update_config(config_dir=config_dir)
+        profile = oc_cfg.get("profile")
+        if profile is not None:
+            self._lifecycle_service.update_config(profile=profile)
 
         # 配置模型
         model_cfg = config.get("model")
