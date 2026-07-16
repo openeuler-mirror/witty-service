@@ -665,7 +665,7 @@ def test_setup_xdg_env_sets_all_xdg_variables(
     inst_root = tmp_path / "opencode-instances" / "agent-001"
     assert env["XDG_DATA_HOME"] == str(inst_root / "data")
     assert env["XDG_STATE_HOME"] == str(inst_root / "state")
-    assert env["XDG_CONFIG_HOME"] == str(inst_root / "config")
+    assert env["XDG_CONFIG_HOME"] == str(tmp_path / "agent-workspaces" / "agent-001" / "workspace")
     assert env["XDG_CACHE_HOME"] == str(inst_root / "cache")
 
 
@@ -688,5 +688,5 @@ def test_setup_xdg_env_creates_directories(
     inst_root = tmp_path / "opencode-instances" / "agent-002"
     assert (inst_root / "data").is_dir()
     assert (inst_root / "state").is_dir()
-    assert (inst_root / "config").is_dir()
+    assert (tmp_path / "agent-workspaces" / "agent-002" / "workspace").is_dir()
     assert (inst_root / "cache").is_dir()

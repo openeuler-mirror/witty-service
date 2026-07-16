@@ -21,6 +21,18 @@ from witty_agent_server.runtimes.runtime_base import RuntimeType
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_mcp_config(config: dict[str, Any], server_name: str) -> dict[str, Any]:
+    """若 *config* 为 ``{server_name: {actual_config}}`` 包装格式，使用
+    已知的 *server_name* 精确解包，返回内层 dict；否则原样返回。
+    """
+    if not isinstance(config, dict) or not server_name:
+        return config
+    inner = config.get(server_name)
+    if isinstance(inner, dict):
+        return inner
+    return config
+
+
 class OpenCodeAgentService(AgentServiceBase):
     """opencode runtime 的 agent 服务。
 
@@ -173,3 +185,62 @@ class OpenCodeAgentService(AgentServiceBase):
 
     def resolve_default_agent(self) -> str:
         return self._agent.id or "main"
+
+    def setup_mcp(
+        self,
+        *,
+        agent_id: str | None = None,
+        mcp_server_name: str | None = None,
+        mcp_server_config: dict[str, Any] | None = None,
+    ) -> None:
+        """动态添加 MCP server"""
+        with self._lock:
+            self._ensure_agent_context(agent_id=agent_id)
+
+        if not mcp_server_name or not isinstance(mcp_server_config, dict):
+            raise AgentServiceError(
+                code="OPENCODE_MCP_CONFIG_INVALID",
+                message="mcp_server_name and mcp_server_config are required",
+                status_code=400,
+                details={},
+            )
+
+        config = _unwrap_mcp_config(mcp_server_config, mcp_server_name)
+
+        try:
+            self._lifecycle_service.mcp_set(mcp_server_name, config)
+        except (OSError, OpenCodeLifecycleError) as exc:
+            raise AgentServiceError(
+                code="OPENCODE_MCP_SETUP_FAILED",
+                message=f"opencode mcp config persist to disk failed: {exc}",
+                status_code=500,
+                details={"action": "mcp_set", "message": str(exc)},
+            ) from exc
+
+    def unset_mcp(
+        self,
+        *,
+        agent_id: str | None = None,
+        mcp_server_name: str | None = None,
+    ) -> None:
+        """断开并移除 MCP server"""
+        with self._lock:
+            self._ensure_agent_context(agent_id=agent_id)
+
+        if not mcp_server_name:
+            raise AgentServiceError(
+                code="OPENCODE_MCP_CONFIG_INVALID",
+                message="mcp_server_name is required",
+                status_code=400,
+                details={},
+            )
+
+        try:
+            self._lifecycle_service.mcp_unset(mcp_server_name)
+        except (OSError, OpenCodeLifecycleError) as exc:
+            raise AgentServiceError(
+                code="OPENCODE_MCP_UNSET_FAILED",
+                message=f"opencode mcp config remove from disk failed: {exc}",
+                status_code=500,
+                details={"action": "mcp_unset", "message": str(exc)},
+            ) from exc
