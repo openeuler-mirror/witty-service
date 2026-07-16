@@ -1043,11 +1043,11 @@ class BackportService:
             if key == "target_config_layout_opts":
                 if isinstance(value, dict):
                     try:
-                        TargetConfigLayoutOpts(**value)
+                        validated = TargetConfigLayoutOpts(**value)
                     except Exception:
                         continue
                     merged = dict(config[key])
-                    merged.update(value)
+                    merged.update(validated.model_dump())
                     config[key] = merged
                 continue
 
@@ -1081,7 +1081,7 @@ class BackportService:
         if not isinstance(artifacts, dict):
             artifacts = {}
 
-        config = self.get_config()
+        config = self._extract_config(payload)
         if action in {"generate_report", "run_all"}:
             config["current_excel_path"] = self._get_string(payload, "excel_path", "excelPath")
             if action == "generate_report":
