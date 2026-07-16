@@ -559,6 +559,11 @@ class BackportCvekitClient:
             if isinstance(value, str) and value.strip():
                 base_config[key] = value.strip()
 
+        # 校验并归一化 layout 字段
+        target_config_layout, target_config_layout_opts = self._normalize_layout_fields(
+            target_config_layout, target_config_layout_opts
+        )
+
         # 仅在 layout != "none" 时写入新字段
         if target_config_layout and target_config_layout != "none":
             base_config["target_config_layout"] = target_config_layout
@@ -984,6 +989,11 @@ class BackportCvekitClient:
         if linux_repo_path.strip():
             config_data["linux_repo_path"] = linux_repo_path.strip()
 
+        # 校验并归一化 layout 字段
+        target_config_layout, target_config_layout_opts = self._normalize_layout_fields(
+            target_config_layout, target_config_layout_opts
+        )
+
         # 仅在 layout != "none" 时写入新字段
         if target_config_layout and target_config_layout != "none":
             config_data["target_config_layout"] = target_config_layout
@@ -1367,6 +1377,31 @@ class BackportCvekitClient:
             if isinstance(val, str) and val.strip():
                 return val.strip()
         return json.dumps(row, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _normalize_layout_fields(
+        target_config_layout: str,
+        target_config_layout_opts: dict[str, Any] | None,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """校验并归一化 layout 字段，非法值回落到安全默认。"""
+        layout = target_config_layout
+        if not isinstance(layout, str) or layout.strip() not in {"none", "anolis"}:
+            layout = "none"
+        else:
+            layout = layout.strip()
+
+        opts = target_config_layout_opts
+        if layout == "none":
+            return layout, None
+        if isinstance(opts, dict):
+            try:
+                from witty_service.api.backport_schemas import TargetConfigLayoutOpts
+                opts = TargetConfigLayoutOpts(**opts).model_dump()
+            except Exception:
+                opts = None
+        else:
+            opts = None
+        return layout, opts
 
     @staticmethod
     def _normalize_commit_message_source(value: str) -> str:
