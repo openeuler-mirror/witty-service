@@ -91,7 +91,7 @@ def test_create_run_rejects_unsupported_action() -> None:
 def test_create_and_get_run(monkeypatch) -> None:
     request = RequestStub()
     service = _service()
-    monkeypatch.setattr(backport_api, "BackportService", lambda _services: service)
+    monkeypatch.setattr(backport_api, "BackportService", lambda _services, progress_callback=None: service)
 
     class ImmediateThread:
         def __init__(self, target, daemon, name) -> None:
