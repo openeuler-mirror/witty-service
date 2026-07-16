@@ -1053,15 +1053,17 @@ class BackportService:
                     try:
                         validated = TargetConfigLayoutOpts(**value)
                     except Exception:
-                        # 非法 opts → 重置为默认
+                        # 非法 opts → 重置为默认，同时重置 layout
                         config[key] = {"default_level": "L1-RECOMMEND"}
+                        config["target_config_layout"] = "none"
                         continue
                     merged = dict(config[key])
                     merged.update(validated.model_dump())
                     config[key] = merged
                 else:
-                    # 非 dict 类型 → 重置为默认
+                    # 非 dict 类型 → 重置为默认，同时重置 layout
                     config[key] = {"default_level": "L1-RECOMMEND"}
+                    config["target_config_layout"] = "none"
                 continue
 
     def _extract_config(self, payload: dict[str, Any]) -> dict[str, Any]:

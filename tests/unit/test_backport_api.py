@@ -202,3 +202,64 @@ class TestTargetConfigLayoutSchema:
                 default_level="L1-RECOMMEND",
                 unexpected_field="should_be_rejected",
             )
+
+
+class TestNormalizeLayoutFields:
+    """Service _normalize_layout_fields 对各种非法 runtime payload 的归一化"""
+
+    def test_invalid_string_layout_resets_to_none(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        source = {"target_config_layout": "bad_value"}
+        BackportService._normalize_layout_fields(config, source)
+        assert config["target_config_layout"] == "none"
+        assert config["target_config_layout_opts"] == {"default_level": "L1-RECOMMEND"}
+
+    def test_non_string_layout_resets_to_none(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        source = {"target_config_layout": 123}
+        BackportService._normalize_layout_fields(config, source)
+        assert config["target_config_layout"] == "none"
+        assert config["target_config_layout_opts"] == {"default_level": "L1-RECOMMEND"}
+
+    def test_non_dict_opts_resets_both(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        source = {"target_config_layout_opts": "bad_opts"}
+        BackportService._normalize_layout_fields(config, source)
+        assert config["target_config_layout"] == "none"
+        assert config["target_config_layout_opts"] == {"default_level": "L1-RECOMMEND"}
+
+    def test_invalid_opts_validation_resets_both(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        source = {"target_config_layout_opts": {"default_level": "INVALID"}}
+        BackportService._normalize_layout_fields(config, source)
+        assert config["target_config_layout"] == "none"
+        assert config["target_config_layout_opts"] == {"default_level": "L1-RECOMMEND"}
+
+    def test_extra_opts_fields_stripped(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        source = {"target_config_layout_opts": {"default_level": "L0-MANDATORY", "extra": "bad"}}
+        BackportService._normalize_layout_fields(config, source)
+        # Pydantic raises on extra fields, so opts resets to default and layout resets to none
+        assert config["target_config_layout_opts"] == {"default_level": "L1-RECOMMEND"}
+        assert config["target_config_layout"] == "none"
+
+    def test_valid_values_preserved(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "none", "target_config_layout_opts": {"default_level": "L1-RECOMMEND"}}
+        source = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        BackportService._normalize_layout_fields(config, source)
+        assert config["target_config_layout"] == "anolis"
+        assert config["target_config_layout_opts"] == {"default_level": "L2-OPTIONAL"}
+
+    def test_key_not_in_source_preserves_existing(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        source: dict = {}
+        BackportService._normalize_layout_fields(config, source)
+        assert config["target_config_layout"] == "anolis"
+        assert config["target_config_layout_opts"] == {"default_level": "L2-OPTIONAL"}

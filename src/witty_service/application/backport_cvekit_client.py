@@ -423,6 +423,8 @@ class BackportCvekitClient:
     def _write_report_config(path: Path, report_data: dict[str, Any], commits: list[dict[str, Any]]) -> None:
         config_data = {key: value for key, value in report_data.items() if key != "commits"}
         config_data.pop("api_key", None)
+        config_data.pop("target_config_layout", None)
+        config_data.pop("target_config_layout_opts", None)
         config_data["commits"] = commits
         with path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config_data, handle, allow_unicode=True, sort_keys=False)
