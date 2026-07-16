@@ -1043,8 +1043,8 @@ class BackportService:
             if key == "target_config_layout":
                 if isinstance(value, str) and value.strip() in {"none", "anolis"}:
                     config[key] = value.strip()
-                elif isinstance(value, str) and value.strip():
-                    # 显式传入了非法值 → 重置为安全默认
+                else:
+                    # 任何非法值（无效字符串、非字符串类型）→ 重置
                     config[key] = "none"
                     config["target_config_layout_opts"] = {"default_level": "L1-RECOMMEND"}
                 continue
@@ -1059,6 +1059,9 @@ class BackportService:
                     merged = dict(config[key])
                     merged.update(validated.model_dump())
                     config[key] = merged
+                else:
+                    # 非 dict 类型 → 重置为默认
+                    config[key] = {"default_level": "L1-RECOMMEND"}
                 continue
 
     def _extract_config(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1165,7 +1168,6 @@ class BackportService:
                 for item in commits
                 if isinstance(item, dict)
                 and item.get("has_conflict") is True
-                and str(item.get("status") or "").strip().lower() not in {"failed", "error"}
                 and not cls._is_skipped_commit(item)
             ),
             None,
