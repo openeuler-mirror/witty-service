@@ -1448,9 +1448,7 @@ class BackportService:
 
     @classmethod
     def _is_terminal_nonblocking_row(cls, row: dict[str, Any]) -> bool:
-        """行是否已完成且非阻塞冲突：已合入/空 patch/已应用/等价存在/非冲突失败。
-
-        has_conflict=True 的行即使 status=failed/error 也视为阻塞，不在此跳过。"""
+        """行是否已完成且非阻塞冲突：已合入/空 patch/已应用/等价存在/失败。"""
         status = str(row.get("status") or "").strip().lower()
         return (
             cls._is_skipped_commit(row)
@@ -1458,7 +1456,7 @@ class BackportService:
             or row.get("empty_patch") is True
             or row.get("equivalent_exists") is True
             or bool(str(row.get("applied_commit") or "").strip())
-            or (status in {"failed", "error"} and row.get("has_conflict") is not True)
+            or status in {"failed", "error"}
         )
 
     @classmethod
@@ -1469,6 +1467,7 @@ class BackportService:
                 for item in commits
                 if isinstance(item, dict)
                 and item.get("has_conflict") is True
+                and str(item.get("status") or "").strip().lower() not in {"failed", "error"}
                 and not cls._is_skipped_commit(item)
             ),
             None,

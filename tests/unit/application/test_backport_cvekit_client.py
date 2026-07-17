@@ -11,7 +11,6 @@ import json
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 import yaml
@@ -186,7 +185,7 @@ def test_is_skipped_row(row: dict, expected: bool) -> None:
 
 
 def test_is_blocking_conflict_distinguishes_skipped() -> None:
-    assert BackportCvekitClient._is_blocking_conflict({"has_conflict": True, "status": "failed"}) is True
+    assert BackportCvekitClient._is_blocking_conflict({"has_conflict": True, "status": "failed"}) is False
     assert BackportCvekitClient._is_blocking_conflict({"has_conflict": True, "status": "skipped"}) is False
     assert BackportCvekitClient._is_blocking_conflict({"has_conflict": False}) is False
 
@@ -498,7 +497,7 @@ def test_generate_report_excel_missing(client: BackportCvekitClient) -> None:
 
 def test_continue_report_blocking_short_circuit(client: BackportCvekitClient, tmp_path: Path) -> None:
     base = tmp_path / "b.yml"
-    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "failed"}])
+    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "pending"}])
     out = client.continue_report(base_report_path=str(base))
     assert out["status"] == "failed" and "阻塞冲突" in out["summary"]
 
@@ -545,7 +544,7 @@ def test_recheck_conflict_no_blocking_or_wrong_row(
     assert client.recheck_conflict(base_report_path=str(base), row={"row_id": "1"})["status"] == "failed"
 
     work = tmp_path / "w.yml"
-    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "failed"}])
+    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "pending"}])
     _write_report(work, commits=[{"row_id": "999", "v": "x"}])
     monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", lambda *a, **kw: None)
     out = client.recheck_conflict(base_report_path=str(base), row={"row_id": "999"}, working_report_path=str(work))
@@ -556,7 +555,7 @@ def test_recheck_conflict_success(
     client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base = tmp_path / "b.yml"
-    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "failed"}])
+    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "pending"}])
 
     def fake_run(self, args, cwd):
         cfg = next(a for a in args if a.endswith(".report.yml"))
@@ -646,7 +645,7 @@ def test_try_resolve_no_blocking_or_wrong_row(
     assert out["status"] == "failed" and "没有可处理" in out["summary"]
 
     work = tmp_path / "w.yml"
-    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "failed"}])
+    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "pending"}])
     _write_report(work, commits=[{"row_id": "999", "patch_path": "/p"}])
     monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", lambda *a, **kw: None)
     out = client.try_resolve(
@@ -661,7 +660,7 @@ def test_try_resolve_with_blocking(
     client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base = tmp_path / "b.yml"
-    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "failed", "patch_path": "/p"}])
+    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "pending", "patch_path": "/p"}])
 
     def fake_run(self, args, cwd):
         cfg = next(a for a in args if a.endswith(".yml"))

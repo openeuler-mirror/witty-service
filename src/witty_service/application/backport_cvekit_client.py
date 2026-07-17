@@ -402,7 +402,8 @@ class BackportCvekitClient:
 
     @classmethod
     def _is_blocking_conflict(cls, row: dict[str, Any]) -> bool:
-        return row.get("has_conflict") is True and not cls._is_skipped_row(row)
+        status = str(row.get("status") or "").strip().lower()
+        return row.get("has_conflict") is True and status not in {"failed", "error"} and not cls._is_skipped_row(row)
 
     @staticmethod
     def _is_pending_row(row: dict[str, Any]) -> bool:
