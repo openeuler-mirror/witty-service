@@ -1038,3 +1038,44 @@ class TestTargetConfigLayoutYaml:
         )
         assert "target_config_layout" not in captured_config
         assert "target_config_layout_opts" not in captured_config
+
+    def test_continue_report_writes_layout_to_config(
+        self, client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """continue_report 写入当前 layout 到 CVEKit YAML"""
+        base = tmp_path / "b.yml"
+        _write_report(
+            base,
+            commits=[
+                {"row_id": "1", "status": "success"},
+                {"row_id": "2", "status": "pending"},
+            ],
+            target_config_layout="none",
+        )
+
+        captured_config: dict[str, Any] = {}
+
+        def fake_run(self, args, cwd):
+            for a in args:
+                if a.endswith(".report.yml"):
+                    captured_config.update(
+                        yaml.safe_load(Path(a).read_text(encoding="utf-8")) or {}
+                    )
+            cfg = next(a for a in args if a.endswith(".report.yml"))
+            Path(cfg).write_text(
+                yaml.safe_dump({"commits": [
+                    {"row_id": "1", "status": "success"},
+                    {"row_id": "2", "status": "success"},
+                ]}),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+        client.continue_report(
+            base_report_path=str(base),
+            target_config_layout="anolis",
+            target_config_layout_opts={"default_level": "L0-MANDATORY"},
+        )
+        assert captured_config.get("target_config_layout") == "anolis"
+        assert captured_config.get("target_config_layout_opts") == {"default_level": "L0-MANDATORY"}

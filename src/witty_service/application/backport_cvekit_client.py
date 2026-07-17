@@ -420,11 +420,21 @@ class BackportCvekitClient:
         return str(row.get("status") or "").strip().lower() == "pending"
 
     @staticmethod
-    def _write_report_config(path: Path, report_data: dict[str, Any], commits: list[dict[str, Any]]) -> None:
+    def _write_report_config(
+        path: Path,
+        report_data: dict[str, Any],
+        commits: list[dict[str, Any]],
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
+    ) -> None:
         config_data = {key: value for key, value in report_data.items() if key != "commits"}
         config_data.pop("api_key", None)
         config_data.pop("target_config_layout", None)
         config_data.pop("target_config_layout_opts", None)
+        if target_config_layout and target_config_layout != "none":
+            config_data["target_config_layout"] = target_config_layout
+            if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
+                config_data["target_config_layout_opts"] = target_config_layout_opts
         config_data["commits"] = commits
         with path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config_data, handle, allow_unicode=True, sort_keys=False)
@@ -435,6 +445,8 @@ class BackportCvekitClient:
         report_data: dict[str, Any],
         commits: list[dict[str, Any]],
         run_prefix: str,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
         self._runs_root.mkdir(parents=True, exist_ok=True)
         run_dir = Path(
@@ -444,7 +456,13 @@ class BackportCvekitClient:
             )
         )
         report_config_path = run_dir / f"{run_prefix}.report.yml"
-        self._write_report_config(report_config_path, report_data, commits)
+        self._write_report_config(
+            report_config_path,
+            report_data,
+            commits,
+            target_config_layout=target_config_layout,
+            target_config_layout_opts=target_config_layout_opts,
+        )
 
         self._run_cvekit(
             [
@@ -629,6 +647,8 @@ class BackportCvekitClient:
     def continue_report(
         self,
         base_report_path: str,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -678,6 +698,8 @@ class BackportCvekitClient:
             report_data=report_data,
             commits=commits,
             run_prefix="continue-backport-batch",
+            target_config_layout=target_config_layout,
+            target_config_layout_opts=target_config_layout_opts,
         )
         self._write_report(base_path, report_data, updated_commits)
         _, persisted_commits = self._read_report(base_path)
@@ -740,6 +762,8 @@ class BackportCvekitClient:
         base_report_path: str,
         row: dict[str, Any],
         working_report_path: str | None = None,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -775,6 +799,8 @@ class BackportCvekitClient:
                 report_data=report_data,
                 commits=[row_for_check],
                 run_prefix="check-backport-row",
+                target_config_layout=target_config_layout,
+                target_config_layout_opts=target_config_layout_opts,
             )
             updated_row = updated_rows[0] if updated_rows else row_for_check
             next_commits = self._merge_report_rows(commits, [updated_row])
@@ -831,6 +857,8 @@ class BackportCvekitClient:
         base_report_path: str,
         row: dict[str, Any],
         working_report_path: str | None = None,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -886,6 +914,8 @@ class BackportCvekitClient:
             report_data=report_data,
             commits=[row_for_check],
             run_prefix="recheck-backport-conflict",
+            target_config_layout=target_config_layout,
+            target_config_layout_opts=target_config_layout_opts,
         )
         updated_row = updated_rows[0] if updated_rows else row_for_check
         next_commits = self._merge_report_rows(commits, [updated_row])

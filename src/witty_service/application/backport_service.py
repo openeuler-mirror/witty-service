@@ -648,7 +648,11 @@ class BackportService:
                 details={"action": "continue_report", "keys": ["base_report_path", "baseReportPath"]},
             )
         try:
-            return self._cvekit_client.continue_report(base_report_path=base_report_path)
+            return self._cvekit_client.continue_report(
+                base_report_path=base_report_path,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
+            )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("continue_report failed")
             return {
@@ -680,6 +684,8 @@ class BackportService:
                 base_report_path=base_report_path,
                 working_report_path=working_report_path,
                 row=row,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("recheck_conflict failed")
@@ -816,6 +822,7 @@ class BackportService:
             }
 
     def _run_check_row(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = self._extract_config(payload)
         base_report_path = self._require_string(payload, "check_row", "base_report_path", "baseReportPath")
         working_report_path = self._get_string(
             payload,
@@ -836,6 +843,8 @@ class BackportService:
                 base_report_path=base_report_path,
                 working_report_path=working_report_path,
                 row=row,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("check_row failed")
