@@ -1193,6 +1193,8 @@ class BackportCvekitClient:
         signer_email: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -1231,6 +1233,8 @@ class BackportCvekitClient:
             signer_name=signer_name,
             signer_email=signer_email,
             linux_repo_path=linux_repo_path,
+            target_config_layout=target_config_layout,
+            target_config_layout_opts=target_config_layout_opts,
         )
 
         result = self._run_cvekit(
@@ -1283,6 +1287,8 @@ class BackportCvekitClient:
         commit_message_source: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -1374,6 +1380,8 @@ class BackportCvekitClient:
         signer_name: str,
         signer_email: str,
         linux_repo_path: str,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> None:
         try:
             with config_path.open("r", encoding="utf-8") as handle:
@@ -1393,6 +1401,16 @@ class BackportCvekitClient:
             config_data["signer_email"] = signer_email.strip()
         if linux_repo_path.strip():
             config_data["linux_repo_path"] = linux_repo_path.strip()
+        # Strip stale layout, inject current
+        config_data.pop("target_config_layout", None)
+        config_data.pop("target_config_layout_opts", None)
+        layout, opts = BackportCvekitClient._normalize_layout_fields(
+            target_config_layout, target_config_layout_opts
+        )
+        if layout and layout != "none":
+            config_data["target_config_layout"] = layout
+            if opts and isinstance(opts, dict):
+                config_data["target_config_layout_opts"] = opts
         with config_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config_data, handle, allow_unicode=True, sort_keys=False)
 

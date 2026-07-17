@@ -809,6 +809,8 @@ class BackportService:
                 signer_email=config["signer_email"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("apply_row failed")
@@ -949,6 +951,8 @@ class BackportService:
                 commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("preview_commit_message failed")
@@ -1082,11 +1086,9 @@ class BackportService:
 
         effective_layout = config["target_config_layout"]
 
-        # Step 2: 处理 opts
+        # Step 2: 处理 opts (runtime payload 完全替换 persisted opts)
         if opts_in_source and opts_valid:
-            merged = dict(config["target_config_layout_opts"])
-            merged.update(validated_opts)
-            config["target_config_layout_opts"] = merged
+            config["target_config_layout_opts"] = validated_opts
         elif opts_in_source and not opts_valid:
             # 非法 opts → 默认（但保留 layout）
             config["target_config_layout_opts"] = {"default_level": "L1-RECOMMEND"}
