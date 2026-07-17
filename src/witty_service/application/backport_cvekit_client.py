@@ -1299,28 +1299,31 @@ class BackportCvekitClient:
             if candidate_path.exists():
                 preview_config_path = candidate_path
 
-        # Sanitize: remove stale layout from report config, inject current layout
+        # Always sanitize: strip stale layout, inject normalized current layout
         effective_config = preview_config_path
         sanitized_config_path: Path | None = None
-        if target_config_layout and target_config_layout != "none":
-            try:
-                with preview_config_path.open("r", encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f)
-            except Exception:
-                cfg = None
-            if isinstance(cfg, dict):
-                cfg.pop("target_config_layout", None)
-                cfg.pop("target_config_layout_opts", None)
-                cfg["target_config_layout"] = target_config_layout
-                if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
-                    cfg["target_config_layout_opts"] = dict(target_config_layout_opts)
-                sanitized_fd, sanitized_config_path_str = tempfile.mkstemp(
-                    suffix=".yml", prefix="preview_sanitized_"
-                )
-                sanitized_config_path = Path(sanitized_config_path_str)
-                with os.fdopen(sanitized_fd, "w", encoding="utf-8") as f:
-                    yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
-                effective_config = sanitized_config_path
+        try:
+            with preview_config_path.open("r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f)
+        except Exception:
+            cfg = None
+        if isinstance(cfg, dict):
+            cfg.pop("target_config_layout", None)
+            cfg.pop("target_config_layout_opts", None)
+            layout, opts = self._normalize_layout_fields(
+                target_config_layout, target_config_layout_opts
+            )
+            if layout and layout != "none":
+                cfg["target_config_layout"] = layout
+                if opts and isinstance(opts, dict):
+                    cfg["target_config_layout_opts"] = opts
+            sanitized_fd, sanitized_config_path_str = tempfile.mkstemp(
+                suffix=".yml", prefix="preview_sanitized_"
+            )
+            sanitized_config_path = Path(sanitized_config_path_str)
+            with os.fdopen(sanitized_fd, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+            effective_config = sanitized_config_path
 
         try:
             resolved_row = self._resolve_commit_row(
