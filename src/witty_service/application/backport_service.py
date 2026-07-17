@@ -339,6 +339,7 @@ class BackportService:
                 )
                 checked = self._run_check_row(
                     {
+                        "config": config,
                         "base_report_path": current_report_path,
                         "working_report_path": current_report_path,
                         "row": row,
@@ -485,6 +486,7 @@ class BackportService:
                 )
                 checked = self._run_check_row(
                     {
+                        "config": config,
                         "base_report_path": current_report_path,
                         "working_report_path": current_report_path,
                         "row": applied_rows[0] if applied_rows else row,
@@ -1042,38 +1044,55 @@ class BackportService:
     def _normalize_layout_fields(config: dict[str, Any], source: dict[str, Any]) -> None:
         """校验并合并 source 中的 layout 字段到 config。
 
-        合法值：写入 config。source 中显式传入但非法：重置为安全默认。
-        source 中未包含该 key：保持 config 现有值。
+        layout/opts 成对处理：
+        - layout 显式非法 → none + 默认 opts
+        - layout 显式 anolis → 保留；opts 合法合并，缺失/非法用默认
+        - layout 缺失 + opts 非法 → 重置两者
         """
-        for key in ("target_config_layout", "target_config_layout_opts"):
-            if key not in source:
-                continue
-            value = source[key]
-            if key == "target_config_layout":
-                if isinstance(value, str) and value.strip() in {"none", "anolis"}:
-                    config[key] = value.strip()
-                else:
-                    # 任何非法值（无效字符串、非字符串类型）→ 重置
-                    config[key] = "none"
-                    config["target_config_layout_opts"] = {"default_level": "L1-RECOMMEND"}
-                continue
-            if key == "target_config_layout_opts":
-                if isinstance(value, dict):
-                    try:
-                        validated = TargetConfigLayoutOpts(**value)
-                    except Exception:
-                        # 非法 opts → 重置为默认，同时重置 layout
-                        config[key] = {"default_level": "L1-RECOMMEND"}
-                        config["target_config_layout"] = "none"
-                        continue
-                    merged = dict(config[key])
-                    merged.update(validated.model_dump())
-                    config[key] = merged
-                else:
-                    # 非 dict 类型 → 重置为默认，同时重置 layout
-                    config[key] = {"default_level": "L1-RECOMMEND"}
-                    config["target_config_layout"] = "none"
-                continue
+        layout_in_source = "target_config_layout" in source
+        opts_in_source = "target_config_layout_opts" in source
+
+        # 预校验 opts（如果存在）
+        opts_valid = False
+        validated_opts: dict[str, Any] | None = None
+        if opts_in_source:
+            raw_opts = source["target_config_layout_opts"]
+            if isinstance(raw_opts, dict):
+                try:
+                    validated_opts = TargetConfigLayoutOpts(**raw_opts).model_dump()
+                    opts_valid = True
+                except Exception:
+                    pass
+
+        # Step 1: 处理 layout
+        if layout_in_source:
+            raw_layout = source["target_config_layout"]
+            if isinstance(raw_layout, str) and raw_layout.strip() in {"none", "anolis"}:
+                config["target_config_layout"] = raw_layout.strip()
+            else:
+                # 显式非法 → 重置
+                config["target_config_layout"] = "none"
+                config["target_config_layout_opts"] = {"default_level": "L1-RECOMMEND"}
+                return
+        elif opts_in_source and not opts_valid:
+            # layout 缺失 + opts 非法 → 重置两者
+            config["target_config_layout"] = "none"
+            config["target_config_layout_opts"] = {"default_level": "L1-RECOMMEND"}
+            return
+
+        effective_layout = config["target_config_layout"]
+
+        # Step 2: 处理 opts
+        if opts_in_source and opts_valid:
+            merged = dict(config["target_config_layout_opts"])
+            merged.update(validated_opts)
+            config["target_config_layout_opts"] = merged
+        elif opts_in_source and not opts_valid:
+            # 非法 opts → 默认（但保留 layout）
+            config["target_config_layout_opts"] = {"default_level": "L1-RECOMMEND"}
+        elif effective_layout != "none" and layout_in_source:
+            # layout 显式设为非 none，但没传 opts → 默认
+            config["target_config_layout_opts"] = {"default_level": "L1-RECOMMEND"}
 
     def _extract_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         raw_config = payload.get("config")

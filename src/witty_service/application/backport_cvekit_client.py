@@ -431,6 +431,9 @@ class BackportCvekitClient:
         config_data.pop("api_key", None)
         config_data.pop("target_config_layout", None)
         config_data.pop("target_config_layout_opts", None)
+        target_config_layout, target_config_layout_opts = BackportCvekitClient._normalize_layout_fields(
+            target_config_layout, target_config_layout_opts
+        )
         if target_config_layout and target_config_layout != "none":
             config_data["target_config_layout"] = target_config_layout
             if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
