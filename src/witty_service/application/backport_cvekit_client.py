@@ -1318,7 +1318,9 @@ class BackportCvekitClient:
                 if opts and isinstance(opts, dict):
                     cfg["target_config_layout_opts"] = opts
             sanitized_fd, sanitized_config_path_str = tempfile.mkstemp(
-                suffix=".yml", prefix="preview_sanitized_"
+                suffix=".report.yml",
+                prefix="preview_sanitized_",
+                dir=str(preview_config_path.parent),
             )
             sanitized_config_path = Path(sanitized_config_path_str)
             with os.fdopen(sanitized_fd, "w", encoding="utf-8") as f:

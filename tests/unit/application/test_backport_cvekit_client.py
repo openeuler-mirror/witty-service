@@ -1079,3 +1079,50 @@ class TestTargetConfigLayoutYaml:
         )
         assert captured_config.get("target_config_layout") == "anolis"
         assert captured_config.get("target_config_layout_opts") == {"default_level": "L0-MANDATORY"}
+
+    def test_preview_commit_message_sanitizes_layout_and_uses_report_suffix(
+        self, client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """preview 传 .report.yml 配置，layout=none 清掉旧 layout"""
+        base = tmp_path / "b.yml"
+        _write_report(
+            base,
+            commits=[{"row_id": "1", "status": "pending", "patch_path": "/p"}],
+            target_config_layout="anolis",
+            target_config_layout_opts={"default_level": "L2-OPTIONAL"},
+        )
+
+        captured_config_path: str = ""
+        captured_config: dict[str, Any] = {}
+
+        def fake_run(self, args, cwd):
+            nonlocal captured_config_path
+            for i, a in enumerate(args):
+                if a == "--backport-config" and i + 1 < len(args):
+                    captured_config_path = args[i + 1]
+            if captured_config_path:
+                captured_config.update(
+                    yaml.safe_load(Path(captured_config_path).read_text(encoding="utf-8")) or {}
+                )
+            return subprocess.CompletedProcess(
+                args=args, returncode=0,
+                stdout=json.dumps({"status": "success", "commit_message": "fix: test"}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+        client.preview_commit_message(
+            base_report_path=str(base),
+            row={"row_id": "1"},
+            commit_message_template="tpl",
+            commit_message_source="auto",
+            linux_repo_path="lr",
+            target_config_layout="none",
+            target_config_layout_opts=None,
+        )
+        # 验证传给 CVEKit 的配置文件以 .report.yml 结尾
+        assert captured_config_path.endswith(".report.yml"), \
+            f"preview config should end with .report.yml, got: {captured_config_path}"
+        # layout=none 时旧 layout 被清掉
+        assert "target_config_layout" not in captured_config
+        assert "target_config_layout_opts" not in captured_config
