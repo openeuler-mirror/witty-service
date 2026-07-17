@@ -22,6 +22,7 @@ class TargetConfigLayoutOpts(BaseModel):
 
 class BackportConfigPayload(BaseModel):
     project_url: str = ""
+    backport_model_id: str = ""
     project_dir: str = ""
     source_branch: str = ""
     target_path: str = ""
@@ -40,11 +41,24 @@ class BackportConfigPayload(BaseModel):
     target_config_layout_opts: TargetConfigLayoutOpts = Field(
         default_factory=TargetConfigLayoutOpts
     )
+    enable_conflict_summary: bool = False
+    cvekit_options: dict[str, Any] = Field(default_factory=dict)
 
 
 class BackportConfigUpdateResponse(BaseModel):
     ok: bool
     config_path: str = ""
+
+
+class BackportRuntimeStatusResponse(BaseModel):
+    ok: bool
+    model_configured: bool = False
+    model_name: str = ""
+    model_provider: str = ""
+    api_key_available: bool = False
+    cvekit_available: bool = False
+    cvekit_path: str = ""
+    errors: list[str] = Field(default_factory=list)
 
 
 class BackportRunRequest(BaseModel):
@@ -59,6 +73,8 @@ class BackportAsyncRunResponse(BaseModel):
     result: dict[str, Any] | None = None
     error: str = ""
     progress: dict[str, Any] | None = None
+    pause_requested: bool = False
+    paused_at: float | None = None
 
 
 class BackportToolSnapshotResponse(BaseModel):

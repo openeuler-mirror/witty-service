@@ -27,7 +27,6 @@ def _log_prefix(agent_id: str | None = None, session_id: str | None = None) -> s
         return f"[{', '.join(parts)}] "
     return ""
 
-from sqlalchemy import false
 from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.adapter.websocket_client_pool import AdaptorEndpoint, WebSocketClientPool
 from witty_service.adapter.websocket_protocol import OutboundMessage
@@ -38,6 +37,7 @@ from witty_service.persistence.orm import MessageStatus
 from witty_service.persistence.repositories import AgentRecord, SessionRecord
 from witty_service.sandbox.base import SandboxHandle, SandboxStatus, sandbox_not_found, SANDBOX_NOT_FOUND
 from witty_service.storage.runtime_backup import RuntimeBackupStore
+from .runtime_config import OpenclawConfig, OpencodeConfig, RuntimeConfig
 from .session_manager import SessionManager
 
 INVALID_AGENT_TRANSITION = "INVALID_AGENT_TRANSITION"
@@ -57,6 +57,8 @@ SKILL_UNINSTALL_RECORD_FAILED = "SKILL_UNINSTALL_RECORD_FAILED"
 SKILL_SYNC_FAILED = "SKILL_SYNC_FAILED"
 AGENT_SKILL_INSTALL_FAILED = "AGENT_SKILL_INSTALL_FAILED"
 AGENT_SKILL_UNINSTALL_FAILED = "AGENT_SKILL_UNINSTALL_FAILED"
+
+SKILL_INSTALL_TIMEOUT_SECONDS = 180.0
 
 INTERRUPTION_PREFIX = """[CRITICAL SYSTEM INSTRUCTION - OVERRIDE ALL PREVIOUS CONTEXT]
 
@@ -332,6 +334,11 @@ _stream_registry = SessionStreamRegistry()
 
 
 class AgentManager:
+    _RUNTIME_CONFIGS: dict[str, RuntimeConfig] = {
+        "opencode": OpencodeConfig(),
+        "openclaw": OpenclawConfig(),
+    }
+
     def __init__(
         self,
         *,
@@ -347,6 +354,43 @@ class AgentManager:
         self._sandbox_backend = sandbox_backend
         self._ws_client_pool = ws_client_pool or WebSocketClientPool()
         self._logger = logging.getLogger(__name__)
+
+    def _get_runtime_config(self, adapter_type: str) -> RuntimeConfig:
+        config = self._RUNTIME_CONFIGS.get(adapter_type)
+        if config is None:
+            raise DomainError(
+                code="UNSUPPORTED_RUNTIME_TYPE",
+                message=f"Unsupported runtime adapter type: {adapter_type}",
+                details={"adapter_type": adapter_type},
+            )
+        return config
+
+    def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]:
+        """从仓库解析模型信息，不存在时返回空 dict."""
+        if model_id is None:
+            return {}
+        model = self._repository.get_model(model_id)
+        if model is None:
+            return {}
+        return {
+            "name": model.name,
+            "provider": model.provider,
+            "api_key": model.api_key,
+            "api_base_url": model.api_base_url,
+            "compatibility": model.compatibility,
+        }
+
+    def _get_runtime_gateway_port(
+        self, agent_id: str, adapter_type: str
+    ) -> int | None:
+        """从 sandbox_state 提取 runtime 对应的网关端口."""
+        sandbox_state = self._repository.get_sandbox_state(agent_id)
+        if sandbox_state is None:
+            return None
+        config = self._get_runtime_config(adapter_type)
+        metadata = sandbox_state.sandbox_payload_json.get("metadata", {})
+        port_val = metadata.get(config.port_metadata_key())
+        return int(port_val) if isinstance(port_val, int) else None
 
     def _find_free_port(self) -> int:
         import socket
@@ -370,14 +414,6 @@ class AgentManager:
 
     def _get_agent_profile(self, agent_id: str) -> str:
         return agent_id
-
-    def _get_agent_gateway_port(self, agent_id: str) -> int | None:
-        sandbox_state = self._repository.get_sandbox_state(agent_id)
-        if sandbox_state is None:
-            return None
-        metadata = sandbox_state.sandbox_payload_json.get("metadata", {})
-        port = metadata.get("gateway_port")
-        return int(port) if isinstance(port, int) else None
 
     def list_agent_skills(self, agent_id: str) -> list[dict[str, Any]]:
         """查询当前 agent 对应 runtime 支持的 skills。"""
@@ -507,7 +543,14 @@ class AgentManager:
     def _build_builtin_skill_id(self, agent_id: str, skill_name: str) -> str:
         return str(uuid5(NAMESPACE_URL, f"builtin:{agent_id}:{skill_name}"))
 
-    async def install_agent_skill(self, agent_id: str, skill_name: str, source_path: str | None = None) -> dict[str, Any]:
+    async def install_agent_skill(
+        self,
+        agent_id: str,
+        skill_name: str,
+        source_type: str | None = None,
+        source_path: str | None = None,
+        skill_source: str | None = None,
+    ) -> dict[str, Any]:
         """下发 skill 到 runtime。"""
         agent = self._get_agent(agent_id)
 
@@ -524,21 +567,27 @@ class AgentManager:
         try:
             try:
                 request_body: dict[str, Any] = {"skill_name": skill_name}
+                if source_type:
+                    request_body["source_type"] = source_type
                 if source_path:
                     request_body["source_path"] = source_path
+                if skill_source:
+                    request_body["skill_source"] = skill_source
                 payload = await adaptor_client.post(
                     f"/agent/skills/install?id={agent_id}",
                     json=request_body,
+                    timeout=SKILL_INSTALL_TIMEOUT_SECONDS,
                 )
             except httpx.HTTPError as exc:
+                details = self._build_runtime_skill_error_details(
+                    agent_id=agent_id,
+                    skill_name=skill_name,
+                    exc=exc,
+                )
                 raise DomainError(
                     code=AGENT_SKILL_INSTALL_FAILED,
                     message="Failed to install skill on runtime.",
-                    details={
-                        "agent_id": agent_id,
-                        "skill_name": skill_name,
-                        "error": str(exc),
-                    },
+                    details=details,
                 ) from exc
         finally:
             await adaptor_client.close()
@@ -547,7 +596,14 @@ class AgentManager:
             return {"status": "accepted"}
         return payload
 
-    async def uninstall_agent_skill(self, agent_id: str, skill_name: str, source_type: str | None = None, source_path: str | None = None) -> dict[str, Any]:
+    async def uninstall_agent_skill(
+        self,
+        agent_id: str,
+        skill_name: str,
+        source_type: str | None = None,
+        source_path: str | None = None,
+        runtime_source: str | None = None,
+    ) -> dict[str, Any]:
         """从 runtime 卸载 skill。"""
         agent = self._get_agent(agent_id)
 
@@ -568,19 +624,22 @@ class AgentManager:
                     request_body["source_type"] = source_type
                 if source_path:
                     request_body["source_path"] = source_path
+                if runtime_source:
+                    request_body["runtime_source"] = runtime_source
                 payload = await adaptor_client.post(
                     f"/agent/skills/uninstall?id={agent_id}",
                     json=request_body,
                 )
             except httpx.HTTPError as exc:
+                details = self._build_runtime_skill_error_details(
+                    agent_id=agent_id,
+                    skill_name=skill_name,
+                    exc=exc,
+                )
                 raise DomainError(
                     code=AGENT_SKILL_UNINSTALL_FAILED,
                     message="Failed to uninstall skill on runtime.",
-                    details={
-                        "agent_id": agent_id,
-                        "skill_name": skill_name,
-                        "error": str(exc),
-                    },
+                    details=details,
                 ) from exc
         finally:
             await adaptor_client.close()
@@ -608,17 +667,20 @@ class AgentManager:
                 workspace_path=workspace_path,
             )
             logger.info(f"{prefix}Agent record created, starting sandbox...")
+            runtime_config = self._get_runtime_config(request.adapter_type)
             sandbox_handle = self._sandbox_backend.start(
                 agent_id=agent_id,
                 workspace_path=workspace_path,
                 profile=profile_name,
                 gateway_port=gateway_port,
+                env=runtime_config.build_env(),
             )
             logger.info(f"{prefix}Sandbox started: sandbox_id=%s", sandbox_handle.sandbox_id)
             adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
             logger.info(f"{prefix}Adapter endpoint ready: url=%s", adapter_endpoint.base_url)
             sandbox_payload = self._sandbox_handle_payload(sandbox_handle)
             sandbox_payload["metadata"]["gateway_port"] = gateway_port
+            sandbox_payload["metadata"][runtime_config.port_metadata_key()] = gateway_port
             self._repository.save_sandbox_state(
                 agent_id,
                 sandbox_payload_json=sandbox_payload,
@@ -654,7 +716,12 @@ class AgentManager:
             logger.info(f"{prefix}Calling /agent/start...")
             client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=120.0)
             try:
-                start_payload = self._build_agent_start_payload(request, profile_name, gateway_port)
+                start_payload = self._build_agent_start_payload(
+                    adapter_type=request.adapter_type,
+                    model_id=request.model_id,
+                    profile=profile_name,
+                    gateway_port=gateway_port,
+                )
                 logger.debug(f"{prefix}/agent/start payload: %s", start_payload)
                 start_response = client.post("/agent/start", json=start_payload)
                 start_response.raise_for_status()
@@ -735,29 +802,24 @@ class AgentManager:
 
     def _build_agent_start_payload(
         self,
-        request: AgentCreateRequest,
+        *,
+        adapter_type: str,
+        model_id: str | None,
         profile: str,
         gateway_port: int,
     ) -> dict[str, Any]:
-        """构建 /agent/start 请求的 payload。"""
-        model = self._repository.get_model(request.model_id)
-        if model is not None:
-            model_info = {
-                "name": model.name,
-                "provider": model.provider,
-                "api_key": model.api_key,
-                "api_base_url": model.api_base_url,
-                "compatibility": model.compatibility,
-            }
-        else:
-            model_info = {}
+        """构建 /agent/start 请求的 payload（创建 + 恢复通用）。
 
-        return {
-            "model_id": request.model_id,
-            "model": model_info,
-            "profile": profile,
-            "gateway_port": gateway_port,
-        }
+        通过 RuntimeConfig 策略生成差异化 payload，不再需要硬编码分支。
+        """
+        config = self._get_runtime_config(adapter_type)
+        model_info = self._resolve_model_info(model_id)
+        return config.build_start_payload(
+            model_id=model_id,
+            model_info=model_info,
+            profile=profile,
+            gateway_port=gateway_port,
+        )
 
     def pause_agent(self, agent_id: str) -> AgentRecord:
         agent = self._get_agent(agent_id)
@@ -794,16 +856,24 @@ class AgentManager:
         # backup_store.restore(agent_id, agent.adapter_type)
 
         # 2. 重新启动沙箱（不依赖备份）
+        runtime_config = self._get_runtime_config(agent.adapter_type)
+        gateway_port = self._find_free_port()
         sandbox_handle = self._sandbox_backend.start(
             agent_id=agent_id,
             workspace_path=agent.workspace_path,
+            profile=agent.id,
+            gateway_port=gateway_port,
+            env=runtime_config.build_env(),
         )
         adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
 
         # 4. 保存沙箱状态
+        sandbox_payload = self._sandbox_handle_payload(sandbox_handle)
+        sandbox_payload["metadata"]["gateway_port"] = gateway_port
+        sandbox_payload["metadata"][runtime_config.port_metadata_key()] = gateway_port
         self._repository.save_sandbox_state(
             agent_id,
-            sandbox_payload_json=self._sandbox_handle_payload(sandbox_handle),
+            sandbox_payload_json=sandbox_payload,
             adapter_base_url=adapter_endpoint.base_url,
             adapter_ready=True,
         )
@@ -828,7 +898,12 @@ class AgentManager:
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
             try:
-                start_payload = self._build_agent_start_payload_for_recovery(agent)
+                start_payload = self._build_agent_start_payload(
+                    adapter_type=agent.adapter_type,
+                    model_id=agent.model_id,
+                    profile=agent.id,
+                    gateway_port=gateway_port,
+                )
                 await adaptor_client.post("/agent/start", json=start_payload)
             except httpx.HTTPStatusError as exc:
                 raise DomainError(
@@ -872,7 +947,28 @@ class AgentManager:
         adaptor_client = self._get_adaptor_http_client(agent_id)
         remote_runtime_agent_id: str | None = None
         try:
-            start_payload = self._build_agent_start_payload_for_recovery(agent)
+            saved_port = self._get_runtime_gateway_port(agent_id, agent.adapter_type)
+            gateway_port = saved_port or self._find_free_port()
+            if saved_port is None:
+                logger.warning(
+                    f"{prefix}Saved gateway port not found, using new port {gateway_port}"
+                )
+                runtime_config = self._get_runtime_config(agent.adapter_type)
+                sandbox_payload = sandbox_state.sandbox_payload_json
+                sandbox_payload.setdefault("metadata", {})["gateway_port"] = gateway_port
+                sandbox_payload.setdefault("metadata", {})[runtime_config.port_metadata_key()] = gateway_port
+                self._repository.save_sandbox_state(
+                    agent_id,
+                    sandbox_payload_json=sandbox_payload,
+                    adapter_base_url=sandbox_state.adapter_base_url,
+                    adapter_ready=True,
+                )
+            start_payload = self._build_agent_start_payload(
+                adapter_type=agent.adapter_type,
+                model_id=agent.model_id,
+                profile=agent.id,
+                gateway_port=gateway_port,
+            )
             logger.debug(f"{prefix}/agent/start payload for resume from paused: %s", start_payload)
             try:
                 started_agent = await adaptor_client.post("/agent/start", json=start_payload, timeout=180.0)
@@ -973,7 +1069,7 @@ class AgentManager:
 
         # 获取隔离参数
         profile_name = agent_id
-        saved_gateway_port = self._get_agent_gateway_port(agent_id)
+        saved_gateway_port = self._get_runtime_gateway_port(agent_id, agent.adapter_type)
         
         # 检查端口是否被占用，如果被占用则分配新端口
         gateway_port = self._get_available_gateway_port(saved_gateway_port)
@@ -981,11 +1077,13 @@ class AgentManager:
             logger.warning(f"{prefix}Saved gateway port {saved_gateway_port} is in use, using new port {gateway_port}")
 
         # 1. 重新启动沙箱（传递隔离参数）
+        runtime_config = self._get_runtime_config(agent.adapter_type)
         sandbox_handle = self._sandbox_backend.start(
             agent_id=agent_id,
             workspace_path=agent.workspace_path,
             profile=profile_name,
             gateway_port=gateway_port,
+            env=runtime_config.build_env(),
         )
         adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
         logger.info(f"{prefix}Sandbox restarted: base_url=%s profile=%s gateway_port=%s",
@@ -994,6 +1092,7 @@ class AgentManager:
         # 2. 保存沙箱状态（包含 gateway_port）
         sandbox_payload = self._sandbox_handle_payload(sandbox_handle)
         sandbox_payload["metadata"]["gateway_port"] = gateway_port
+        sandbox_payload["metadata"][runtime_config.port_metadata_key()] = gateway_port
         self._repository.save_sandbox_state(
             agent_id,
             sandbox_payload_json=sandbox_payload,
@@ -1022,7 +1121,12 @@ class AgentManager:
         adaptor_client = self._get_adaptor_http_client(agent_id)
         remote_runtime_agent_id: str | None = None
         try:
-            start_payload = self._build_agent_start_payload_for_recovery(agent)
+            start_payload = self._build_agent_start_payload(
+                adapter_type=agent.adapter_type,
+                model_id=agent.model_id,
+                profile=profile_name,
+                gateway_port=gateway_port,
+            )
             logger.debug(f"{prefix}/agent/start payload for recovery: %s", start_payload)
             try:
                 started_agent = await adaptor_client.post("/agent/start", json=start_payload, timeout=180.0)
@@ -1098,44 +1202,6 @@ class AgentManager:
 
         # 6. 更新状态（保持 running 状态，但更新时间戳）
         return self._repository.update_agent_status(agent_id, AgentStatus.running)
-
-    def _build_agent_start_payload_for_recovery(self, agent: AgentRecord) -> dict[str, Any]:
-        """构建恢复时 /agent/start 请求的 payload"""
-        if agent.model_id is None:
-            model_info = {}
-        else:
-            model = self._repository.get_model(agent.model_id)
-            if model is not None:
-                model_info = {
-                    "name": model.name,
-                    "provider": model.provider,
-                    "api_key": model.api_key,
-                    "api_base_url": model.api_base_url,
-                    "compatibility": model.compatibility,
-                }
-            else:
-                model_info = {}
-
-        profile_name = agent.id
-        sandbox_state = self._repository.get_sandbox_state(agent.id)
-        
-        # 从 sandbox_payload_json["metadata"] 中获取 gateway_port
-        gateway_port = None
-        if sandbox_state is not None:
-            metadata = sandbox_state.sandbox_payload_json.get("metadata", {})
-            port_val = metadata.get("gateway_port")
-            if isinstance(port_val, int):
-                gateway_port = port_val
-        
-        if gateway_port is None:
-            gateway_port = self._find_free_port()
-
-        return {
-            "model_id": agent.model_id,
-            "model": model_info,
-            "profile": profile_name,
-            "gateway_port": gateway_port,
-        }
 
     async def send_message(
         self,
@@ -2128,6 +2194,79 @@ class AgentManager:
     @staticmethod
     def _error_message(exc: Exception) -> str:
         return exc.message if isinstance(exc, DomainError) else str(exc)
+
+    @staticmethod
+    def _build_runtime_skill_error_details(
+        *,
+        agent_id: str,
+        skill_name: str,
+        exc: httpx.HTTPError,
+    ) -> dict[str, Any]:
+        details: dict[str, Any] = {
+            "agent_id": agent_id,
+            "skill_name": skill_name,
+            "error": str(exc),
+        }
+        if not isinstance(exc, httpx.HTTPStatusError):
+            return details
+
+        response = exc.response
+        details["upstream_status_code"] = response.status_code
+
+        payload = AgentManager._parse_http_error_payload(response)
+        if payload is None:
+            response_text = response.text.strip()
+            if response_text:
+                details["error"] = response_text
+                details["upstream_response_text"] = response_text
+            return details
+
+        error_payload = AgentManager._extract_error_payload(payload)
+        if error_payload is None:
+            details["upstream_response"] = payload
+            return details
+
+        upstream_code = error_payload.get("code")
+        if isinstance(upstream_code, str) and upstream_code:
+            details["upstream_error_code"] = upstream_code
+
+        upstream_request_id = error_payload.get("request_id")
+        if isinstance(upstream_request_id, str) and upstream_request_id:
+            details["upstream_request_id"] = upstream_request_id
+
+        upstream_message = error_payload.get("message")
+        if isinstance(upstream_message, str) and upstream_message:
+            details["upstream_error_message"] = upstream_message
+
+        upstream_details = error_payload.get("details")
+        if isinstance(upstream_details, dict):
+            details["upstream_error_details"] = upstream_details
+            reason = upstream_details.get("reason")
+            if isinstance(reason, str) and reason:
+                details["error"] = reason
+                return details
+
+        if isinstance(upstream_message, str) and upstream_message:
+            details["error"] = upstream_message
+
+        return details
+
+    @staticmethod
+    def _parse_http_error_payload(response: httpx.Response) -> dict[str, Any] | None:
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _extract_error_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+        nested_error = payload.get("error")
+        if isinstance(nested_error, dict):
+            return nested_error
+        if isinstance(payload.get("code"), str) and isinstance(payload.get("message"), str):
+            return payload
+        return None
 
     def _raise_operation_failed(
         self,

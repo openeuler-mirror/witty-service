@@ -149,7 +149,6 @@ def test_docker_runtime_start_mounts_workspace_to_witty_workspace(
             },
             "ulimits": [
                 {"name": "nofile", "soft": 1024, "hard": 4096},
-                {"name": "nproc", "soft": 100, "hard": 100},
             ],
         }
     ]

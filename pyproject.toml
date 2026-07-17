@@ -94,7 +94,7 @@ packages = [
     "witty_agent_server.runtimes",
     "witty_agent_server.infra",
     "witty_agent_server.infra.persistence",
-    "witty_agent_server.infra.ws",
+    "witty_agent_server.infra.clients",
     "witty_agent_server.logger",
 ]
 package-dir = {"witty_service" = "src/witty_service", "witty_agent_server" = "src/witty_agent_server"}

@@ -345,9 +345,14 @@ uv build
 # 安装构建产物
 uv pip install dist/witty_service-0.1.0-py3-none-any.whl
 
+# 初始化数据库 schema（推荐）
+alembic upgrade head
+
 # 启动服务
 witty-service --host 0.0.0.0 --port 8000
 ```
+
+若仅做临时本地验证，也可显式设置 `WITTY_DATABASE_AUTO_CREATE=true` 让服务启动时自动建表；默认不会自动建表。
 
 运行测试：
 
@@ -369,6 +374,9 @@ uv run pytest tests/ -q
 ```bash
 pip install witty-service
 
+# 部署新版本前先执行数据库迁移
+alembic upgrade head
+
 # 多 worker 启动
 witty-service --host 0.0.0.0 --port 8000 --workers 4
 ```
@@ -380,6 +388,8 @@ git clone https://gitcode.com/openeuler/witty-service.git
 cd witty-service
 uv build
 uv pip install dist/witty_service-0.1.0-py3-none-any.whl
+
+alembic upgrade head
 
 witty-service --host 0.0.0.0 --port 8000 --workers 4
 ```
@@ -400,7 +410,7 @@ witty-service --host 0.0.0.0 --port 8000 --workers 4
 - **Worker 数量** — 根据 CPU 核心数合理设置 `--workers`
 - **反向代理** — 推荐在 Witty-Service 前部署 Nginx 等反向代理，配置 HTTPS 证书
 - **进程管理** — 建议使用 systemd 或 Supervisor 管理服务进程，实现自动重启
-- **数据库迁移** — 部署新版本前，执行 `alembic upgrade head` 完成数据库迁移
+- **数据库迁移** — 默认不会在启动时自动建表；请优先执行 `alembic upgrade head`，仅开发/测试临时场景才显式设置 `WITTY_DATABASE_AUTO_CREATE=true`
 
 ---
 

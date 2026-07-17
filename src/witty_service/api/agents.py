@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, AsyncIterator
+from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import StreamingResponse
@@ -38,6 +42,138 @@ from witty_service.persistence.repositories import AgentRecord
 
 router = APIRouter(prefix="/agents", tags=["agents"], dependencies=[Depends(require_bearer_auth)])
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _InstallSkillContext:
+    skill_id: str
+    source_type: str
+    skill_name: str
+    log_extra: dict[str, Any]
+    error_details: dict[str, Any]
+    repo_id: str | None = None
+    relative_path: str | None = None
+    metadata: dict[str, Any] | None = None
+    skill_source: str | None = None
+    skill_md_url: str | None = None
+
+    def to_repository_kwargs(self) -> dict[str, Any]:
+        return {
+            "skill_id": self.skill_id,
+            "source_type": self.source_type,
+            "repo_id": self.repo_id,
+            "skill_name": self.skill_name,
+            "relative_path": self.relative_path,
+            "metadata": self.metadata,
+            "skill_source": self.skill_source,
+            "skill_md_url": self.skill_md_url,
+        }
+
+
+def _persist_installed_skill_record(
+    *,
+    services: ServiceContainer,
+    agent_id: str,
+    record_payload: _InstallSkillContext,
+    error_details: dict[str, Any],
+) -> Any:
+    try:
+        return services.repository.upsert_installed_agent_skill(
+            agent_id=agent_id,
+            **record_payload.to_repository_kwargs(),
+        )
+    except Exception as exc:
+        raise DomainError(
+            code=SKILL_INSTALL_RECORD_FAILED,
+            message="Skill was installed but failed to persist the install record.",
+            details={
+                **error_details,
+                "agent_id": agent_id,
+                "error": str(exc),
+            },
+        ) from exc
+
+
+def _log_install_dispatch(
+    *,
+    agent_id: str,
+    skill_name: str,
+    skill_id: str,
+    source_type: str,
+    install_result: Any,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    log_fields = {
+        "agent_id": agent_id,
+        "skill_name": skill_name,
+        "skill_id": skill_id,
+        "source_type": source_type,
+        "result_keys": sorted(install_result.keys()) if isinstance(install_result, dict) else [],
+    }
+    if extra:
+        log_fields.update(extra)
+    logger.info("Install skill dispatched successfully: %s", log_fields)
+
+
+def _with_runtime_relative_path(
+    context: _InstallSkillContext,
+    install_result: Any,
+) -> _InstallSkillContext:
+    if not isinstance(install_result, dict):
+        return context
+    file_path = install_result.get("filePath")
+    if not isinstance(file_path, str) or not file_path.strip():
+        return context
+    return replace(context, relative_path=file_path.strip())
+
+
+def _build_wittyhub_skill_id(*, skill_source: str, skill_name: str) -> str:
+    return str(uuid5(NAMESPACE_URL, f"wittyhub:{skill_source.strip()}:{skill_name.strip()}"))
+
+
+def _build_wittyhub_install_context(payload: InstallAgentSkillRequest) -> _InstallSkillContext:
+    skill_name = payload.skill_name.strip()
+    skill_source = (payload.skill_source or "").strip()
+    skill_id = _build_wittyhub_skill_id(skill_source=skill_source, skill_name=skill_name)
+
+    return _InstallSkillContext(
+        skill_id=skill_id,
+        source_type="wittyhub",
+        repo_id=None,
+        skill_name=skill_name,
+        relative_path=payload.skill_id,
+        metadata=payload.metadata,
+        skill_source=skill_source,
+        skill_md_url=skill_source,
+        log_extra={"skill_source": skill_source},
+        error_details={
+            "skill_id": skill_id,
+            "skill_source": skill_source,
+        },
+    )
+
+
+def _build_repository_install_context(
+    *,
+    skill: Any,
+    skill_repo: Any,
+    skill_source_path: str | None,
+) -> _InstallSkillContext:
+    return _InstallSkillContext(
+        skill_id=skill.skill_id,
+        source_type=skill_repo.source_type,
+        repo_id=skill_repo.repo_id,
+        skill_name=skill.skill_name,
+        relative_path=skill.relative_path,
+        metadata=skill.metadata,
+        skill_source=skill.skill_source,
+        skill_md_url=skill.skill_md_url,
+        log_extra={"skill_source_path": skill_source_path},
+        error_details={
+            "repo_id": skill.repo_id,
+            "skill_id": skill.skill_id,
+        },
+    )
 
 
 def get_services(request: Request) -> ServiceContainer:
@@ -431,6 +567,34 @@ async def install_agent_skill(
     payload: InstallAgentSkillRequest,
     services: ServiceContainer = Depends(get_services),
 ) -> AgentSkillResponse:
+    agent_manager = services.get_agent_manager_for_agent(agent_id)
+
+    if payload.source_type == "wittyhub":
+        install_context = _build_wittyhub_install_context(payload)
+        install_result = await agent_manager.install_agent_skill(
+            agent_id=agent_id,
+            skill_name=install_context.skill_name,
+            source_type="wittyhub",
+            skill_source=install_context.skill_source,
+        )
+        install_context = _with_runtime_relative_path(install_context, install_result)
+        _log_install_dispatch(
+            agent_id=agent_id,
+            skill_name=install_context.skill_name,
+            skill_id=install_context.skill_id,
+            source_type=install_context.source_type,
+            install_result=install_result,
+            extra=install_context.log_extra,
+        )
+        installed_record = _persist_installed_skill_record(
+            services=services,
+            agent_id=agent_id,
+            record_payload=install_context,
+            error_details=install_context.error_details,
+        )
+
+        return _to_agent_skill_response(installed_record)
+
     skill_manager = SkillManager(repository=services.repository)
     skill = skill_manager.get_skill_by_skill_id(payload.skill_id)
     if skill is None:
@@ -442,48 +606,32 @@ async def install_agent_skill(
 
     skill_repo = skill_manager.get_repository_by_repo_id(skill.repo_id)
     skill_source_path = skill_manager.get_skill_source_path(skill)
+    install_context = _build_repository_install_context(
+        skill=skill,
+        skill_repo=skill_repo,
+        skill_source_path=skill_source_path,
+    )
 
-    agent_manager = services.get_agent_manager_for_agent(agent_id)
     install_result = await agent_manager.install_agent_skill(
-        agent_id,
-        skill.skill_name,
+        agent_id=agent_id,
+        skill_name=install_context.skill_name,
         source_path=skill_source_path,
     )
-    logger.info(
-        (
-            "Install skill dispatched successfully: agent_id=%s skill_name=%s "
-            "skill_id=%s source_type=%s skill_source_path=%s result_keys=%s"
-        ),
-        agent_id,
-        payload.skill_name,
-        payload.skill_id,
-        skill_repo.source_type,
-        skill_source_path,
-        sorted(install_result.keys()) if isinstance(install_result, dict) else [],
+    install_context = _with_runtime_relative_path(install_context, install_result)
+    _log_install_dispatch(
+        agent_id=agent_id,
+        skill_name=install_context.skill_name,
+        skill_id=install_context.skill_id,
+        source_type=install_context.source_type,
+        install_result=install_result,
+        extra=install_context.log_extra,
     )
-    try:
-        installed_record = services.repository.upsert_installed_agent_skill(
-            agent_id=agent_id,
-            skill_id=skill.skill_id,
-            source_type=skill_repo.source_type,
-            repo_id=skill_repo.repo_id,
-            skill_name=skill.skill_name,
-            relative_path=skill.relative_path,
-            metadata=skill.metadata,
-            skill_source=skill.skill_source,
-            skill_md_url=skill.skill_md_url,
-        )
-    except Exception as exc:
-        raise DomainError(
-            code=SKILL_INSTALL_RECORD_FAILED,
-            message="Skill was installed but failed to persist the install record.",
-            details={
-                "agent_id": agent_id,
-                "repo_id": skill.repo_id,
-                "skill_id": skill.skill_id,
-                "error": str(exc),
-            },
-        ) from exc
+    installed_record = _persist_installed_skill_record(
+        services=services,
+        agent_id=agent_id,
+        record_payload=install_context,
+        error_details=install_context.error_details,
+    )
 
     return _to_agent_skill_response(installed_record)
 
@@ -541,18 +689,28 @@ async def uninstall_agent_skill(
             code=SKILL_NOT_FOUND,
             message="Installed skill was not found.",
             details={"agent_id": agent_id, "skill_id": payload.skill_id},
-        )
+    )
 
     skill_manager = SkillManager(repository=services.repository)
-    skill = skill_manager.get_skill_by_skill_id(payload.skill_id)
-    skill_source_path = skill_manager.get_skill_source_path(skill) if skill else None
+    skill_source_path = None
+    if installed_record.source_type != "wittyhub":
+        skill = skill_manager.get_skill_by_skill_id(payload.skill_id)
+        if skill is not None:
+            skill_source_path = skill_manager.get_skill_source_path(skill)
+        elif installed_record.relative_path and os.path.isabs(installed_record.relative_path):
+            skill_source_path = str(Path(installed_record.relative_path).expanduser().parent)
 
     agent_manager = services.get_agent_manager_for_agent(agent_id)
+    uninstall_kwargs: dict[str, Any] = {
+        "agent_id": agent_id,
+        "skill_name": installed_record.skill_name,
+        "source_type": installed_record.source_type,
+        "source_path": skill_source_path,
+    }
+    if installed_record.source_type == "builtin" and installed_record.skill_source:
+        uninstall_kwargs["runtime_source"] = installed_record.skill_source
     await agent_manager.uninstall_agent_skill(
-        agent_id=agent_id,
-        skill_name=installed_record.skill_name,
-        source_type=installed_record.source_type,
-        source_path=skill_source_path,
+        **uninstall_kwargs,
     )
 
     try:
@@ -684,12 +842,19 @@ async def enable_mcp_server(
     adaptor_client = AdaptorHttpClient(
         base_url=services.repository.get_sandbox_state(agent_id).adapter_base_url
     )
+    runtime_mcp_config = mcp_server.mcp_server_config
+    if (
+        isinstance(runtime_mcp_config, dict)
+        and isinstance(runtime_mcp_config.get(mcp_server.mcp_server_name), dict)
+    ):
+        runtime_mcp_config = runtime_mcp_config[mcp_server.mcp_server_name]
+
     try:
         await adaptor_client.post(
             "/agent/mcp/enable",
             json={
                 "mcp_server_name": mcp_server.mcp_server_name,
-                "mcp_server_config": mcp_server.mcp_server_config,
+                "mcp_server_config": runtime_mcp_config,
             },
         )
     finally:

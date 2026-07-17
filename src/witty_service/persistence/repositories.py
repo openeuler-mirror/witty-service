@@ -217,7 +217,7 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
                 thinking.append(content)
             item["content"] = content
         
-        elif evt.event_type == "message.delta":
+        elif evt.event_type in ("message.delta", "thinking.delta"):
             continue
 
         elif evt.event_type == "usage.updated":
@@ -227,7 +227,6 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
                 "totalCost": payload.get("total_cost"),
             }
             item["usage"] = usage
-
         event_items.append(item)
 
     msg_status = msg.status.value if isinstance(msg.status, MessageStatus) else msg.status
@@ -881,7 +880,7 @@ class SqliteRepository:
             while True:
                 subq = select(MessageEventORM.id).filter(
                     MessageEventORM.message_id == message_id,
-                    MessageEventORM.event_type == "message.delta",
+                    MessageEventORM.event_type.in_(["message.delta", "thinking.delta"]),
                 ).limit(BATCH)
                 deleted = (
                     session.query(MessageEventORM)
@@ -1600,11 +1599,11 @@ class SqliteRepository:
         agent_id: str,
         skills: list[dict[str, Any]],
     ) -> None:
-        """Replace one agent's installed skills from runtime snapshot in a single transaction."""
+        """Reconcile runtime-visible skills with persisted install records."""
         with self._session_factory() as session:
             timestamp = datetime.now(timezone.utc)
             normalized_skills: list[dict[str, Any]] = []
-            seen_names: set[str] = set()
+            seen_skills: set[tuple[str, str | None]] = set()
             for item in skills:
                 if not isinstance(item, dict):
                     continue
@@ -1612,51 +1611,79 @@ class SqliteRepository:
                 if not isinstance(raw_name, str):
                     continue
                 skill_name = raw_name.strip()
-                if not skill_name or skill_name in seen_names:
+                raw_file_path = item.get("filePath")
+                relative_path = (
+                    raw_file_path.strip()
+                    if isinstance(raw_file_path, str) and raw_file_path.strip()
+                    else None
+                )
+                skill_key = (skill_name, relative_path)
+                if not skill_name or skill_key in seen_skills:
                     continue
-                seen_names.add(skill_name)
+                seen_skills.add(skill_key)
                 normalized_skills.append(
                     {
-                        "skill_id": str(uuid5(NAMESPACE_URL, f"builtin:{agent_id}:{skill_name}")),
+                        "skill_id": str(
+                            uuid5(
+                                NAMESPACE_URL,
+                                f"builtin:{agent_id}:{skill_name}:{relative_path or ''}",
+                            )
+                        ),
                         "skill_name": skill_name,
                         "metadata": dict(item),
                         "skill_source": item.get("source")
                         if isinstance(item.get("source"), str)
                         else None,
-                        "relative_path": item.get("filePath")
-                        if isinstance(item.get("filePath"), str)
-                        else None,
+                        "relative_path": relative_path,
                     }
                 )
 
-            previous_builtin_skill_ids = [
-                skill_id
-                for (skill_id,) in (
-                    session.query(AgentSkillORM.skill_id)
-                    .filter(
-                        AgentSkillORM.agent_id == agent_id,
-                        AgentSkillORM.source_type == 'builtin',
-                    )
-                    .all()
+            installed_rows = (
+                session.query(AgentSkillORM)
+                .filter(AgentSkillORM.agent_id == agent_id)
+                .all()
+            )
+            incoming_keys = {
+                (item["skill_name"], item["relative_path"])
+                for item in normalized_skills
+            }
+            non_builtin_keys = {
+                (
+                    row.skill_name.strip(),
+                    row.relative_path.strip() if row.relative_path else None,
+                )
+                for row in installed_rows
+                if row.source_type != 'builtin'
+            }
+            obsolete_builtin_rows = [
+                row
+                for row in installed_rows
+                if row.source_type == 'builtin'
+                and (
+                    (row.skill_name.strip(), row.relative_path) not in incoming_keys
+                    or (row.skill_name.strip(), row.relative_path) in non_builtin_keys
                 )
             ]
-
-            session.query(AgentSkillORM).filter(AgentSkillORM.agent_id == agent_id).delete(
-                synchronize_session=False
-            )
-
-            next_builtin_skill_ids = {item["skill_id"] for item in normalized_skills}
-            obsolete_builtin_ids = [
-                skill_id
-                for skill_id in previous_builtin_skill_ids
-                if skill_id not in next_builtin_skill_ids
-            ]
+            obsolete_builtin_ids = [row.skill_id for row in obsolete_builtin_rows]
+            for row in obsolete_builtin_rows:
+                session.delete(row)
             if obsolete_builtin_ids:
                 session.query(SkillORM).filter(SkillORM.skill_id.in_(obsolete_builtin_ids)).delete(
                     synchronize_session=False
                 )
 
+            existing_keys = {
+                (
+                    row.skill_name.strip(),
+                    row.relative_path.strip() if row.relative_path else None,
+                )
+                for row in installed_rows
+                if row not in obsolete_builtin_rows
+            }
             for item in normalized_skills:
+                skill_key = (item["skill_name"], item["relative_path"])
+                if skill_key in existing_keys:
+                    continue
                 skill_row = session.get(SkillORM, item["skill_id"])
                 if skill_row is None:
                     skill_row = SkillORM(
@@ -1692,6 +1719,7 @@ class SqliteRepository:
                         installed_at=timestamp,
                     )
                 )
+                existing_keys.add(skill_key)
 
             session.commit()
 

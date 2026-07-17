@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from witty_agent_server.infra.ws.openclaw_gateway_client import (
+from witty_agent_server.infra.clients.openclaw_gateway_client import (
     OpenClawGatewayClient,
 )
 

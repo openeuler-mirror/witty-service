@@ -2,7 +2,7 @@
 
 策略:
 - mock cvekit 二进制 + BackportGitClient,把执行路径短路
-- 覆盖:静态工具 / MCP 配置 / LLM 参数合并 / report 读写对齐 / 状态判定 / 8 个高级流程
+- 覆盖:静态工具 / LLM 参数合并 / report 读写对齐 / 状态判定 / 8 个高级流程
 """
 
 from __future__ import annotations
@@ -16,7 +16,10 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from witty_service.application.backport_cvekit_client import BackportCvekitClient
+from witty_service.application.backport_cvekit_client import (
+    BackportCvekitClient,
+    BackportRuntimeConfig,
+)
 
 
 # ── 夹具 & 工具 ──────────────────────────────────────────────────
@@ -29,44 +32,30 @@ def fake_cvekit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     bin_path = bin_dir / "cvekit"
     bin_path.write_text("#!/bin/sh\n")
     bin_path.chmod(0o755)
-    monkeypatch.setattr(BackportCvekitClient, "_resolve_cvekit", staticmethod(lambda: bin_path))
+    monkeypatch.setattr(BackportCvekitClient, "resolve_cvekit_path", staticmethod(lambda: bin_path))
     return bin_path
 
 
-def _write_openclaw(
-    tmp_path: Path,
+@pytest.fixture()
+def client(tmp_path: Path, fake_cvekit: Path) -> BackportCvekitClient:
+    client = BackportCvekitClient(runs_root=tmp_path / "runs")
+    client.set_runtime_config(_runtime_config())
+    return client
+
+
+def _runtime_config(
     *,
-    mcp_args: list[str] | None = None,
-    mcp_env: dict[str, str] | None = None,
-    use_legacy_key: bool = False,
-    malformed: bool = False,
-) -> Path:
-    cfg = tmp_path / "openclaw.json"
-    if malformed:
-        cfg.write_text("{not json")
-        return cfg
-    if mcp_args is None:
-        mcp_args = [
-            "--llm-provider", "openai",
-            "--api-key", "sk-test",
-            "--llm-base-url", "https://api.example.com",
-            "--llm-model-name", "gpt-4",
-        ]
-    payload = {"mcp": {"servers": {"cvekit_mcp": {"args": mcp_args, "env": mcp_env or {}}}}}
-    if use_legacy_key:
-        payload = {"mcpServers": {"cvekit_mcp": {"args": mcp_args, "env": mcp_env or {}}}}
-    cfg.write_text(json.dumps(payload), encoding="utf-8")
-    return cfg
-
-
-@pytest.fixture()
-def openclaw_cfg(tmp_path: Path) -> Path:
-    return _write_openclaw(tmp_path)
-
-
-@pytest.fixture()
-def client(tmp_path: Path, fake_cvekit: Path, openclaw_cfg: Path) -> BackportCvekitClient:
-    return BackportCvekitClient(runs_root=tmp_path / "runs", openclaw_config_path=openclaw_cfg)
+    backport_engine: str = "mystique",
+    format_mode: str = "changed",
+) -> BackportRuntimeConfig:
+    return BackportRuntimeConfig(
+        llm_provider="openai",
+        api_key="sk-test",
+        llm_base_url="https://api.example.com",
+        llm_model_name="gpt-4",
+        backport_engine=backport_engine,
+        format_mode=format_mode,
+    )
 
 
 def _write_report(path: Path, *, commits: list[dict], **extra: Any) -> None:
@@ -228,14 +217,6 @@ def test_resolve_apply_value_no_field_raises() -> None:
         BackportCvekitClient._resolve_apply_value({})
 
 
-def test_parse_option_values() -> None:
-    args = ["--llm-provider", "openai", "--api-key=sk-x", "--llm-base-url=http://x", "pos"]
-    out = BackportCvekitClient._parse_option_values(
-        args, {"--llm-provider", "--api-key", "--llm-base-url"}
-    )
-    assert out == {"--llm-provider": "openai", "--api-key": "sk-x", "--llm-base-url": "http://x"}
-
-
 @pytest.mark.parametrize("row,expected_status", [
     ({"status": "success", "applied_commit": "abc"}, True),
     ({"status": "success", "backported_patch_path": "/p", "applied_commit": ""}, True),
@@ -252,89 +233,43 @@ def test_normalize_try_resolve_row(row: dict, expected_status: bool) -> None:
 
 def test_init_creates_runs_root(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
-    cfg_dir = tmp_path / "cfg"
-    cfg_dir.mkdir()
-    cfg = _write_openclaw(cfg_dir)
-    c = BackportCvekitClient(runs_root=runs, openclaw_config_path=cfg)
+    c = BackportCvekitClient(runs_root=runs)
     assert c._runs_root == runs.expanduser().resolve()
-    assert c._openclaw_config_path == cfg.expanduser().resolve()
+    assert not hasattr(c, "_openclaw_config_path")
 
 
-def test_init_uses_settings_when_no_config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = MagicMock()
-    fake.openclaw.config_path = None
-    monkeypatch.setattr("witty_service.config.get_settings", lambda: fake)
+def test_init_does_not_read_openclaw_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_if_called() -> None:
+        raise AssertionError("BackportCvekitClient should not read global settings")
+
+    monkeypatch.setattr("witty_service.config.get_settings", fail_if_called)
     c = BackportCvekitClient(runs_root=tmp_path / "runs")
-    assert c._openclaw_config_path.name == "openclaw.json"
+    assert c._runs_root == (tmp_path / "runs").resolve()
 
 
-def test_resolve_cvekit_via_subprocess(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_cvekit_path_via_subprocess(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake_bin = tmp_path / "cvekit"
     fake_bin.write_text("")
     fake_bin.chmod(0o755)
     fake_completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=str(fake_bin) + "\n", stderr="")
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_completed)
-    assert BackportCvekitClient._resolve_cvekit() == fake_bin.resolve()
+    assert BackportCvekitClient.resolve_cvekit_path() == fake_bin.resolve()
 
 
-def test_resolve_cvekit_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_cvekit_path_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_completed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_completed)
     with pytest.raises(RuntimeError):
-        BackportCvekitClient._resolve_cvekit()
+        BackportCvekitClient.resolve_cvekit_path()
 
 
-# ── MCP 配置 & LLM 配置 ──────────────────────────────────────────
+# ── LLM 配置 ────────────────────────────────────────────────────
 
 
-def test_get_cvekit_mcp_config_new_format(client: BackportCvekitClient) -> None:
-    args, env = client._get_cvekit_mcp_config()
-    assert "--llm-provider" in args and env == {}
-
-
-def test_get_cvekit_mcp_config_legacy_format(tmp_path: Path, fake_cvekit: Path) -> None:
-    cfg = _write_openclaw(tmp_path, use_legacy_key=True)
-    c = BackportCvekitClient(runs_root=tmp_path / "runs", openclaw_config_path=cfg)
-    args, _ = c._get_cvekit_mcp_config()
-    assert "--llm-provider" in args
-
-
-def test_get_cvekit_mcp_config_invalid_type_raises(tmp_path: Path, fake_cvekit: Path) -> None:
-    cfg = tmp_path / "openclaw.json"
-    cfg.write_text(json.dumps({"mcpServers": {"cvekit_mcp": "not-dict"}}), encoding="utf-8")
-    c = BackportCvekitClient(runs_root=tmp_path / "runs", openclaw_config_path=cfg)
-    with pytest.raises(RuntimeError):
-        c._get_cvekit_mcp_config()
-
-
-def test_get_cvekit_mcp_config_invalid_json(tmp_path: Path, fake_cvekit: Path) -> None:
-    cfg = _write_openclaw(tmp_path, malformed=True)
-    c = BackportCvekitClient(runs_root=tmp_path / "runs", openclaw_config_path=cfg)
-    with pytest.raises(RuntimeError):
-        c._get_cvekit_mcp_config()
-
-
-def test_get_llm_config_fallback_to_env(tmp_path: Path, fake_cvekit: Path) -> None:
-    cfg = _write_openclaw(tmp_path, mcp_args=[], mcp_env={"LLM_PROVIDER": "openai", "API_KEY": "sk"})
-    c = BackportCvekitClient(runs_root=tmp_path / "runs", openclaw_config_path=cfg)
-    out = c._get_llm_config({}, {"LLM_PROVIDER": "openai", "API_KEY": "sk"})
-    assert out["provider"] == "openai" and out["api_key"] == "sk"
-
-
-def test_get_llm_config_missing_provider_raises(client: BackportCvekitClient) -> None:
-    with pytest.raises(RuntimeError):
-        client._get_llm_config({"--api-key": "sk"}, {})
-
-
-def test_get_llm_config_missing_api_key_raises(client: BackportCvekitClient) -> None:
-    with pytest.raises(RuntimeError):
-        client._get_llm_config({"--llm-provider": "openai"}, {})
-
-
-def test_build_env_includes_joern_override(monkeypatch: pytest.MonkeyPatch, client: BackportCvekitClient) -> None:
+def test_build_env_includes_joern_from_process_env(monkeypatch: pytest.MonkeyPatch, client: BackportCvekitClient) -> None:
     monkeypatch.setenv("JOERN_PATH", "/opt/joern")
-    env = client._build_env({"JOERN_PATH": "/opt/joern-override"})
-    assert env["JOERN_PATH"] == "/opt/joern-override"
+    env = client._build_env()
+    assert env["JOERN_PATH"] == "/opt/joern"
 
 
 # ── cvekit 执行 ───────────────────────────────────────────────────
@@ -359,19 +294,30 @@ def test_run_cvekit_appends_llm_and_backport_options(
     client: BackportCvekitClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (seen.update(cmd=cmd) or subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: (
+            seen.update(cmd=cmd, env=kw.get("env"))
+            or subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        ),
+    )
     client._run_cvekit(["--action", "batch"], cwd=client._runs_root)
     cmd = seen["cmd"]
-    assert "--api-key" in cmd and "sk-test" in cmd
+    env = seen["env"]
+    assert "--api-key" not in cmd
+    assert env["API_KEY"] == "sk-test"
     assert "--llm-provider" in cmd and "--llm-base-url" in cmd and "--llm-model-name" in cmd
+    assert cmd[cmd.index("--backport-engine") + 1] == "mystique"
+    assert cmd[cmd.index("--format-mode") + 1] == "changed"
 
 
 def test_run_cvekit_does_not_overwrite_existing_options(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cfg = _write_openclaw(tmp_path)
-    c = BackportCvekitClient(runs_root=tmp_path / "runs", openclaw_config_path=cfg)
-    monkeypatch.setattr(BackportCvekitClient, "_resolve_cvekit", staticmethod(lambda: Path("/bin/cvekit")))
+    c = BackportCvekitClient(runs_root=tmp_path / "runs")
+    c.set_runtime_config(_runtime_config())
+    monkeypatch.setattr(BackportCvekitClient, "resolve_cvekit_path", staticmethod(lambda: Path("/bin/cvekit")))
     seen: dict[str, Any] = {}
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (seen.update(cmd=cmd) or subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")))
     c._run_cvekit(["--llm-provider", "override", "--action", "x"], cwd=tmp_path)
@@ -475,6 +421,34 @@ def test_run_stop_at_first_conflict_report_creates_dir_and_invokes(
         report_data={"k": 1}, commits=[{"row_id": "1"}], run_prefix="t"
     )
     assert run_dir.exists() and called["args"][1] == "backport-batch" and commits[0]["v"] == "after"
+
+
+def test_check_row_cleans_temp_run_dir(
+    client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / "b.yml"
+    _write_report(base, commits=[{"row_id": "1", "status": "failed", "patch_path": "/tmp/1.patch"}])
+    called: dict[str, Any] = {}
+
+    def fake_run(self, args, cwd):
+        called["run_dir"] = Path(cwd)
+        cfg = next(a for a in args if a.endswith(".report.yml"))
+        Path(cfg).write_text(
+            yaml.safe_dump({"commits": [{"row_id": "1", "status": "success"}]}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+    out = client.check_row(base_report_path=str(base), row={"row_id": "1"})
+
+    assert out["status"] == "success"
+    assert out["artifacts"] == {"base_report_path": str(base.resolve())}
+    assert called["run_dir"].name.startswith("check-backport-row_")
+    assert not called["run_dir"].exists()
+
+    _, commits = BackportCvekitClient._read_report(base)
+    assert commits[0]["status"] == "success"
 
 
 # ── generate_report ───────────────────────────────────────────────

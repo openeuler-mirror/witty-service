@@ -20,15 +20,21 @@ class RuntimeWorkspaceResolverPort(Protocol):
 
 @runtime_checkable
 class RuntimeLifecyclePort(Protocol):
-    """Runtime 生命周期控制端口。"""
+    """Runtime 生命周期控制端口（跨 runtime 通用最小契约）。"""
 
     def probe_running(self) -> bool: ...
 
     def stop(self) -> None: ...
 
-    def start_gateway(self) -> None: ...
+    def start_server(self) -> None: ...
 
-    def update_config(self, *, profile: str | None, gateway_port: int | None) -> None: ...
+
+@runtime_checkable
+class OpenClawLifecycleControlPort(RuntimeLifecyclePort, Protocol):
+
+    def update_config(
+        self, *, profile: str | None, gateway_port: int | None
+    ) -> None: ...
 
     def mcp_set(self, name: str, config: dict[str, object]) -> None: ...
 
@@ -44,11 +50,29 @@ class RuntimeLifecyclePort(Protocol):
         skip_search: bool = True,
         skip_hooks: bool = True,
         skip_health: bool = False,
+        custom_base_url: str | None = None,
+        custom_model_id: str | None = None,
+        custom_compatibility: str | None = None,
     ) -> None: ...
 
 
-# 向后兼容别名：历史代码以 OpenClawLifecyclePort 引用。
-OpenClawLifecyclePort = RuntimeLifecyclePort
+@runtime_checkable
+class OpenCodeLifecycleControlPort(RuntimeLifecyclePort, Protocol):
+    def update_config(self, *, profile: str | None = None) -> None: ...
+
+    def configure_model(
+        self,
+        *,
+        model_provider: str,
+        model_name: str | None,
+        api_key: str,
+        api_base_url: str | None,
+        compatibility: str | None = None,
+    ) -> None: ...
+
+    def mcp_set(self, name: str, config: dict[str, object]) -> None: ...
+
+    def mcp_unset(self, name: str) -> None: ...
 
 
 @runtime_checkable

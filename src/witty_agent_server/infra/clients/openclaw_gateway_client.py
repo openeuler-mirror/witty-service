@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
-from witty_agent_server.infra.ws.client_base import ClientBase
+from witty_agent_server.infra.clients.base import ClientBase
 from witty_service.config import get_settings
 
 logger = logging.getLogger(__name__)

@@ -13,6 +13,7 @@ Witty Service 统一配置管理
 
     # 数据库配置
     WITTY_DATABASE_URL             数据库连接URL (默认: sqlite:///~/.witty/db/witty_service.sqlite3)
+    WITTY_DATABASE_AUTO_CREATE     是否允许启动时自动建表 (默认: false)
 
     # 日志配置
     WITTY_LOG_LEVEL                日志级别: DEBUG, INFO, WARNING, ERROR (默认: INFO)
@@ -82,14 +83,23 @@ class DatabaseSettings:
             - SQLite: sqlite:///path/to/db.sqlite3
             - PostgreSQL: postgresql://user:pass@localhost/dbname
             - 默认: sqlite:///~/.witty/db/witty_service.sqlite3
+        WITTY_DATABASE_AUTO_CREATE: 是否允许使用 ORM 自动建表
+            - true/false
+            - 默认: false
     """
     url: str
+    auto_create: bool = False
 
     @classmethod
     def from_env(cls) -> "DatabaseSettings":
         default_db_path = Path("~/.witty/db/witty_service.sqlite3").expanduser()
         url = os.getenv("WITTY_DATABASE_URL", f"sqlite:///{default_db_path}")
-        return cls(url=url)
+        auto_create = os.getenv("WITTY_DATABASE_AUTO_CREATE", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        return cls(url=url, auto_create=auto_create)
 
 
 # ==============================================================================

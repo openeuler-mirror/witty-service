@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -20,8 +22,17 @@ def create_session_factory(engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
 
 
-def init_db(engine: Engine) -> None:
-    # Test/local bootstrap only. Production schema management should go through Alembic migrations.
+def init_db(engine: Engine, *, auto_create: bool | None = None) -> None:
+    """Bootstrap schema only for tests or explicitly opted-in local setups."""
+    if auto_create is None:
+        auto_create = os.getenv("WITTY_DATABASE_AUTO_CREATE", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+    if not auto_create:
+        return
+
     _migrate_models_table(engine)
     Base.metadata.create_all(bind=engine)
 
