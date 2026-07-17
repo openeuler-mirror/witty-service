@@ -301,14 +301,7 @@ class BackportService:
                 "processed_count": processed_count,
             }
 
-            if (
-                self._is_skipped_commit(row)
-                or row.get("merged_in_target") is True
-                or row.get("empty_patch") is True
-                or row.get("equivalent_exists") is True
-                or str(row.get("applied_commit") or "").strip()
-                or (row_status in {"failed", "error"} and row.get("has_conflict") is not True)
-            ):
+            if self._is_terminal_nonblocking_row(row):
                 if row_status in {"failed", "error"}:
                     failed_count += 1
                 processed_count += 1
@@ -434,14 +427,7 @@ class BackportService:
                 current_commits = self._resolve_result_commits(loaded)
                 row = current_commits[index]
                 row_status = str(row.get("status") or "").strip().lower()
-                if (
-                    self._is_skipped_commit(row)
-                    or row.get("merged_in_target") is True
-                    or row.get("empty_patch") is True
-                    or row.get("equivalent_exists") is True
-                    or str(row.get("applied_commit") or "").strip()
-                    or row_status in {"failed", "error"}
-                ):
+                if self._is_terminal_nonblocking_row(row):
                     if row_status in {"failed", "error"}:
                         failed_count += 1
                     processed_count += 1
@@ -1191,6 +1177,21 @@ class BackportService:
         status = str(item.get("status") or "").strip().lower()
         merged = str(item.get("merged_in_target") or "").strip().lower()
         return status == "skipped" or merged == "skipped" or item.get("is_merge_commit") is True
+
+    @classmethod
+    def _is_terminal_nonblocking_row(cls, row: dict[str, Any]) -> bool:
+        """行是否已完成且非阻塞冲突：已合入/空 patch/已应用/等价存在/非冲突失败。
+
+        has_conflict=True 的行即使 status=failed/error 也视为阻塞，不在此跳过。"""
+        status = str(row.get("status") or "").strip().lower()
+        return (
+            cls._is_skipped_commit(row)
+            or row.get("merged_in_target") is True
+            or row.get("empty_patch") is True
+            or row.get("equivalent_exists") is True
+            or bool(str(row.get("applied_commit") or "").strip())
+            or (status in {"failed", "error"} and row.get("has_conflict") is not True)
+        )
 
     @classmethod
     def _find_blocking_conflict(cls, commits: list[dict[str, Any]]) -> dict[str, Any] | None:
