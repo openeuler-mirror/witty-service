@@ -45,7 +45,6 @@ class BackportRuntimeStatusResponse(BaseModel):
     model_name: str = ""
     model_provider: str = ""
     api_key_available: bool = False
-    mcp_configured: bool = False
     cvekit_available: bool = False
     cvekit_path: str = ""
     errors: list[str] = Field(default_factory=list)

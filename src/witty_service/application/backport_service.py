@@ -188,7 +188,6 @@ class BackportService:
             "model_name": "",
             "model_provider": "",
             "api_key_available": False,
-            "mcp_configured": False,
             "cvekit_available": False,
             "cvekit_path": "",
             "errors": errors,
@@ -213,12 +212,6 @@ class BackportService:
             errors.append(str(error))
 
         try:
-            self._resolve_cvekit_mcp_args_env()
-            status["mcp_configured"] = True
-        except RuntimeError as error:
-            errors.append(str(error))
-
-        try:
             cvekit_path = self._cvekit_client.resolve_cvekit_path()
             status["cvekit_available"] = True
             status["cvekit_path"] = str(cvekit_path)
@@ -228,7 +221,6 @@ class BackportService:
         status["ok"] = (
             status["model_configured"]
             and status["api_key_available"]
-            and status["mcp_configured"]
             and status["cvekit_available"]
             and not errors
         )
@@ -1195,7 +1187,6 @@ class BackportService:
 
     def _resolve_cvekit_runtime_config(self, config: dict[str, Any]) -> BackportRuntimeConfig:
         model = self._resolve_backport_model(config)
-        mcp_args, mcp_env = self._resolve_cvekit_mcp_args_env()
         provider = self._resolve_cvekit_llm_provider(model.provider, model.compatibility)
         base_url = (model.api_base_url or "").strip()
         model_name = model.name.strip()
@@ -1211,12 +1202,12 @@ class BackportService:
             )
 
         return BackportRuntimeConfig(
-            mcp_args=mcp_args,
-            mcp_env=mcp_env,
             llm_provider=provider,
             api_key=api_key,
             llm_base_url=base_url,
             llm_model_name=model_name,
+            backport_engine="mystique",
+            format_mode="changed",
         )
 
     def _resolve_backport_model(self, config: dict[str, Any]) -> Any:
@@ -1236,26 +1227,6 @@ class BackportService:
         if len(models) == 1:
             return models[0]
         raise RuntimeError("Backport 未选择运行模型，请在 Backport 配置区选择模型。")
-
-    def _resolve_cvekit_mcp_args_env(self) -> tuple[list[Any], dict[str, Any]]:
-        for server in self._repository.list_mcp_servers():
-            if server.mcp_server_name != "cvekit_mcp":
-                continue
-            raw_config = server.mcp_server_config if isinstance(server.mcp_server_config, dict) else {}
-            server_config = raw_config.get(server.mcp_server_name)
-            if not isinstance(server_config, dict) and (
-                "args" in raw_config or "env" in raw_config or "command" in raw_config
-            ):
-                server_config = raw_config
-            if not isinstance(server_config, dict):
-                raise RuntimeError("Backport cvekit_mcp 配置格式无效，请在 MCP 设置页重新配置。")
-            args = server_config.get("args") or []
-            env = server_config.get("env") or {}
-            return (
-                list(args) if isinstance(args, list) else [],
-                dict(env) if isinstance(env, dict) else {},
-            )
-        raise RuntimeError("Backport 缺少 cvekit_mcp 配置，请先在 MCP 设置页添加 cvekit_mcp。")
 
     @staticmethod
     def _resolve_cvekit_llm_provider(provider: str, compatibility: str | None) -> str:
