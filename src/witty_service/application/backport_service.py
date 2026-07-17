@@ -307,7 +307,7 @@ class BackportService:
                 or row.get("empty_patch") is True
                 or row.get("equivalent_exists") is True
                 or str(row.get("applied_commit") or "").strip()
-                or row_status in {"failed", "error"}
+                or (row_status in {"failed", "error"} and row.get("has_conflict") is not True)
             ):
                 if row_status in {"failed", "error"}:
                     failed_count += 1

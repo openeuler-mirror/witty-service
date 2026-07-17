@@ -1299,27 +1299,54 @@ class BackportCvekitClient:
             if candidate_path.exists():
                 preview_config_path = candidate_path
 
-        resolved_row = self._resolve_commit_row(
-            row=row,
-            base_report_path=base_report_path,
-            working_report_path=working_report_path,
-        )
-        apply_value = self._resolve_apply_value(resolved_row)
-        cmd = [
-            "--action", "backport-batch",
-            "--backport-config", str(preview_config_path),
-            "--debug", "--json",
-            "--preview-commit-message",
-            "--apply", apply_value,
-        ]
-        if commit_message_template.strip():
-            cmd.extend(["--commit-message-template", commit_message_template])
-        commit_message_source = self._normalize_commit_message_source(commit_message_source)
-        if commit_message_source != "auto":
-            cmd.extend(["--commit-message-source", commit_message_source])
-        if linux_repo_path.strip():
-            cmd.extend(["--linux-repo-path", linux_repo_path.strip()])
-        result = self._run_cvekit(cmd, preview_config_path.parent)
+        # Sanitize: remove stale layout from report config, inject current layout
+        effective_config = preview_config_path
+        sanitized_config_path: Path | None = None
+        if target_config_layout and target_config_layout != "none":
+            try:
+                with preview_config_path.open("r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f)
+            except Exception:
+                cfg = None
+            if isinstance(cfg, dict):
+                cfg.pop("target_config_layout", None)
+                cfg.pop("target_config_layout_opts", None)
+                cfg["target_config_layout"] = target_config_layout
+                if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
+                    cfg["target_config_layout_opts"] = dict(target_config_layout_opts)
+                sanitized_fd, sanitized_config_path_str = tempfile.mkstemp(
+                    suffix=".yml", prefix="preview_sanitized_"
+                )
+                sanitized_config_path = Path(sanitized_config_path_str)
+                with os.fdopen(sanitized_fd, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+                effective_config = sanitized_config_path
+
+        try:
+            resolved_row = self._resolve_commit_row(
+                row=row,
+                base_report_path=base_report_path,
+                working_report_path=working_report_path,
+            )
+            apply_value = self._resolve_apply_value(resolved_row)
+            cmd = [
+                "--action", "backport-batch",
+                "--backport-config", str(effective_config),
+                "--debug", "--json",
+                "--preview-commit-message",
+                "--apply", apply_value,
+            ]
+            if commit_message_template.strip():
+                cmd.extend(["--commit-message-template", commit_message_template])
+            commit_message_source = self._normalize_commit_message_source(commit_message_source)
+            if commit_message_source != "auto":
+                cmd.extend(["--commit-message-source", commit_message_source])
+            if linux_repo_path.strip():
+                cmd.extend(["--linux-repo-path", linux_repo_path.strip()])
+            result = self._run_cvekit(cmd, preview_config_path.parent)
+        finally:
+            if sanitized_config_path is not None:
+                sanitized_config_path.unlink(missing_ok=True)
         preview_result = self._parse_json_output(result.stdout)
         if preview_result.get("status") != "success":
             raise RuntimeError(str(preview_result.get("error") or preview_result))
