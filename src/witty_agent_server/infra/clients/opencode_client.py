@@ -188,6 +188,19 @@ class OpenCodeClient(ClientBase):
             "OpenCode skills status endpoint not yet wired; "
         )
 
+    def post_mcp_add(self, name: str, config: dict[str, Any]) -> dict[str, Any]:
+        """POST /mcp — 动态添加 MCP server。"""
+        response = self.http_client().post(
+            "/mcp", json={"name": name, "config": config}
+        )
+        self._raise_for_status(response, action="post_mcp_add")
+        return response.json()
+
+    def post_mcp_disconnect(self, name: str) -> None:
+        """POST /mcp/{name}/disconnect — 断开 MCP server 连接。"""
+        response = self.http_client().post(f"/mcp/{name}/disconnect")
+        self._raise_for_status(response, action="post_mcp_disconnect")
+
     def create_session(self, *, session_key: str) -> None:
         response = self.http_client().post("/session", json={"title": session_key})
         self._raise_for_status(response, action="create_session")

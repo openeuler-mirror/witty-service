@@ -20,7 +20,7 @@ from witty_agent_server.application.services.agent._process_utils import (
     port_is_listening,
     start_stderr_drainer,
 )
-from witty_agent_server.infra.clients.opencode_client import OpenCodeClient
+from witty_agent_server.infra.clients.opencode_client import OpenCodeClient, OpenCodeClientError
 from witty_service.config import get_settings
 
 
@@ -41,23 +41,23 @@ _COMPATIBILITY_TO_NPM: dict[str, str] = {
 }
 
 
-def _build_opencode_config_content(
+def _build_opencode_model_config(
     *,
     model_provider: str,
     model_name: str | None,
     api_key: str,
     api_base_url: str | None,
     compatibility: str | None = None,
-) -> str | None:
-    """构建 ``OPENCODE_CONFIG_CONTENT`` 内联配置 JSON。
+) -> dict[str, Any] | None:
+    """构建 opencode model/provider 配置 dict,用于写入 XDG 配置文件。
 
-    依据 opencode 文档 (https://opencode.ai/docs/providers#custom)：
+    依据 opencode 文档 (https://opencode.ai/docs/providers#custom):
 
-    - 内置 provider（openai/anthropic 等）：仅设置 ``options.apiKey``
-    - 自定义 endpoint（有 ``api_base_url``）：设置 ``npm``、``options.baseURL``、
-      ``models``，``npm`` 按 ``compatibility`` 选择 AI SDK 包：
-        * ``openai`` / 默认 → ``@ai-sdk/openai-compatible``（``/v1/chat/completions``）
-        * ``anthropic`` → ``@ai-sdk/anthropic``（Anthropic Messages 格式）
+    - 内置 provider(openai/anthropic 等):仅设置 ``options.apiKey``
+    - 自定义 endpoint(有 ``api_base_url``):设置 ``npm``、``options.baseURL``、
+      ``models``,``npm`` 按 ``compatibility`` 选择 AI SDK 包:
+        * ``openai`` / 默认 → ``@ai-sdk/openai-compatible``(``/v1/chat/completions``)
+        * ``anthropic`` → ``@ai-sdk/anthropic``(Anthropic Messages 格式)
     - ``model`` 字段格式为 ``"provider_id/model_id"``
     """
     if not model_provider or not model_name:
@@ -87,11 +87,57 @@ def _build_opencode_config_content(
     if not provider_config:
         return None
 
-    config = {
+    return {
         "model": f"{model_provider}/{model_name}",
         "provider": {model_provider: provider_config},
     }
-    return json.dumps(config, ensure_ascii=False)
+
+def _to_opencode_mcp_config(config: dict[str, Any]) -> dict[str, Any]:
+    """将 MCP 配置 dict 转换为 opencode serve 可接受的格式。
+
+    转换后输出:
+        {"type": "local", "command": ["npx", "-y", "..."], "environment": {...}, "enabled": true}
+    """
+    # 推断 opencode type
+    oc_type: str = "remote" if "url" in config else "local"
+    oc_config: dict[str, Any] = {"type": oc_type}
+
+    if oc_type == "local":
+        command = config.get("command")
+        args = config.get("args")
+        if isinstance(command, str):
+            merged = [command]
+            if isinstance(args, list):
+                merged.extend(str(a) for a in args)
+            oc_config["command"] = merged
+        elif isinstance(command, list):
+            merged = list(command)
+            if isinstance(args, list):
+                merged.extend(str(a) for a in args)
+            oc_config["command"] = merged
+        else:
+            logger.warning(
+                "MCP server config has invalid 'command' field (type=%s), "
+                "server will not be functional. config keys: %s",
+                type(command).__name__,
+                list(config.keys()),
+            )
+            oc_config["enabled"] = False
+            return oc_config
+        if "env" in config:
+            oc_config["environment"] = config["env"]
+        if "cwd" in config:
+            oc_config["cwd"] = config["cwd"]
+    else:
+        # remote
+        if "url" in config:
+            oc_config["url"] = config["url"]
+        if "headers" in config:
+            oc_config["headers"] = config["headers"]
+
+    oc_config["enabled"] = config.get("enabled", True)
+
+    return oc_config
 
 
 class OpenCodeLifecycleError(Exception):
@@ -129,7 +175,8 @@ class OpenCodeLifecycleService:
         self._profile = profile
         self._serve_process: Popen[str] | None = None
         self._stderr_drainer: threading.Thread | None = None
-        self._model_config_content: str | None = None
+        self._model_config: dict[str, Any] | None = None
+        self._config_lock: threading.Lock = threading.Lock()
 
     @property
     def client(self) -> OpenCodeClient:
@@ -162,20 +209,141 @@ class OpenCodeLifecycleService:
         compatibility: str | None = None,
     ) -> None:
         """配置 opencode 使用的模型与凭据。
-        
-        依据 https://opencode.ai/docs/config：``OPENCODE_CONFIG_CONTENT`` 为
-        内联配置（最高优先级），覆盖全局/项目配置。
+
+        将 model/provider 配置存储为 dict,供 ``start_server()`` 写入
+        XDG 配置文件。
         """
-        self._model_config_content = _build_opencode_config_content(
-            model_provider=model_provider,
-            model_name=model_name,
-            api_key=api_key,
-            api_base_url=api_base_url,
-            compatibility=compatibility,
-        )
+        with self._config_lock:
+            self._model_config = _build_opencode_model_config(
+                model_provider=model_provider,
+                model_name=model_name,
+                api_key=api_key,
+                api_base_url=api_base_url,
+                compatibility=compatibility,
+            )
+
+    @property
+    def instance_config_home(self) -> Path | None:
+        """返回 XDG_CONFIG_HOME 路径"""
+        if not self._profile:
+            return None
+        workspace_root = get_settings().workspace.root_path()
+        return workspace_root / "agent-workspaces" / self._profile / "workspace"
+
+    def _opencode_config_path(self) -> Path | None:
+        """返回 opencode 配置文件完整路径。
+
+        opencode 自动在 ``$XDG_CONFIG_HOME`` 后追加 ``/opencode``
+        """
+        config_home = self.instance_config_home
+        if config_home is None:
+            return None
+        return config_home / "opencode" / "opencode.json"
+
+    def _read_config_disk(self) -> dict[str, Any]:
+        path = self._opencode_config_path()
+        if path is None or not path.is_file():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to read opencode config from %s: %s", path, exc)
+            return {}
+
+    def _write_config_disk(self, config: dict[str, Any]) -> None:
+        path = self._opencode_config_path()
+        if path is None:
+            logger.warning("Cannot write opencode config: no profile configured")
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(config, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            logger.info("opencode config written to disk: %s", path)
+        except OSError as exc:
+            logger.error("Failed to write opencode config to %s: %s", path, exc)
+            raise
+
+    def _merge_model_into_disk_config(self) -> None:
+        """将 model/provider 配置合并到 XDG 配置文件,保留已有的 mcp 等字段。"""
+        if self._model_config is None:
+            return
+        with self._config_lock:
+            current = self._read_config_disk()
+            current["model"] = self._model_config["model"]
+            current["provider"] = self._model_config["provider"]
+            self._write_config_disk(current)
+
+    def mcp_set(self, name: str, config: dict[str, Any]) -> None:
+        """动态添加并持久化 MCP 配置"""
+        if self._opencode_config_path() is None:
+            raise OpenCodeLifecycleError(
+                action="mcp_set",
+                message="Cannot persist MCP config: no profile configured",
+            )
+
+        oc_config = _to_opencode_mcp_config(config)
+
+        # ---- XDG 磁盘(持久化优先) ----
+        with self._config_lock:
+            current = self._read_config_disk()
+            mcp_cfg = current.get("mcp", {})
+            if not isinstance(mcp_cfg, dict):
+                mcp_cfg = {}
+            mcp_cfg[name] = oc_config
+            current["mcp"] = mcp_cfg
+            self._write_config_disk(current)
+
+        # ---- HTTP API(运行时,best-effort) ----
+        try:
+            self._client.post_mcp_disconnect(name)
+        except OpenCodeClientError as exc:
+            if exc.status != 404:
+                logger.warning("mcp disconnect before set failed: %s", exc)
+        except Exception:
+            logger.debug("mcp disconnect failed (serve may not be running)", exc_info=True)
+
+        try:
+            self._client.post_mcp_add(name, oc_config)
+        except OpenCodeClientError as exc:
+            logger.warning("mcp add via HTTP failed (will apply on restart): %s", exc)
+        except Exception:
+            logger.debug("mcp add failed (serve may not be running)", exc_info=True)
+
+    def mcp_unset(self, name: str) -> None:
+        """断开并移除 MCP 配置"""
+        if self._opencode_config_path() is None:
+            raise OpenCodeLifecycleError(
+                action="mcp_unset",
+                message="Cannot remove MCP config: no profile configured",
+            )
+
+        # ---- XDG 磁盘(持久化优先) ----
+        with self._config_lock:
+            current = self._read_config_disk()
+            mcp_cfg = current.get("mcp", {})
+            if isinstance(mcp_cfg, dict) and name in mcp_cfg:
+                del mcp_cfg[name]
+                current["mcp"] = mcp_cfg
+                self._write_config_disk(current)
+
+        # ---- HTTP API(运行时,best-effort) ----
+        try:
+            self._client.post_mcp_disconnect(name)
+        except OpenCodeClientError as exc:
+            if exc.status != 404:
+                logger.warning("mcp disconnect failed: %s", exc)
+        except Exception:
+            logger.debug("mcp disconnect failed (serve may not be running)", exc_info=True)
 
     def start_server(self) -> None:
-        """启动 ``opencode serve`` 子进程。"""
+        """启动 ``opencode serve`` 子进程。
+
+        在启动前将 model/provider 配置写入 XDG 配置文件,
+        opencode serve 启动时会从 XDG 配置文件读取全量配置。
+        """
         self._stop_serve_process()
 
         env = {
@@ -184,12 +352,12 @@ class OpenCodeLifecycleService:
         }
         if self._client.password:
             env["OPENCODE_SERVER_PASSWORD"] = self._client.password
-        if self._model_config_content:
-            env["OPENCODE_CONFIG_CONTENT"] = self._model_config_content
 
         if self._profile:
-            # XDG isolation: per-profile data, state, config, cache.
             self._setup_xdg_env(env, self._profile)
+
+        # 将 model/provider 写入 XDG 配置文件
+        self._merge_model_into_disk_config()
 
         serve_port = self._client.serve_port
         command: list[str] = [
@@ -322,18 +490,22 @@ class OpenCodeLifecycleService:
     def _setup_xdg_env(self, env: dict[str, str], profile: str) -> None:
         """为指定 *profile* 填充 XDG 环境变量。
 
-        所有目录均创建于 ``<WITTY_WORKSPACE_ROOT>/opencode-instances/<profile>/`` 下。
+        - ``XDG_CONFIG_HOME`` 设为 agent workspace 目录,使 opencode 配置文件
+          与 AI 工作区重叠,AI 的 ``glob **/opencode.json*`` 可直接发现配置。
+        - 其他 XDG 目录(data / state / cache)仍位于
+          ``<WITTY_WORKSPACE_ROOT>/opencode-instances/<profile>/`` 下做实例隔离。
         opencode 会自动在每个 XDG 路径后追加 ``/opencode``，例如
         ``$XDG_DATA_HOME/opencode/opencode.db``。
         """
 
         workspace_root = get_settings().workspace.root_path()
         inst_root = workspace_root / "opencode-instances" / profile
+        config_home = workspace_root / "agent-workspaces" / profile / "workspace"
 
         xdg_dirs: dict[str, Path] = {
             "XDG_DATA_HOME": inst_root / "data",
             "XDG_STATE_HOME": inst_root / "state",
-            "XDG_CONFIG_HOME": inst_root / "config",
+            "XDG_CONFIG_HOME": config_home,
             "XDG_CACHE_HOME": inst_root / "cache",
         }
 

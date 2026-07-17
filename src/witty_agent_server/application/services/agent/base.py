@@ -70,6 +70,10 @@ class OpenCodeLifecycleControlPort(RuntimeLifecyclePort, Protocol):
         compatibility: str | None = None,
     ) -> None: ...
 
+    def mcp_set(self, name: str, config: dict[str, object]) -> None: ...
+
+    def mcp_unset(self, name: str) -> None: ...
+
 
 @runtime_checkable
 class GatewayAgentClientPort(Protocol):
