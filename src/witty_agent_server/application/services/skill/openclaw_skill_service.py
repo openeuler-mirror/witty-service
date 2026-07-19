@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,7 +23,6 @@ from witty_agent_server.application.services.skill.skill_client_port import (
 from witty_agent_server.infra.clients.openclaw_gateway_client import (
     OpenClawGatewayClientError,
 )
-from witty_service.config import get_settings
 
 
 logger = logging.getLogger(__name__)
@@ -83,10 +81,6 @@ class OpenClawSkillService(AgentSkillServiceBase):
             return [cls._get_workspace_skills_dir(agent_id)]
         return []
 
-    _ALLOWED_SOURCE_BASES: list[Path] = [
-        get_settings().workspace.root_path() / "skill-repositories",
-    ]
-
     @classmethod
     def _validate_path_under_allowed_bases(
         cls,
@@ -117,21 +111,6 @@ class OpenClawSkillService(AgentSkillServiceBase):
         raise ValueError(
             f"Path {resolved} is outside allowed directories: "
             f"{[str(b) for b in allowed_bases]}"
-        )
-
-    @classmethod
-    def _validate_source_path_under_workspace(cls, target: Path) -> Path:
-        resolved = target.expanduser().resolve()
-        for base in cls._ALLOWED_SOURCE_BASES:
-            base_resolved = base.resolve()
-            try:
-                resolved.relative_to(base_resolved)
-                return resolved
-            except ValueError:
-                continue
-        raise ValueError(
-            f"Source path {resolved} is outside allowed directories: "
-            f"{[str(b) for b in cls._ALLOWED_SOURCE_BASES]}"
         )
 
     def list_skills(self, *, agent_id: str | None = None) -> dict[str, Any]:
@@ -274,21 +253,10 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 reason=str(exc),
             ) from exc
     
-    @staticmethod
-    def _is_local_path(path: str) -> bool:
-        path = path.strip()
-        return (
-            path.startswith("/") 
-            or path.startswith("~") 
-            or path.startswith(".")
-            or "\\" in path
-            or ("/" in path and not path.startswith("http://") and not path.startswith("https://"))
-        )
-
     def _install_local_skill(self, skill_name: str, source_path: str) -> dict[str, Any]:
         src = Path(source_path).expanduser().resolve()
         try:
-            src = self._validate_source_path_under_workspace(src)
+            src = self._validate_source_path(src)
         except ValueError as exc:
             raise OpenClawSkillsInstallError(
                 runtime_type=self.runtime_type,
@@ -359,25 +327,24 @@ class OpenClawSkillService(AgentSkillServiceBase):
 
         workspace_root = self._get_workspace_root(agent_id)
         workspace_root.mkdir(parents=True, exist_ok=True)
-        command = [
-            "npx",
-            "wittyhub",
-            "add",
-            normalized_skill_source,
-            "--skill",
-            normalized_name,
-            "--agent",
-            "openclaw",
-            "-y",
-        ]
 
         try:
-            result = subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
+            result = self._run_wittyhub_command(
+                [
+                    "npx",
+                    "wittyhub",
+                    "add",
+                    normalized_skill_source,
+                    "--skill",
+                    normalized_name,
+                    "--agent",
+                    "openclaw",
+                    "-y",
+                ],
                 cwd=workspace_root,
+                skill_name=normalized_name,
+                error_cls=OpenClawSkillsInstallError,
+                timeout=30,
             )
             logger.info(
                 (
@@ -402,21 +369,6 @@ class OpenClawSkillService(AgentSkillServiceBase):
                     skill_name=normalized_name,
                 ),
             }
-        except FileNotFoundError as exc:
-            raise OpenClawSkillsInstallError(
-                runtime_type=self.runtime_type,
-                skill_name=normalized_name,
-                reason="npx command not found",
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()
-            stdout = (exc.stdout or "").strip()
-            reason = stderr or stdout or f"wittyhub exited with code {exc.returncode}"
-            raise OpenClawSkillsInstallError(
-                runtime_type=self.runtime_type,
-                skill_name=normalized_name,
-                reason=reason,
-            ) from exc
         except Exception as exc:
             raise OpenClawSkillsInstallError(
                 runtime_type=self.runtime_type,
@@ -550,22 +502,21 @@ class OpenClawSkillService(AgentSkillServiceBase):
     ) -> dict[str, Any]:
         workspace_root = self._get_workspace_root(agent_id)
         workspace_root.mkdir(parents=True, exist_ok=True)
-        command = [
-            "npx",
-            "wittyhub",
-            "remove",
-            skill_name,
-            "--agent",
-            "openclaw",
-            "-y",
-        ]
+
         try:
-            result = subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
+            result = self._run_wittyhub_command(
+                [
+                    "npx",
+                    "wittyhub",
+                    "remove",
+                    skill_name,
+                    "--agent",
+                    "openclaw",
+                    "-y",
+                ],
                 cwd=workspace_root,
+                skill_name=skill_name,
+                error_cls=OpenClawSkillsUninstallError,
             )
             logger.info(
                 (
@@ -585,21 +536,6 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 "uninstalled": True,
                 "uninstall_channel": "wittyhub",
             }
-        except FileNotFoundError as exc:
-            raise OpenClawSkillsUninstallError(
-                runtime_type=self.runtime_type,
-                skill_name=skill_name,
-                reason="npx command not found",
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()
-            stdout = (exc.stdout or "").strip()
-            reason = stderr or stdout or f"wittyhub exited with code {exc.returncode}"
-            raise OpenClawSkillsUninstallError(
-                runtime_type=self.runtime_type,
-                skill_name=skill_name,
-                reason=reason,
-            ) from exc
         except Exception as exc:
             raise OpenClawSkillsUninstallError(
                 runtime_type=self.runtime_type,
@@ -650,7 +586,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 reason=str(exc),
             ) from exc
         
-        self._remove_installed_path(dst)
+        self._remove_path(dst)
 
         logger.info(
             "uninstall_local_skill success, runtime_type=%s agent_id=%s skill_name=%s dst=%s",
@@ -712,7 +648,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 skill_name=skill_name,
                 reason=str(exc),
             ) from exc
-        self._remove_installed_path(dst)
+        self._remove_path(dst)
 
         logger.info(
             (
@@ -737,32 +673,3 @@ class OpenClawSkillService(AgentSkillServiceBase):
         if candidate.name.lower() == "skill.md":
             candidate = candidate.parent
         return Path(os.path.abspath(str(candidate)))
-
-    @staticmethod
-    def _remove_installed_path(target: Path) -> None:
-        if target.is_symlink() or target.is_file():
-            target.unlink(missing_ok=True)
-            return
-        if target.exists():
-            shutil.rmtree(target)
-
-    def _normalize_skill_name(
-        self,
-        *,
-        skill_name: str,
-        error_cls: type[OpenClawSkillsInstallError] | type[OpenClawSkillsUninstallError],
-    ) -> str:
-        if not isinstance(skill_name, str) or not skill_name.strip():
-            raise error_cls(
-                runtime_type=self.runtime_type,
-                skill_name=skill_name,
-                reason="skill_name is empty",
-            )
-        normalized_name = skill_name.strip()
-        if re.search(r"[\\/]", normalized_name):
-            raise error_cls(
-                runtime_type=self.runtime_type,
-                skill_name=normalized_name,
-                reason="skill_name contains path separator",
-            )
-        return normalized_name

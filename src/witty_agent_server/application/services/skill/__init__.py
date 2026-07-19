@@ -4,6 +4,10 @@ from witty_agent_server.application.services.skill.errors import (
     OpenClawSkillsInstallError,
     OpenClawSkillsQueryError,
     OpenClawSkillsUninstallError,
+    OpenClawSkillNotRemovableError,
+    OpenCodeSkillsInstallError,
+    OpenCodeSkillsQueryError,
+    OpenCodeSkillsUninstallError,
     RuntimeSkillsNotSupportedError,
 )
 from witty_agent_server.application.services.skill.openclaw_skill_client import (
@@ -27,6 +31,10 @@ __all__ = [
     "OpenClawSkillsQueryError",
     "OpenClawSkillsInstallError",
     "OpenClawSkillsUninstallError",
+    "OpenClawSkillNotRemovableError",
+    "OpenCodeSkillsQueryError",
+    "OpenCodeSkillsInstallError",
+    "OpenCodeSkillsUninstallError",
     "OpenClawSkillClient",
     "OpenClawSkillService",
     "OpenCodeSkillService",

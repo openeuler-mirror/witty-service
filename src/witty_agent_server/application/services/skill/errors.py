@@ -107,3 +107,63 @@ class OpenClawSkillNotRemovableError(AgentSkillServiceError):
                 "reason": reason,
             },
         )
+
+
+class OpenCodeSkillsQueryError(AgentSkillServiceError):
+    def __init__(
+        self,
+        *,
+        runtime_type: str,
+        code: str,
+        message: str,
+    ) -> None:
+        super().__init__(
+            code="OPENCODE_SKILLS_QUERY_FAILED",
+            message="opencode skills query failed",
+            status_code=502,
+            details={
+                "runtime_type": runtime_type,
+                "gateway_error_code": code,
+                "gateway_error_message": message,
+            },
+        )
+
+
+class OpenCodeSkillsInstallError(AgentSkillServiceError):
+    def __init__(
+        self,
+        *,
+        runtime_type: str,
+        skill_name: str,
+        reason: str,
+    ) -> None:
+        super().__init__(
+            code="OPENCODE_SKILLS_INSTALL_FAILED",
+            message="opencode skills install failed",
+            status_code=500,
+            details={
+                "runtime_type": runtime_type,
+                "skill_name": skill_name,
+                "reason": reason,
+            },
+        )
+
+
+class OpenCodeSkillsUninstallError(AgentSkillServiceError):
+    def __init__(
+        self,
+        *,
+        runtime_type: str,
+        skill_name: str,
+        reason: str,
+    ) -> None:
+        super().__init__(
+            code="OPENCODE_SKILLS_UNINSTALL_FAILED",
+            message="opencode skills uninstall failed",
+            status_code=500,
+            details={
+                "runtime_type": runtime_type,
+                "skill_name": skill_name,
+                "reason": reason,
+            },
+        )
