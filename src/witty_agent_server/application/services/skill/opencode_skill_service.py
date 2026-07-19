@@ -76,7 +76,14 @@ class OpenCodeSkillService(AgentSkillServiceBase):
     ) -> Path:
         """校验 target 在 skills 目录下，拒绝符号链接。"""
         skills_dir = cls._get_skills_dir(agent_id).resolve()
-        resolved = target.expanduser().resolve()
+
+        expanded = target.expanduser()
+        if expanded.is_symlink():
+            raise ValueError(
+                f"Path {expanded} is a symbolic link, which is not allowed"
+            )
+
+        resolved = expanded.resolve()
 
         try:
             resolved.relative_to(skills_dir)
@@ -85,10 +92,6 @@ class OpenCodeSkillService(AgentSkillServiceBase):
                 f"Path {resolved} is outside allowed skills directory {skills_dir}"
             )
 
-        if resolved.is_symlink():
-            raise ValueError(
-                f"Path {resolved} is a symbolic link, which is not allowed"
-            )
         return resolved
 
     def list_skills(self, *, agent_id: str | None = None) -> dict[str, Any]:

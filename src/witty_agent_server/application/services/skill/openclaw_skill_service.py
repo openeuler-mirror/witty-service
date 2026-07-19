@@ -369,6 +369,8 @@ class OpenClawSkillService(AgentSkillServiceBase):
                     skill_name=normalized_name,
                 ),
             }
+        except OpenClawSkillsInstallError:
+            raise
         except Exception as exc:
             raise OpenClawSkillsInstallError(
                 runtime_type=self.runtime_type,
@@ -536,6 +538,8 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 "uninstalled": True,
                 "uninstall_channel": "wittyhub",
             }
+        except OpenClawSkillsUninstallError:
+            raise
         except Exception as exc:
             raise OpenClawSkillsUninstallError(
                 runtime_type=self.runtime_type,

@@ -102,6 +102,12 @@ class AgentSkillServiceBase(ABC):
                 reason="skill_name is empty",
             )
         normalized = skill_name.strip()
+        if normalized in (".", ".."):
+            raise error_cls(
+                runtime_type=self.runtime_type,
+                skill_name=normalized,
+                reason="skill_name must not be '.' or '..'",
+            )
         if re.search(r"[\\/]", normalized):
             raise error_cls(
                 runtime_type=self.runtime_type,
