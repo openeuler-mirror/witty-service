@@ -147,7 +147,6 @@ class DockerSettings:
         WITTY_DOCKER_CONTAINER_WORKSPACE_PATH: 容器内工作空间挂载路径, 默认 /witty-workspace
         WITTY_DOCKER_STOP_TIMEOUT: 容器停止超时时间(秒), 默认 10
         WITTY_DOCKER_IMAGE: Docker 镜像名称, 默认 ghcr.io/openwitty/witty-agent-server
-        WITTY_DOCKER_IMAGE_TAG: Docker 镜像标签, 默认 latest
 
         # 资源管控
         WITTY_DOCKER_MEMORY_LIMIT: 容器内存硬限制, 默认 512m
@@ -163,7 +162,6 @@ class DockerSettings:
     container_workspace_path: str = "/witty-workspace"
     stop_timeout: int = 10
     image: str = "ghcr.io/openwitty/witty-agent-server"
-    image_tag: str = "latest"
     memory_limit: str = "512m"
     pids_limit: int = 100
     cpu_shares: int = 512
@@ -180,7 +178,6 @@ class DockerSettings:
             container_workspace_path=os.getenv("WITTY_DOCKER_CONTAINER_WORKSPACE_PATH", "/witty-workspace"),
             stop_timeout=int(os.getenv("WITTY_DOCKER_STOP_TIMEOUT", 10)),
             image=os.getenv("WITTY_DOCKER_IMAGE", "ghcr.io/openwitty/witty-agent-server"),
-            image_tag=os.getenv("WITTY_DOCKER_IMAGE_TAG", "latest"),
             memory_limit=os.getenv("WITTY_DOCKER_MEMORY_LIMIT", "512m"),
             pids_limit=int(os.getenv("WITTY_DOCKER_PIDS_LIMIT", "100")),
             cpu_shares=int(os.getenv("WITTY_DOCKER_CPU_SHARES", "512")),
@@ -189,13 +186,6 @@ class DockerSettings:
             tmpfs_size=os.getenv("WITTY_DOCKER_TMPFS_SIZE", "256M"),
             read_only=os.getenv("WITTY_DOCKER_READ_ONLY", "true").lower() not in ("0", "false", "no"),
         )
-
-    def get_full_image_name(self) -> str:
-        """获取完整的镜像名称，包含标签"""
-        image = self.image
-        if "@" in image or self._has_explicit_tag(image):
-            return image
-        return f"{image}:{self.image_tag}"
 
     @staticmethod
     def _has_explicit_tag(image: str) -> bool:
@@ -431,11 +421,3 @@ def get_settings() -> Settings:
         _settings = Settings.from_env()
     return _settings
 
-
-def get_docker_image() -> str:
-    """获取 Docker 镜像完整名称
-    
-    Returns:
-        str: 完整的镜像名称，包含标签
-    """
-    return get_settings().docker.get_full_image_name()

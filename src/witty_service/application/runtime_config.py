@@ -11,10 +11,18 @@ class RuntimeConfig(Protocol):
     - 沙箱子进程环境变量
     - /agent/start 请求体
     - 端口在 sandbox metadata 中的存储 key
+    - 内存限制
+
+    adapter_type 同时作为 Docker 镜像 tag 使用（镜像命名: <base_image>:<adapter_type>）。
     """
 
     @property
     def adapter_type(self) -> str: ...
+
+    @property
+    def memory_limit(self) -> str:
+        """返回 Docker 容器的内存限制（例如 "2048m"）。"""
+        ...
 
     def build_env(self) -> dict[str, str]:
         """构建启动 agent-server 子进程时需要注入的环境变量."""
@@ -39,6 +47,7 @@ class RuntimeConfig(Protocol):
 @dataclass
 class OpencodeConfig(RuntimeConfig):
     adapter_type: str = "opencode"
+    memory_limit: str = "2048m"
 
     def build_env(self) -> dict[str, str]:
         return {"WITTY_RUNTIME_DEFAULT": "opencode"}
@@ -70,6 +79,7 @@ class OpencodeConfig(RuntimeConfig):
 @dataclass
 class OpenclawConfig(RuntimeConfig):
     adapter_type: str = "openclaw"
+    memory_limit: str = "512m"
 
     def build_env(self) -> dict[str, str]:
         return {"WITTY_RUNTIME_DEFAULT": "openclaw"}

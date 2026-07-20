@@ -166,7 +166,7 @@ class FakeWorkspaceStore:
 
 
 class FakeSandboxBackend:
-    def start(self, *, agent_id: str, workspace_path: str, **_: Any) -> SandboxHandle:
+    def start(self, *, agent_id: str, workspace_path: str, env: dict[str, str] | None = None, **_: Any) -> SandboxHandle:
         return SandboxHandle(
             sandbox_id=f"sandbox-{agent_id}",
             agent_id=agent_id,

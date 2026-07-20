@@ -253,7 +253,14 @@ class WorkspaceStore(Protocol):
 
 
 class SandboxBackend(Protocol):
-    def start(self, *, agent_id: str, workspace_path: str, **kwargs: Any) -> SandboxHandle: ...
+    def start(
+        self,
+        *,
+        agent_id: str,
+        workspace_path: str,
+        env: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> SandboxHandle: ...
 
     def stop(self, handle: SandboxHandle | str, **kwargs: Any) -> None: ...
 
@@ -671,9 +678,9 @@ class AgentManager:
             sandbox_handle = self._sandbox_backend.start(
                 agent_id=agent_id,
                 workspace_path=workspace_path,
-                profile=profile_name,
-                gateway_port=gateway_port,
                 env=runtime_config.build_env(),
+                image_tag=runtime_config.adapter_type,
+                memory_limit=runtime_config.memory_limit,
             )
             logger.info(f"{prefix}Sandbox started: sandbox_id=%s", sandbox_handle.sandbox_id)
             adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
@@ -861,9 +868,9 @@ class AgentManager:
         sandbox_handle = self._sandbox_backend.start(
             agent_id=agent_id,
             workspace_path=agent.workspace_path,
-            profile=agent.id,
-            gateway_port=gateway_port,
             env=runtime_config.build_env(),
+            image_tag=runtime_config.adapter_type,
+            memory_limit=runtime_config.memory_limit,
         )
         adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
 
@@ -1081,9 +1088,9 @@ class AgentManager:
         sandbox_handle = self._sandbox_backend.start(
             agent_id=agent_id,
             workspace_path=agent.workspace_path,
-            profile=profile_name,
-            gateway_port=gateway_port,
             env=runtime_config.build_env(),
+            image_tag=runtime_config.adapter_type,
+            memory_limit=runtime_config.memory_limit,
         )
         adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
         logger.info(f"{prefix}Sandbox restarted: base_url=%s profile=%s gateway_port=%s",

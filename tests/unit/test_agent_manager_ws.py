@@ -282,7 +282,7 @@ class FakeSandboxBackend:
     def __init__(self) -> None:
         self.handles: dict[str, Any] = {}
 
-    def start(self, *, agent_id: str, workspace_path: str, **_: Any) -> Any:
+    def start(self, *, agent_id: str, workspace_path: str, env: dict[str, Any] | None = None, **_: Any) -> Any:
         from witty_service.sandbox.base import SandboxHandle
         handle = SandboxHandle(
             sandbox_id=f"sandbox-{agent_id}",

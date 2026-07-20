@@ -114,13 +114,14 @@ def test_docker_runtime_start_mounts_workspace_to_witty_workspace(
 
     container = FakeContainer()
     client = FakeDockerClient(container)
-    backend = DockerSandboxBackend(client=client, image="witty-agent:test")
+    backend = DockerSandboxBackend(client=client, image="witty-agent")
     workspace_path = _workspace_dir(tmp_path)
 
     handle = backend.start(
         agent_id="agent-1",
         workspace_path=workspace_path,
         port=18080,
+        image_tag="test",
     )
 
     assert client.containers.run_calls == [
@@ -156,22 +157,22 @@ def test_docker_runtime_start_mounts_workspace_to_witty_workspace(
     assert handle.metadata["container_id"] == "container-123"
     assert handle.metadata["host_port"] == 18080
     assert handle.metadata["base_url"] == "http://127.0.0.1:18080"
-    assert handle.metadata["workspace_mount_path"] == "/witty-workspace"
-
+    assert handle.metadata["container_workspace_path"] == "/witty-workspace"
 
 def test_docker_runtime_start_with_environment_vars(tmp_path: Path) -> None:
     from witty_service.sandbox.docker import DockerSandboxBackend
 
     container = FakeContainer()
     client = FakeDockerClient(container)
-    backend = DockerSandboxBackend(client=client, image="witty-agent:test")
+    backend = DockerSandboxBackend(client=client, image="witty-agent")
     workspace_path = _workspace_dir(tmp_path)
 
     backend.start(
         agent_id="agent-env",
         workspace_path=workspace_path,
         port=18090,
-        environment={"API_KEY": "secret", "DEBUG": "true"},
+        image_tag="test",
+        env={"API_KEY": "secret", "DEBUG": "true"},
     )
 
     assert client.containers.run_calls[0]["environment"] == {
@@ -194,6 +195,7 @@ def test_docker_runtime_stop_cleanup_and_endpoint(tmp_path: Path) -> None:
     handle = backend.start(
         agent_id="agent-2",
         workspace_path=workspace_path,
+        image_tag="test",
     )
 
     endpoint = backend.endpoint(handle)
@@ -240,6 +242,7 @@ def test_docker_runtime_status_maps_container_state(
         agent_id="agent-3",
         workspace_path=workspace_path,
         port=18082,
+        image_tag="test",
     )
 
     assert backend.status(handle) is expected_status
@@ -258,6 +261,7 @@ def test_docker_runtime_status_returns_stopped_when_no_container(
         agent_id="agent-no-container",
         workspace_path=workspace_path,
         port=18100,
+        image_tag="test",
     )
     backend._containers.pop(handle.sandbox_id, None)
 
@@ -275,6 +279,7 @@ def test_docker_runtime_status_raises_domain_error_when_docker_api_fails(
         agent_id="agent-4",
         workspace_path=_workspace_dir(tmp_path),
         port=18083,
+        image_tag="test",
     )
 
     with pytest.raises(DomainError) as exc_info:
@@ -301,6 +306,7 @@ def test_docker_runtime_cleanup_attempts_remove_when_stop_fails(
         agent_id="agent-5",
         workspace_path=_workspace_dir(tmp_path),
         port=18084,
+        image_tag="test",
     )
 
     with pytest.raises(DomainError) as exc_info:
@@ -324,6 +330,7 @@ def test_docker_runtime_cleanup_when_remove_fails(
         agent_id="agent-6",
         workspace_path=_workspace_dir(tmp_path),
         port=18085,
+        image_tag="test",
     )
 
     with pytest.raises(DomainError) as exc_info:
@@ -348,6 +355,7 @@ def test_docker_runtime_cleanup_silent_when_no_container(
         agent_id="agent-cleanup-none",
         workspace_path=workspace_path,
         port=18101,
+        image_tag="test",
     )
     backend._containers.pop(handle.sandbox_id, None)
 
@@ -372,6 +380,7 @@ def test_docker_runtime_stop_raises_domain_error_when_docker_api_fails(
         agent_id="agent-stop",
         workspace_path=_workspace_dir(tmp_path),
         port=18086,
+        image_tag="test",
     )
 
     with pytest.raises(DomainError) as exc_info:
@@ -395,6 +404,7 @@ def test_docker_runtime_stop_skips_when_no_container(
         agent_id="agent-stop-none",
         workspace_path=workspace_path,
         port=18102,
+        image_tag="test",
     )
     backend._containers.pop(handle.sandbox_id, None)
 
@@ -462,6 +472,7 @@ def test_docker_runtime_start_returns_existing_handle_for_same_agent_id(
         agent_id="agent-dup",
         workspace_path=workspace_path,
         port=18110,
+        image_tag="test",
     )
     handle2 = backend.start(
         agent_id="agent-dup",
@@ -519,13 +530,14 @@ def test_docker_runtime_start_ignores_non_running_existing_container(
     client = FakeDockerClient(stopped_container)
     client.containers._get_containers["witty-sandbox-agent-stopped"] = stopped_container
 
-    backend = DockerSandboxBackend(client=client, image="witty-agent:test")
+    backend = DockerSandboxBackend(client=client, image="witty-agent")
     workspace_path = _workspace_dir(tmp_path)
 
     handle = backend.start(
         agent_id="agent-stopped",
         workspace_path=workspace_path,
         port=18113,
+        image_tag="test",
     )
 
     assert "reconnected" not in handle.metadata
@@ -643,6 +655,7 @@ def test_docker_runtime_endpoint_ws_url(tmp_path: Path) -> None:
     handle = backend.start(
         agent_id="agent-ws",
         workspace_path=workspace_path,
+        image_tag="test",
     )
 
     endpoint = backend.endpoint(handle)
@@ -689,7 +702,6 @@ def test_docker_runtime_factory_injects_env_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("WITTY_DOCKER_IMAGE", "registry.example/witty-agent")
-    monkeypatch.setenv("WITTY_DOCKER_IMAGE_TAG", "v2")
     monkeypatch.setenv("WITTY_DOCKER_CONTAINER_PORT", "19090")
     monkeypatch.setenv(
         "WITTY_DOCKER_CONTAINER_WORKSPACE_PATH",
@@ -702,17 +714,14 @@ def test_docker_runtime_factory_injects_env_configuration(
     from witty_service.sandbox.docker import DockerSandboxBackend
 
     assert isinstance(backend, DockerSandboxBackend)
-    assert backend.image == "registry.example/witty-agent:v2"
+    assert backend.base_image == "registry.example/witty-agent"
     assert backend.container_port == 19090
     assert backend.container_workspace_path == "/custom-workspace"
-    assert backend.workspace_mount_path == "/custom-workspace"
-
 
 def test_docker_runtime_factory_keeps_explicit_image_tag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("WITTY_DOCKER_IMAGE", "registry.example/witty-agent:v1")
-    monkeypatch.setenv("WITTY_DOCKER_IMAGE_TAG", "latest")
     _reset_settings(monkeypatch)
 
     backend = create_sandbox_backend("docker")
@@ -720,7 +729,7 @@ def test_docker_runtime_factory_keeps_explicit_image_tag(
     from witty_service.sandbox.docker import DockerSandboxBackend
 
     assert isinstance(backend, DockerSandboxBackend)
-    assert backend.image == "registry.example/witty-agent:v1"
+    assert backend.base_image == "registry.example/witty-agent:v1"
 
 
 def test_docker_runtime_factory_rejects_invalid_container_port_env(
@@ -761,7 +770,7 @@ def test_docker_runtime_start_raises_domain_error_when_run_fails(
     client = FakeDockerClient(container)
     client.containers = RunErrorContainers(container)
 
-    backend = DockerSandboxBackend(client=client, image="witty-agent:test")
+    backend = DockerSandboxBackend(client=client, image="witty-agent")
     workspace_path = _workspace_dir(tmp_path)
 
     with pytest.raises(DomainError) as exc_info:
@@ -769,10 +778,11 @@ def test_docker_runtime_start_raises_domain_error_when_run_fails(
             agent_id="agent-run-fail",
             workspace_path=workspace_path,
             port=18170,
+            image_tag="test",
         )
 
     assert exc_info.value.code == "SANDBOX_START_FAILED"
-    assert exc_info.value.details["image"] == "witty-agent:test"
+    assert exc_info.value.details["image"] == "witty-agent"
 
 
 # =============================================================================
@@ -791,13 +801,181 @@ def test_docker_runtime_start_uses_custom_container_name_prefix(
     class CustomPrefixBackend(DockerSandboxBackend):
         CONTAINER_NAME_PREFIX = "custom-prefix"
 
-    backend = CustomPrefixBackend(client=client, image="witty-agent:test")
+    backend = CustomPrefixBackend(client=client, image="witty-agent")
     workspace_path = _workspace_dir(tmp_path)
 
     backend.start(
         agent_id="agent-custom-prefix",
         workspace_path=workspace_path,
         port=18180,
+        image_tag="test",
     )
 
     assert client.containers.run_calls[0]["name"] == "custom-prefix-agent-custom-prefix"
+
+
+# =============================================================================
+# start() — image_tag kwarg
+# =============================================================================
+
+
+def test_docker_runtime_start_requires_image_tag(tmp_path: Path) -> None:
+    from witty_service.sandbox.docker import DockerSandboxBackend
+
+    backend = DockerSandboxBackend(client=FakeDockerClient(FakeContainer()))
+    workspace_path = _workspace_dir(tmp_path)
+
+    with pytest.raises(DomainError) as exc_info:
+        backend.start(
+            agent_id="agent-no-tag",
+            workspace_path=workspace_path,
+            port=18090,
+        )
+
+    assert exc_info.value.code == "SANDBOX_START_FAILED"
+    assert "image_tag" in exc_info.value.message
+
+
+def test_docker_runtime_start_with_image_tag_concatenates_image(
+    tmp_path: Path,
+) -> None:
+    from witty_service.sandbox.docker import DockerSandboxBackend
+
+    container = FakeContainer()
+    client = FakeDockerClient(container)
+    backend = DockerSandboxBackend(client=client, image="my-registry/witty-agent")
+    workspace_path = _workspace_dir(tmp_path)
+
+    backend.start(
+        agent_id="agent-custom-tag",
+        workspace_path=workspace_path,
+        port=18190,
+        image_tag="v2.0.1",
+    )
+
+    assert client.containers.run_calls[0]["image"] == "my-registry/witty-agent:v2.0.1"
+
+
+def test_docker_runtime_start_falls_back_to_default_base_image(
+    tmp_path: Path,
+) -> None:
+    from witty_service.sandbox.docker import DockerSandboxBackend
+
+    container = FakeContainer()
+    client = FakeDockerClient(container)
+    backend = DockerSandboxBackend(client=client)
+    workspace_path = _workspace_dir(tmp_path)
+
+    backend.start(
+        agent_id="agent-default-image",
+        workspace_path=workspace_path,
+        port=18200,
+        image_tag="latest",
+    )
+
+    assert client.containers.run_calls[0]["image"] == "ghcr.io/openwitty/witty-agent-server:latest"
+
+
+# =============================================================================
+# start() — memory_limit kwarg override
+# =============================================================================
+
+
+def test_docker_runtime_start_with_memory_limit_override(
+    tmp_path: Path,
+) -> None:
+    from witty_service.sandbox.docker import DockerSandboxBackend
+
+    container = FakeContainer()
+    client = FakeDockerClient(container)
+    backend = DockerSandboxBackend(client=client, memory_limit="256m")
+    workspace_path = _workspace_dir(tmp_path)
+
+    backend.start(
+        agent_id="agent-mem-override",
+        workspace_path=workspace_path,
+        port=18210,
+        image_tag="test",
+        memory_limit="2g",
+    )
+
+    assert client.containers.run_calls[0]["mem_limit"] == "2g"
+
+
+def test_docker_runtime_start_uses_instance_memory_limit_by_default(
+    tmp_path: Path,
+) -> None:
+    from witty_service.sandbox.docker import DockerSandboxBackend
+
+    container = FakeContainer()
+    client = FakeDockerClient(container)
+    backend = DockerSandboxBackend(client=client, memory_limit="1g")
+    workspace_path = _workspace_dir(tmp_path)
+
+    backend.start(
+        agent_id="agent-mem-default",
+        workspace_path=workspace_path,
+        port=18220,
+        image_tag="test",
+    )
+
+    assert client.containers.run_calls[0]["mem_limit"] == "1g"
+
+
+# =============================================================================
+# start() — env kwarg edge cases
+# =============================================================================
+
+
+def test_docker_runtime_start_with_env_parameter(tmp_path: Path) -> None:
+    from witty_service.sandbox.docker import DockerSandboxBackend
+
+    container = FakeContainer()
+    client = FakeDockerClient(container)
+    backend = DockerSandboxBackend(client=client)
+    workspace_path = _workspace_dir(tmp_path)
+
+    backend.start(
+        agent_id="agent-env-param",
+        workspace_path=workspace_path,
+        image_tag="test",
+        env={"CUSTOM_VAR": "hello"},
+    )
+
+    assert client.containers.run_calls[0]["environment"] == {"CUSTOM_VAR": "hello"}
+
+
+def test_docker_runtime_start_with_empty_env_not_overwritten(
+    tmp_path: Path,
+) -> None:
+    from witty_service.sandbox.docker import DockerSandboxBackend
+
+    container = FakeContainer()
+    client = FakeDockerClient(container)
+    backend = DockerSandboxBackend(client=client)
+    workspace_path = _workspace_dir(tmp_path)
+
+    backend.start(
+        agent_id="agent-empty-env",
+        workspace_path=workspace_path,
+        image_tag="test",
+        env={},
+    )
+
+    assert client.containers.run_calls[0]["environment"] == {}
+
+def test_docker_runtime_start_default_env_is_empty(tmp_path: Path) -> None:
+    from witty_service.sandbox.docker import DockerSandboxBackend
+
+    container = FakeContainer()
+    client = FakeDockerClient(container)
+    backend = DockerSandboxBackend(client=client)
+    workspace_path = _workspace_dir(tmp_path)
+
+    backend.start(
+        agent_id="agent-no-env",
+        workspace_path=workspace_path,
+        image_tag="test",
+    )
+
+    assert client.containers.run_calls[0]["environment"] == {}

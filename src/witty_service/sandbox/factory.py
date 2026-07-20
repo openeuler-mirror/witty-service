@@ -17,7 +17,7 @@ SandboxBackendFactory = Callable[[], SandboxBackend]
 def _create_docker_backend() -> DockerSandboxBackend:
     settings = get_settings()
     return DockerSandboxBackend(
-        image=settings.docker.get_full_image_name(),
+        image=settings.docker.image,
         host=settings.docker.host,
         container_port=settings.docker.container_port,
         container_workspace_path=settings.docker.container_workspace_path,

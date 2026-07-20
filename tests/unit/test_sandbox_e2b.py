@@ -64,7 +64,7 @@ def test_sandbox_factory_uses_registered_backend():
     class DummySandboxBackend(SandboxBackend):
         sandbox_type = "dummy"
 
-        def start(self, *, agent_id: str, workspace_path: str, **kwargs):
+        def start(self, *, agent_id: str, workspace_path: str, env: dict[str, Any] | None = None, **kwargs: Any):
             raise AssertionError("not called")
 
         def stop(self, handle, **kwargs):

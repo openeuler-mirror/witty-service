@@ -60,6 +60,7 @@ class SandboxBackend(ABC):
         *,
         agent_id: str,
         workspace_path: str,
+        env: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> SandboxHandle:
         raise NotImplementedError
