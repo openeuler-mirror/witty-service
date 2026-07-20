@@ -31,7 +31,7 @@ class BackportConfigPayload(BaseModel):
     signer_name: str = ""
     signer_email: str = ""
     commit_message_template: str = DEFAULT_COMMIT_MESSAGE_TEMPLATE
-    commit_message_source: str = "auto"
+    commit_message_source: str = "upstream"
     linux_repo_path: str = "~/Image/linux"
     commit_sort: str = "describe"
     current_excel_path: str = ""
@@ -41,6 +41,10 @@ class BackportConfigPayload(BaseModel):
     target_config_layout_opts: TargetConfigLayoutOpts = Field(
         default_factory=TargetConfigLayoutOpts
     )
+    source_repo_input: str = ""
+    target_repo_input: str = ""
+    source_repo_state: dict[str, Any] | None = None
+    target_repo_state: dict[str, Any] | None = None
     enable_conflict_summary: bool = False
     cvekit_options: dict[str, Any] = Field(default_factory=dict)
 
@@ -59,6 +63,30 @@ class BackportRuntimeStatusResponse(BaseModel):
     cvekit_available: bool = False
     cvekit_path: str = ""
     errors: list[str] = Field(default_factory=list)
+
+
+class BackportRepositoryPrepareRequest(BaseModel):
+    role: str
+    input: str
+    preferred_branch: str = ""
+
+
+class BackportRepositoryRefreshRequest(BaseModel):
+    role: str
+    local_path: str
+    source_url: str = ""
+    selected_branch: str = ""
+
+
+class BackportRepositoryPrepareResponse(BaseModel):
+    task_id: str
+    status: str
+    role: str
+    input: str
+    progress: int = 0
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    result: dict[str, Any] | None = None
+    error: str = ""
 
 
 class BackportRunRequest(BaseModel):

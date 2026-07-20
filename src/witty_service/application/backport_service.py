@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
+import os
+import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from witty_service.api.backport_schemas import TargetConfigLayoutOpts
 from witty_service.api.services import ServiceContainer
@@ -27,6 +32,10 @@ commit {{commit_id}} {{source}}
 
 {{trailers}}"""
 
+BACKPORT_REPOSITORY_CACHE_ENV = "BACKPORT_REPOSITORY_CACHE_DIR"
+BACKPORT_REPOSITORY_CACHE_DIR = "~/polymind-backport-repositories"
+DEFAULT_PATCH_DATASET_DIR = "~/patched_output"
+
 
 def _default_config() -> dict[str, Any]:
     return {
@@ -36,11 +45,11 @@ def _default_config() -> dict[str, Any]:
         "source_branch": "",
         "target_path": "",
         "target_release": "",
-        "patch_dataset_dir": "",
+        "patch_dataset_dir": DEFAULT_PATCH_DATASET_DIR,
         "signer_name": "",
         "signer_email": "",
         "commit_message_template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
-        "commit_message_source": "auto",
+        "commit_message_source": "upstream",
         "linux_repo_path": "~/Image/linux",
         "commit_sort": "describe",
         "current_excel_path": "",
@@ -48,6 +57,10 @@ def _default_config() -> dict[str, Any]:
         "current_filtered_report_path": "",
         "target_config_layout": "none",
         "target_config_layout_opts": {"default_level": "L1-RECOMMEND"},
+        "source_repo_input": "",
+        "target_repo_input": "",
+        "source_repo_state": None,
+        "target_repo_state": None,
         "enable_conflict_summary": False,
         "cvekit_options": {},
     }
@@ -106,6 +119,8 @@ class BackportService:
                 config[key] = value if isinstance(value, bool) else False
             elif isinstance(default_value, dict):
                 config[key] = value if isinstance(value, dict) else {}
+            elif default_value is None:
+                config[key] = value if isinstance(value, dict) else None
             else:
                 config[key] = value if isinstance(value, str) else ""
         self._normalize_layout_fields(config, loaded)
@@ -133,6 +148,8 @@ class BackportService:
                 config[key] = value if isinstance(value, bool) else False
             elif isinstance(default_value, dict):
                 config[key] = value if isinstance(value, dict) else {}
+            elif default_value is None:
+                config[key] = value if isinstance(value, dict) else None
             else:
                 config[key] = value.strip() if isinstance(value, str) else ""
         self._normalize_layout_fields(config, payload)
@@ -187,6 +204,99 @@ class BackportService:
         ]
         parent_path = str(current_path.parent) if current_path != root else None
         return {"current_path": str(current_path), "parent_path": parent_path, "entries": entries}
+
+    def prepare_repository(
+        self,
+        *,
+        role: str,
+        raw_input: str,
+        preferred_branch: str = "",
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        normalized_role = self._normalize_repository_role(role)
+        repository_input = raw_input.strip()
+        if not repository_input:
+            raise ValueError("仓库地址不能为空")
+
+        steps: list[dict[str, str]] = []
+
+        def mark(title: str, status: str = "success", detail: str = "") -> None:
+            steps.append({"title": title, "status": status, "detail": detail})
+            if progress_callback is not None:
+                progress_callback({"progress": min(95, len(steps) * 18), "steps": steps})
+
+        input_type = self._detect_repository_input_type(repository_input)
+        mark("已识别仓库地址", "success", "远程 Git 仓库" if input_type == "remote" else "服务器本地路径")
+
+        if input_type == "remote":
+            cache_dir = self._repository_cache_dir()
+            repos_dir = cache_dir / "repos"
+            repos_dir.mkdir(parents=True, exist_ok=True)
+            local_path = repos_dir / self._repository_cache_name(repository_input)
+            if local_path.exists():
+                mark("已找到本地缓存")
+                self._run_repository_command(["git", "-C", str(local_path), "fetch", "--all", "--prune"])
+                mark("已同步远程分支")
+            else:
+                mark("开始克隆远程仓库", "running", str(local_path))
+                self._run_repository_command(["git", "clone", repository_input, str(local_path)])
+                mark("仓库已克隆")
+            source_url = repository_input
+        else:
+            local_path = Path(repository_input).expanduser().resolve()
+            source_url = BackportGitClient.remote_url(local_path) if local_path.exists() else ""
+            mark("已解析本地路径", "success", str(local_path))
+
+        BackportGitClient.ensure_git_repo(local_path)
+        mark("已确认 Git 仓库")
+
+        repo_info = self._build_repository_info(
+            role=normalized_role,
+            repository_input=repository_input,
+            input_type=input_type,
+            local_path=local_path,
+            source_url=source_url,
+            selected_branch=preferred_branch.strip(),
+        )
+        self._remember_repository(repo_info)
+        mark("已读取分支与仓库状态")
+        return repo_info | {"steps": steps}
+
+    def refresh_repository(
+        self,
+        *,
+        role: str,
+        local_path: str,
+        source_url: str = "",
+        selected_branch: str = "",
+    ) -> dict[str, Any]:
+        normalized_role = self._normalize_repository_role(role)
+        repo_path = Path(local_path).expanduser().resolve()
+        BackportGitClient.ensure_git_repo(repo_path)
+        resolved_source_url = BackportGitClient.remote_url(repo_path) or source_url.strip()
+        repo_info = self._build_repository_info(
+            role=normalized_role,
+            repository_input=resolved_source_url or str(repo_path),
+            input_type="remote" if resolved_source_url else "local",
+            local_path=repo_path,
+            source_url=resolved_source_url,
+            selected_branch=selected_branch.strip(),
+        )
+        self._remember_repository(repo_info)
+        return repo_info
+
+    def list_recent_repositories(self) -> dict[str, Any]:
+        index_path = self._repository_index_path()
+        if not index_path.exists():
+            return {"repositories": []}
+        try:
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {"repositories": []}
+        repositories = payload.get("repositories")
+        if not isinstance(repositories, list):
+            return {"repositories": []}
+        return {"repositories": repositories[:20]}
 
     def get_runtime_status(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         config = self._extract_config({"config": payload}) if isinstance(payload, dict) else self.get_config()
@@ -1252,6 +1362,8 @@ class BackportService:
                 stripped = value.strip()
                 if stripped or key.startswith("current_"):
                     normalized[key] = stripped
+        if not str(normalized.get("patch_dataset_dir") or "").strip():
+            normalized["patch_dataset_dir"] = DEFAULT_PATCH_DATASET_DIR
         _normalize_cvekit_options(normalized)
         self._normalize_layout_fields(normalized, raw_config)
         return normalized
@@ -1531,7 +1643,182 @@ class BackportService:
 
     @staticmethod
     def _normalize_commit_message_source(value: str) -> str:
-        return value if value in {"auto", "openEuler", "upstream"} else "auto"
+        return value if value in {"auto", "openEuler", "upstream"} else "upstream"
+
+    @staticmethod
+    def _normalize_repository_role(role: str) -> str:
+        normalized = role.strip().lower()
+        if normalized not in {"source", "target"}:
+            raise ValueError("仓库角色必须是 source 或 target")
+        return normalized
+
+    @staticmethod
+    def _detect_repository_input_type(repository_input: str) -> str:
+        stripped = repository_input.strip()
+        parsed = urlparse(stripped)
+        if parsed.scheme in {"http", "https", "ssh", "git"}:
+            return "remote"
+        if re.match(r"^[^@\s]+@[^:\s]+:.+", stripped):
+            return "remote"
+        return "local"
+
+    @staticmethod
+    def _repository_cache_name(repository_input: str) -> str:
+        clean_input = repository_input.strip().removesuffix("/")
+        parsed = urlparse(clean_input)
+        if parsed.path:
+            raw_name = Path(parsed.path).name
+        elif ":" in clean_input:
+            raw_name = Path(clean_input.split(":", 1)[1]).name
+        else:
+            raw_name = Path(clean_input).name
+        name = raw_name.removesuffix(".git") or "repository"
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "repository"
+        digest = hashlib.sha1(clean_input.encode("utf-8")).hexdigest()[:12]
+        return f"{safe_name}-{digest}"
+
+    @staticmethod
+    def _run_repository_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or "命令执行失败"
+            raise RuntimeError(message)
+        return result
+
+    @staticmethod
+    def _git_dir(repo: Path) -> Path | None:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--git-dir"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        git_dir = Path(result.stdout.strip())
+        return git_dir if git_dir.is_absolute() else (repo / git_dir).resolve()
+
+    def _repository_cache_dir(self) -> Path:
+        raw_dir = os.environ.get(BACKPORT_REPOSITORY_CACHE_ENV, BACKPORT_REPOSITORY_CACHE_DIR)
+        return Path(raw_dir).expanduser().resolve()
+
+    def _repository_index_path(self) -> Path:
+        return self._repository_cache_dir() / "repositories.json"
+
+    def _build_repository_info(
+        self,
+        *,
+        role: str,
+        repository_input: str,
+        input_type: str,
+        local_path: Path,
+        source_url: str,
+        selected_branch: str,
+    ) -> dict[str, Any]:
+        head = BackportGitClient.head(local_path)
+        current_branch = BackportGitClient.current_branch(local_path)
+        default_branch = BackportGitClient.default_branch(local_path)
+        local_branches, remote_branches = BackportGitClient.branches(local_path)
+        available_branches = set(local_branches) | set(remote_branches)
+        resolved_branch = selected_branch or current_branch or default_branch
+        status_args = (
+            ["status", "--porcelain=v1", "-uall"]
+            if role == "target"
+            else ["status", "--porcelain=v1", "-uno"]
+        )
+        status_result = BackportGitClient._run_git(local_path, status_args)
+        status_clean = status_result.returncode == 0 and status_result.stdout.strip() == ""
+        git_dir = self._git_dir(local_path)
+        in_progress = False
+        if git_dir is not None:
+            in_progress = any(
+                (git_dir / item).exists()
+                for item in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD", "rebase-merge", "rebase-apply")
+            )
+        display_source = source_url or repository_input
+        display_name = self._repository_display_name(display_source, local_path)
+        writable = os.access(local_path, os.W_OK)
+        warnings: list[str] = []
+        if selected_branch and selected_branch not in available_branches:
+            fallback_branch = current_branch or default_branch or (local_branches[0] if local_branches else "")
+            if fallback_branch:
+                resolved_branch = fallback_branch
+            warnings.append(f"分支 {selected_branch} 不存在，已回退到 {resolved_branch or '默认 HEAD'}。")
+        if role == "target" and not status_clean:
+            warnings.append("目标仓库存在未提交修改，建议清理后再执行回移植。")
+        if role == "target" and in_progress:
+            warnings.append("目标仓库存在未完成的 merge/rebase/cherry-pick。")
+        if role == "target" and not writable:
+            warnings.append("目标仓库目录不可写。")
+        return {
+            "role": role,
+            "input": repository_input,
+            "input_type": input_type,
+            "display_name": display_name,
+            "source_url": source_url,
+            "local_path": str(local_path),
+            "default_branch": default_branch,
+            "selected_branch": resolved_branch,
+            "current_branch": current_branch,
+            "head": head,
+            "short_head": head[:12],
+            "local_branches": local_branches,
+            "remote_branches": remote_branches,
+            "status_clean": status_clean,
+            "operation_in_progress": in_progress,
+            "writable": writable,
+            "can_read": True,
+            "can_write": role != "target" or (writable and status_clean and not in_progress),
+            "warnings": warnings,
+            "cache_dir": str(self._repository_cache_dir()),
+            "updated_at": time.time(),
+        }
+
+    @staticmethod
+    def _repository_display_name(source: str, local_path: Path) -> str:
+        if source:
+            stripped = source.strip().removesuffix("/")
+            parsed = urlparse(stripped)
+            candidate = parsed.path if parsed.path else stripped.split(":", 1)[-1]
+            name = Path(candidate).name.removesuffix(".git")
+            if name:
+                parent = Path(candidate).parent.name
+                return f"{parent}/{name}" if parent and parent != "." else name
+        return local_path.name
+
+    def _remember_repository(self, repo_info: dict[str, Any]) -> None:
+        index_path = self._repository_index_path()
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        repositories: list[dict[str, Any]] = []
+        if index_path.exists():
+            try:
+                payload = json.loads(index_path.read_text(encoding="utf-8"))
+                raw_repositories = payload.get("repositories")
+                if isinstance(raw_repositories, list):
+                    repositories = [item for item in raw_repositories if isinstance(item, dict)]
+            except json.JSONDecodeError:
+                repositories = []
+        repo_key = repo_info.get("source_url") or repo_info.get("local_path")
+        next_repositories = [
+            item
+            for item in repositories
+            if (item.get("source_url") or item.get("local_path")) != repo_key
+            or item.get("role") != repo_info.get("role")
+        ]
+        next_repositories.insert(0, repo_info)
+        index_path.write_text(
+            json.dumps({"repositories": next_repositories[:30]}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _resolve_target_path(
         self,
