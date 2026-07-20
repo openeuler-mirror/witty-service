@@ -643,6 +643,72 @@ def test_agent_skill_git_with_repo_id_ok(session: Session) -> None:
     session.commit()
 
 
+def test_agent_skill_wittyhub_without_repo_id_ok(session: Session) -> None:
+    session.add(_new_agent())
+    session.commit()
+    session.add(
+        AgentSkillORM(
+            agent_id="agent-1",
+            skill_id="s-1",
+            source_type="wittyhub",
+            skill_name="remote-skill",
+        )
+    )
+    session.commit()
+
+
+def test_agent_skill_clawhub_with_repo_id_ok(session: Session) -> None:
+    session.add(_new_agent())
+    session.commit()
+    session.add(SkillRepositoryORM(repo_id="r-1", repo_name="r1", source_type="clawhub"))
+    session.commit()
+    session.add(
+        AgentSkillORM(
+            agent_id="agent-1",
+            skill_id="s-1",
+            source_type="clawhub",
+            repo_id="r-1",
+            skill_name="legacy-remote-skill",
+        )
+    )
+    session.commit()
+
+
+def test_agent_skill_wittyhub_with_repo_id_violates_check(session: Session) -> None:
+    session.add(_new_agent())
+    session.commit()
+    session.add(SkillRepositoryORM(repo_id="r-1", repo_name="r1", source_type="git"))
+    session.commit()
+    session.add(
+        AgentSkillORM(
+            agent_id="agent-1",
+            skill_id="s-1",
+            source_type="wittyhub",
+            repo_id="r-1",
+            skill_name="remote-skill",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+
+def test_agent_skill_clawhub_without_repo_id_violates_check(session: Session) -> None:
+    session.add(_new_agent())
+    session.commit()
+    session.add(
+        AgentSkillORM(
+            agent_id="agent-1",
+            skill_id="s-1",
+            source_type="clawhub",
+            skill_name="legacy-remote-skill",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+
 def test_agent_skill_invalid_source_type_violates_check(session: Session) -> None:
     session.add(_new_agent())
     session.commit()
