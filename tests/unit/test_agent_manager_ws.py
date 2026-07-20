@@ -7,9 +7,14 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
-from witty_service.application.agent_manager import AgentCreateRequest, AgentManager
+from witty_service.application.agent_manager import (
+    SKILL_INSTALL_TIMEOUT_SECONDS,
+    AgentCreateRequest,
+    AgentManager,
+)
 from witty_service.application.session_manager import SessionManager
 from witty_service.adapter.websocket_client_pool import AdaptorEndpoint, WebSocketClientPool
 from witty_service.adapter.websocket_protocol import InboundEvent, OutboundMessage
@@ -854,3 +859,106 @@ def test_get_adaptor_endpoint_converts_http_without_scheme():
 
     assert endpoint.base_url == "ws://adapter.local"
     assert endpoint.session_id == session.id
+
+
+@pytest.mark.asyncio
+async def test_uninstall_agent_skill_surfaces_runtime_reason() -> None:
+    manager, _, repository, _, _, _ = _make_ws_manager()
+    _bootstrap_running_agent_and_session(repository)
+
+    adaptor_client = AsyncMock()
+    request = httpx.Request(
+        "POST",
+        "http://adapter.local/agent/skills/uninstall?id=agent-1",
+    )
+    response = httpx.Response(
+        400,
+        json={
+            "code": "OPENCLAW_SKILL_NOT_REMOVABLE",
+            "message": "openclaw skill cannot be uninstalled",
+            "request_id": "req-uninstall-1",
+            "details": {"reason": "bundled skill cannot be uninstalled"},
+        },
+        request=request,
+    )
+    adaptor_client.post.side_effect = httpx.HTTPStatusError(
+        "bad request",
+        request=request,
+        response=response,
+    )
+    adaptor_client.close = AsyncMock()
+
+    with patch.object(manager, "_get_adaptor_http_client", return_value=adaptor_client):
+        with pytest.raises(DomainError) as exc_info:
+            await manager.uninstall_agent_skill(
+                "agent-1",
+                "healthcheck",
+                source_type="builtin",
+                source_path="/opt/openclaw/skills/healthcheck",
+                runtime_source="openclaw-bundled",
+            )
+
+    assert exc_info.value.code == "AGENT_SKILL_UNINSTALL_FAILED"
+    assert exc_info.value.details == {
+        "agent_id": "agent-1",
+        "skill_name": "healthcheck",
+        "error": "bundled skill cannot be uninstalled",
+        "upstream_status_code": 400,
+        "upstream_error_code": "OPENCLAW_SKILL_NOT_REMOVABLE",
+        "upstream_error_message": "openclaw skill cannot be uninstalled",
+        "upstream_request_id": "req-uninstall-1",
+        "upstream_error_details": {"reason": "bundled skill cannot be uninstalled"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_install_agent_skill_surfaces_runtime_reason() -> None:
+    manager, _, repository, _, _, _ = _make_ws_manager()
+    _bootstrap_running_agent_and_session(repository)
+
+    adaptor_client = AsyncMock()
+    request = httpx.Request(
+        "POST",
+        "http://adapter.local/agent/skills/install?id=agent-1",
+    )
+    response = httpx.Response(
+        500,
+        json={
+            "code": "OPENCLAW_SKILLS_INSTALL_FAILED",
+            "message": "openclaw skills install failed",
+            "request_id": "req-install-1",
+            "details": {"reason": "openclaw command not found"},
+        },
+        request=request,
+    )
+    adaptor_client.post.side_effect = httpx.HTTPStatusError(
+        "server error",
+        request=request,
+        response=response,
+    )
+    adaptor_client.close = AsyncMock()
+
+    with patch.object(manager, "_get_adaptor_http_client", return_value=adaptor_client):
+        with pytest.raises(DomainError) as exc_info:
+            await manager.install_agent_skill(
+                "agent-1",
+                "weather",
+                source_path="/tmp/weather",
+            )
+
+    assert exc_info.value.code == "AGENT_SKILL_INSTALL_FAILED"
+    assert exc_info.value.details == {
+        "agent_id": "agent-1",
+        "skill_name": "weather",
+        "error": "openclaw command not found",
+        "upstream_status_code": 500,
+        "upstream_error_code": "OPENCLAW_SKILLS_INSTALL_FAILED",
+        "upstream_error_message": "openclaw skills install failed",
+        "upstream_request_id": "req-install-1",
+        "upstream_error_details": {"reason": "openclaw command not found"},
+    }
+    adaptor_client.post.assert_awaited_once_with(
+        "/agent/skills/install?id=agent-1",
+        json={"skill_name": "weather", "source_path": "/tmp/weather"},
+        timeout=SKILL_INSTALL_TIMEOUT_SECONDS,
+    )

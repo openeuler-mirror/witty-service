@@ -35,6 +35,7 @@ def test_handle_runtime_event_forwards_runtime_identity_change() -> None:
         session_service=DummySessionService(),
         agent_service=DummyAgentService(),
         identity_store=identity_store,
+        runtime_type="openclaw",
     )
     identity = identity_store.bind(
         agent_id="agent-1",
