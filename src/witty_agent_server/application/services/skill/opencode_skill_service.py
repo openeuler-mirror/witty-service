@@ -68,6 +68,11 @@ class OpenCodeSkillService(AgentSkillServiceBase):
 
         return result
 
+    @staticmethod
+    def _to_kebab_case(name: str) -> str:
+        """将名称转换为 kebab-case 格式，用于匹配 wittyhub 自动规范化的目录名。"""
+        return re.sub(r"[\s_]+", "-", name).lower()
+
     @classmethod
     def _validate_path_under_skills_dir(
         cls,
@@ -307,17 +312,25 @@ class OpenCodeSkillService(AgentSkillServiceBase):
             )
 
             # 验证 wittyhub 安装到了 .agents/skills/<normalized_name>/
-            installed_dir = self._get_skills_dir(agent_id) / normalized_name
+            skills_dir = self._get_skills_dir(agent_id)
+            installed_dir = skills_dir / normalized_name
             skill_md = installed_dir / "SKILL.md"
             if not skill_md.is_file():
-                raise OpenCodeSkillsInstallError(
-                    runtime_type=self.runtime_type,
-                    skill_name=normalized_name,
-                    reason=(
-                        f"skill not found after wittyhub add at {installed_dir}; "
-                        "expected .agents/skills/<name>/SKILL.md"
-                    ),
-                )
+                kebab_name = self._to_kebab_case(normalized_name)
+                kebab_dir = skills_dir / kebab_name
+                kebab_skill_md = kebab_dir / "SKILL.md"
+                if kebab_skill_md.is_file():
+                    installed_dir = kebab_dir
+                    skill_md = kebab_skill_md
+                else:
+                    raise OpenCodeSkillsInstallError(
+                        runtime_type=self.runtime_type,
+                        skill_name=normalized_name,
+                        reason=(
+                            f"skill not found after wittyhub add at {installed_dir}; "
+                            "expected .agents/skills/<name>/SKILL.md"
+                        ),
+                    )
 
             return {
                 "runtime_type": self.runtime_type,
