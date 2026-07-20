@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from witty_service.api import backport as backport_api
-from witty_service.api.backport_schemas import BackportConfigPayload, BackportRunRequest
+from witty_service.api.backport_schemas import BackportConfigPayload, BackportRunRequest, TargetConfigLayoutOpts
 
 
 class State:
@@ -40,6 +40,8 @@ def _service() -> MagicMock:
         "current_report_path": "/tmp/report.md",
         "current_filtered_report_path": "/tmp/filtered.md",
         "commit_sort": "describe",
+        "target_config_layout": "none",
+        "target_config_layout_opts": {"default_level": "L1-RECOMMEND"},
     }
     service.browse_path.return_value = {"path": "/tmp", "items": []}
     service.run_action.return_value = {
@@ -153,6 +155,147 @@ def test_get_run_raises_when_missing() -> None:
         backport_api.get_run("missing", request=request)
 
     assert exc_info.value.status_code == 404
+
+
+# ── target_config_layout / target_config_layout_opts Schema 测试 ──
+
+
+class TestTargetConfigLayoutSchema:
+    def test_default_values(self) -> None:
+        """默认值：layout=none, opts.default_level=L1-RECOMMEND"""
+        payload = BackportConfigPayload()
+        assert payload.target_config_layout == "none"
+        assert payload.target_config_layout_opts.default_level == "L1-RECOMMEND"
+
+    def test_anolis_with_l2_optional_accepted(self) -> None:
+        """合法组合 anolis + L2-OPTIONAL 被接受"""
+        payload = BackportConfigPayload(
+            target_config_layout="anolis",
+            target_config_layout_opts={"default_level": "L2-OPTIONAL"},
+        )
+        assert payload.target_config_layout == "anolis"
+        assert payload.target_config_layout_opts.default_level == "L2-OPTIONAL"
+
+    def test_invalid_layout_rejected(self) -> None:
+        """非法 layout 值被 Pydantic 拒绝"""
+        import pydantic
+        with pytest.raises(pydantic.ValidationError):
+            BackportConfigPayload(target_config_layout="invalid")
+
+    def test_invalid_default_level_rejected(self) -> None:
+        """非法 default_level 值被 Pydantic 拒绝"""
+        import pydantic
+        with pytest.raises(pydantic.ValidationError):
+            BackportConfigPayload(
+                target_config_layout_opts={"default_level": "INVALID"},
+            )
+
+    def test_target_config_layout_opts_default_factory(self) -> None:
+        """default_factory 创建独立实例"""
+        opts = TargetConfigLayoutOpts()
+        assert opts.default_level == "L1-RECOMMEND"
+
+    def test_target_config_layout_opts_all_valid_levels(self) -> None:
+        """三个合法 default_level 值都被接受"""
+        for level in ("L0-MANDATORY", "L1-RECOMMEND", "L2-OPTIONAL"):
+            opts = TargetConfigLayoutOpts(default_level=level)
+            assert opts.default_level == level
+
+    def test_config_roundtrip_preserves_layout_fields(self) -> None:
+        """GET/PUT 往返后 layout 字段保持不变"""
+        payload = BackportConfigPayload(
+            target_config_layout="anolis",
+            target_config_layout_opts={"default_level": "L2-OPTIONAL"},
+        )
+        dumped = payload.model_dump()
+        assert dumped["target_config_layout"] == "anolis"
+        assert dumped["target_config_layout_opts"] == {"default_level": "L2-OPTIONAL"}
+
+        # 模拟从 JSON 重新加载
+        reloaded = BackportConfigPayload(**dumped)
+        assert reloaded.target_config_layout == "anolis"
+        assert reloaded.target_config_layout_opts.default_level == "L2-OPTIONAL"
+
+    def test_old_config_missing_fields_gets_defaults(self) -> None:
+        """旧配置缺少新字段时自动补齐默认值"""
+        # 模拟旧版 config JSON（没有 target_config_layout 和 target_config_layout_opts）
+        old_payload = {
+            "project_url": "https://example.com",
+            "target_path": "/tmp/target",
+        }
+        payload = BackportConfigPayload(**old_payload)
+        assert payload.target_config_layout == "none"
+        assert payload.target_config_layout_opts.default_level == "L1-RECOMMEND"
+
+    def test_target_config_layout_opts_rejects_extra_fields(self) -> None:
+        """extra 字段被 Pydantic 拒绝"""
+        import pydantic
+        with pytest.raises(pydantic.ValidationError):
+            TargetConfigLayoutOpts(
+                default_level="L1-RECOMMEND",
+                unexpected_field="should_be_rejected",
+            )
+
+
+class TestNormalizeLayoutFields:
+    """Service _normalize_layout_fields 对各种非法 runtime payload 的归一化"""
+
+    def test_invalid_string_layout_resets_to_none(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        source = {"target_config_layout": "bad_value"}
+        BackportService._normalize_layout_fields(config, source)
+        assert config["target_config_layout"] == "none"
+        assert config["target_config_layout_opts"] == {"default_level": "L1-RECOMMEND"}
+
+    def test_non_string_layout_resets_to_none(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        source = {"target_config_layout": 123}
+        BackportService._normalize_layout_fields(config, source)
+        assert config["target_config_layout"] == "none"
+        assert config["target_config_layout_opts"] == {"default_level": "L1-RECOMMEND"}
+
+    def test_non_dict_opts_resets_both(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        source = {"target_config_layout_opts": "bad_opts"}
+        BackportService._normalize_layout_fields(config, source)
+        assert config["target_config_layout"] == "none"
+        assert config["target_config_layout_opts"] == {"default_level": "L1-RECOMMEND"}
+
+    def test_invalid_opts_validation_resets_both(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        source = {"target_config_layout_opts": {"default_level": "INVALID"}}
+        BackportService._normalize_layout_fields(config, source)
+        assert config["target_config_layout"] == "none"
+        assert config["target_config_layout_opts"] == {"default_level": "L1-RECOMMEND"}
+
+    def test_extra_opts_fields_stripped(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        source = {"target_config_layout_opts": {"default_level": "L0-MANDATORY", "extra": "bad"}}
+        BackportService._normalize_layout_fields(config, source)
+        # Pydantic raises on extra fields, so opts resets to default and layout resets to none
+        assert config["target_config_layout_opts"] == {"default_level": "L1-RECOMMEND"}
+        assert config["target_config_layout"] == "none"
+
+    def test_valid_values_preserved(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "none", "target_config_layout_opts": {"default_level": "L1-RECOMMEND"}}
+        source = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        BackportService._normalize_layout_fields(config, source)
+        assert config["target_config_layout"] == "anolis"
+        assert config["target_config_layout_opts"] == {"default_level": "L2-OPTIONAL"}
+
+    def test_key_not_in_source_preserves_existing(self) -> None:
+        from witty_service.application.backport_service import BackportService
+        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+        source: dict = {}
+        BackportService._normalize_layout_fields(config, source)
+        assert config["target_config_layout"] == "anolis"
+        assert config["target_config_layout_opts"] == {"default_level": "L2-OPTIONAL"}
 
 
 def test_pause_run_sets_pause_requested() -> None:

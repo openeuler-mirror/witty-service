@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from witty_service.api.backport_schemas import TargetConfigLayoutOpts
 from witty_service.api.services import ServiceContainer
 from witty_service.application.backport_cvekit_client import (
     BackportCvekitClient,
@@ -45,6 +46,8 @@ def _default_config() -> dict[str, Any]:
         "current_excel_path": "",
         "current_report_path": "",
         "current_filtered_report_path": "",
+        "target_config_layout": "none",
+        "target_config_layout_opts": {"default_level": "L1-RECOMMEND"},
         "enable_conflict_summary": False,
         "cvekit_options": {},
     }
@@ -96,6 +99,8 @@ class BackportService:
         config = _default_config()
         for key in config:
             value = loaded.get(key, "")
+            if key in ("target_config_layout", "target_config_layout_opts"):
+                continue  # handled by _normalize_layout_fields below
             default_value = config[key]
             if isinstance(default_value, bool):
                 config[key] = value if isinstance(value, bool) else False
@@ -103,6 +108,7 @@ class BackportService:
                 config[key] = value if isinstance(value, dict) else {}
             else:
                 config[key] = value if isinstance(value, str) else ""
+        self._normalize_layout_fields(config, loaded)
         config["commit_message_source"] = self._normalize_commit_message_source(
             config.get("commit_message_source", "")
         )
@@ -119,6 +125,8 @@ class BackportService:
     def update_config(self, payload: dict[str, Any]) -> None:
         config = _default_config()
         for key in config:
+            if key in ("target_config_layout", "target_config_layout_opts"):
+                continue
             value = payload.get(key, "")
             default_value = config[key]
             if isinstance(default_value, bool):
@@ -127,6 +135,7 @@ class BackportService:
                 config[key] = value if isinstance(value, dict) else {}
             else:
                 config[key] = value.strip() if isinstance(value, str) else ""
+        self._normalize_layout_fields(config, payload)
         config["commit_message_source"] = self._normalize_commit_message_source(
             config.get("commit_message_source", "")
         )
@@ -438,14 +447,7 @@ class BackportService:
                 "processed_count": processed_count,
             }
 
-            if (
-                self._is_skipped_commit(row)
-                or row.get("merged_in_target") is True
-                or row.get("empty_patch") is True
-                or row.get("equivalent_exists") is True
-                or str(row.get("applied_commit") or "").strip()
-                or row_status in {"failed", "error"}
-            ):
+            if self._is_terminal_nonblocking_row(row):
                 if row_status in {"failed", "error"}:
                     failed_count += 1
                 processed_count += 1
@@ -476,6 +478,7 @@ class BackportService:
                 )
                 checked = self._run_check_row(
                     {
+                        "config": config,
                         "base_report_path": current_report_path,
                         "working_report_path": current_report_path,
                         "row": row,
@@ -570,14 +573,7 @@ class BackportService:
                 current_commits = self._resolve_result_commits(loaded)
                 row = current_commits[index]
                 row_status = str(row.get("status") or "").strip().lower()
-                if (
-                    self._is_skipped_commit(row)
-                    or row.get("merged_in_target") is True
-                    or row.get("empty_patch") is True
-                    or row.get("equivalent_exists") is True
-                    or str(row.get("applied_commit") or "").strip()
-                    or row_status in {"failed", "error"}
-                ):
+                if self._is_terminal_nonblocking_row(row):
                     if row_status in {"failed", "error"}:
                         failed_count += 1
                     processed_count += 1
@@ -622,6 +618,7 @@ class BackportService:
                 )
                 checked = self._run_check_row(
                     {
+                        "config": config,
                         "base_report_path": current_report_path,
                         "working_report_path": current_report_path,
                         "row": applied_rows[0] if applied_rows else row,
@@ -743,6 +740,8 @@ class BackportService:
                 commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 commit_sort=config["commit_sort"],
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
             )
         except (RuntimeError, FileNotFoundError, NotADirectoryError, ValueError) as error:
             logger.exception("generate_report failed")
@@ -783,7 +782,11 @@ class BackportService:
                 details={"action": "continue_report", "keys": ["base_report_path", "baseReportPath"]},
             )
         try:
-            return self._cvekit_client.continue_report(base_report_path=base_report_path)
+            return self._cvekit_client.continue_report(
+                base_report_path=base_report_path,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
+            )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("continue_report failed")
             return {
@@ -815,6 +818,8 @@ class BackportService:
                 base_report_path=base_report_path,
                 working_report_path=working_report_path,
                 row=row,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("recheck_conflict failed")
@@ -897,6 +902,8 @@ class BackportService:
                 commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
                 cvekit_options=config["cvekit_options"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
@@ -935,6 +942,8 @@ class BackportService:
                 signer_email=config["signer_email"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("apply_row failed")
@@ -950,6 +959,7 @@ class BackportService:
             }
 
     def _run_check_row(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = self._extract_config(payload)
         base_report_path = self._require_string(payload, "check_row", "base_report_path", "baseReportPath")
         working_report_path = self._get_string(
             payload,
@@ -970,6 +980,8 @@ class BackportService:
                 base_report_path=base_report_path,
                 working_report_path=working_report_path,
                 row=row,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("check_row failed")
@@ -1025,6 +1037,8 @@ class BackportService:
                 commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
                 cvekit_options=config["cvekit_options"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
@@ -1071,6 +1085,8 @@ class BackportService:
                 commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
+                target_config_layout=config["target_config_layout"],
+                target_config_layout_opts=config["target_config_layout_opts"],
             )
         except (RuntimeError, FileNotFoundError, ValueError) as error:
             logger.exception("preview_commit_message failed")
@@ -1162,6 +1178,58 @@ class BackportService:
 
     # ── 辅助方法 ──────────────────────────────────────────────
 
+    @staticmethod
+    def _normalize_layout_fields(config: dict[str, Any], source: dict[str, Any]) -> None:
+        """校验并合并 source 中的 layout 字段到 config。
+
+        layout/opts 成对处理：
+        - layout 显式非法 → none + 默认 opts
+        - layout 显式 anolis → 保留；opts 合法合并，缺失/非法用默认
+        - layout 缺失 + opts 非法 → 重置两者
+        """
+        layout_in_source = "target_config_layout" in source
+        opts_in_source = "target_config_layout_opts" in source
+
+        # 预校验 opts（如果存在）
+        opts_valid = False
+        validated_opts: dict[str, Any] | None = None
+        if opts_in_source:
+            raw_opts = source["target_config_layout_opts"]
+            if isinstance(raw_opts, dict):
+                try:
+                    validated_opts = TargetConfigLayoutOpts(**raw_opts).model_dump()
+                    opts_valid = True
+                except Exception:
+                    pass
+
+        # Step 1: 处理 layout
+        if layout_in_source:
+            raw_layout = source["target_config_layout"]
+            if isinstance(raw_layout, str) and raw_layout.strip() in {"none", "anolis"}:
+                config["target_config_layout"] = raw_layout.strip()
+            else:
+                # 显式非法 → 重置
+                config["target_config_layout"] = "none"
+                config["target_config_layout_opts"] = {"default_level": "L1-RECOMMEND"}
+                return
+        elif opts_in_source and not opts_valid:
+            # layout 缺失 + opts 非法 → 重置两者
+            config["target_config_layout"] = "none"
+            config["target_config_layout_opts"] = {"default_level": "L1-RECOMMEND"}
+            return
+
+        effective_layout = config["target_config_layout"]
+
+        # Step 2: 处理 opts (runtime payload 完全替换 persisted opts)
+        if opts_in_source and opts_valid:
+            config["target_config_layout_opts"] = validated_opts
+        elif opts_in_source and not opts_valid:
+            # 非法 opts → 默认（但保留 layout）
+            config["target_config_layout_opts"] = {"default_level": "L1-RECOMMEND"}
+        elif effective_layout != "none" and layout_in_source:
+            # layout 显式设为非 none，但没传 opts → 默认
+            config["target_config_layout_opts"] = {"default_level": "L1-RECOMMEND"}
+
     def _extract_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         raw_config = payload.get("config")
         normalized = self.get_config()
@@ -1169,6 +1237,8 @@ class BackportService:
             return normalized
 
         for key in _default_config():
+            if key in ("target_config_layout", "target_config_layout_opts"):
+                continue
             value = raw_config.get(key)
             if isinstance(normalized.get(key), bool):
                 if isinstance(value, bool):
@@ -1183,6 +1253,7 @@ class BackportService:
                 if stripped or key.startswith("current_"):
                     normalized[key] = stripped
         _normalize_cvekit_options(normalized)
+        self._normalize_layout_fields(normalized, raw_config)
         return normalized
 
     def _resolve_cvekit_runtime_config(self, config: dict[str, Any]) -> BackportRuntimeConfig:
@@ -1265,7 +1336,7 @@ class BackportService:
         if not isinstance(artifacts, dict):
             artifacts = {}
 
-        config = self.get_config()
+        config = self._extract_config(payload)
         if action in {"generate_report", "run_all"}:
             config["current_excel_path"] = self._get_string(payload, "excel_path", "excelPath")
             if action == "generate_report":
@@ -1376,6 +1447,19 @@ class BackportService:
         return status == "skipped" or merged == "skipped" or item.get("is_merge_commit") is True
 
     @classmethod
+    def _is_terminal_nonblocking_row(cls, row: dict[str, Any]) -> bool:
+        """行是否已完成且非阻塞冲突：已合入/空 patch/已应用/等价存在/失败。"""
+        status = str(row.get("status") or "").strip().lower()
+        return (
+            cls._is_skipped_commit(row)
+            or row.get("merged_in_target") is True
+            or row.get("empty_patch") is True
+            or row.get("equivalent_exists") is True
+            or bool(str(row.get("applied_commit") or "").strip())
+            or status in {"failed", "error"}
+        )
+
+    @classmethod
     def _find_blocking_conflict(cls, commits: list[dict[str, Any]]) -> dict[str, Any] | None:
         return next(
             (
@@ -1452,7 +1536,7 @@ class BackportService:
     def _resolve_target_path(
         self,
         payload: dict[str, Any],
-        config: dict[str, str],
+        config: dict[str, Any],
         *,
         operation: str,
     ) -> str:

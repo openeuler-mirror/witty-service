@@ -185,7 +185,7 @@ def test_is_skipped_row(row: dict, expected: bool) -> None:
 
 
 def test_is_blocking_conflict_distinguishes_skipped() -> None:
-    assert BackportCvekitClient._is_blocking_conflict({"has_conflict": True, "status": "failed"}) is True
+    assert BackportCvekitClient._is_blocking_conflict({"has_conflict": True, "status": "failed"}) is False
     assert BackportCvekitClient._is_blocking_conflict({"has_conflict": True, "status": "skipped"}) is False
     assert BackportCvekitClient._is_blocking_conflict({"has_conflict": False}) is False
 
@@ -497,7 +497,7 @@ def test_generate_report_excel_missing(client: BackportCvekitClient) -> None:
 
 def test_continue_report_blocking_short_circuit(client: BackportCvekitClient, tmp_path: Path) -> None:
     base = tmp_path / "b.yml"
-    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "failed"}])
+    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "pending"}])
     out = client.continue_report(base_report_path=str(base))
     assert out["status"] == "failed" and "阻塞冲突" in out["summary"]
 
@@ -544,7 +544,7 @@ def test_recheck_conflict_no_blocking_or_wrong_row(
     assert client.recheck_conflict(base_report_path=str(base), row={"row_id": "1"})["status"] == "failed"
 
     work = tmp_path / "w.yml"
-    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "failed"}])
+    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "pending"}])
     _write_report(work, commits=[{"row_id": "999", "v": "x"}])
     monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", lambda *a, **kw: None)
     out = client.recheck_conflict(base_report_path=str(base), row={"row_id": "999"}, working_report_path=str(work))
@@ -555,7 +555,7 @@ def test_recheck_conflict_success(
     client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base = tmp_path / "b.yml"
-    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "failed"}])
+    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "pending"}])
 
     def fake_run(self, args, cwd):
         cfg = next(a for a in args if a.endswith(".report.yml"))
@@ -645,7 +645,7 @@ def test_try_resolve_no_blocking_or_wrong_row(
     assert out["status"] == "failed" and "没有可处理" in out["summary"]
 
     work = tmp_path / "w.yml"
-    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "failed"}])
+    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "pending"}])
     _write_report(work, commits=[{"row_id": "999", "patch_path": "/p"}])
     monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", lambda *a, **kw: None)
     out = client.try_resolve(
@@ -660,7 +660,7 @@ def test_try_resolve_with_blocking(
     client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base = tmp_path / "b.yml"
-    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "failed", "patch_path": "/p"}])
+    _write_report(base, commits=[{"row_id": "1", "has_conflict": True, "status": "pending", "patch_path": "/p"}])
 
     def fake_run(self, args, cwd):
         cfg = next(a for a in args if a.endswith(".yml"))
@@ -795,3 +795,307 @@ def test_override_commit_message_config_updates(tmp_path: Path) -> None:
     data = yaml.safe_load(p.read_text(encoding="utf-8"))
     assert data["commit_message_template"] == "tpl {{x}}" and data["commit_message_source"] == "upstream"
     assert data["signer_name"] == "n" and data["signer_email"] == "e" and data["linux_repo_path"] == "/lr"
+
+
+# ── target_config_layout / target_config_layout_opts 测试 ──
+
+
+class TestTargetConfigLayoutYaml:
+    def test_generate_report_writes_layout_to_base_config(
+        self, client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """generate_report 在 base_config YAML 中写入 layout 字段"""
+        excel = tmp_path / "in.xlsx"
+        excel.write_text("x")
+        target = _git_repo(tmp_path / "repo")
+        monkeypatch.setattr(
+            "witty_service.application.backport_cvekit_client.BackportGitClient.ensure_git_repo",
+            staticmethod(lambda p: None),
+        )
+        monkeypatch.setattr(
+            "witty_service.application.backport_cvekit_client.BackportGitClient.get_repo_state",
+            staticmethod(lambda p: {
+                "target_path": str(target), "target_branch": "main",
+                "target_head": "h", "target_status_clean": True,
+            }),
+        )
+        monkeypatch.setattr(
+            "witty_service.application.backport_cvekit_client.BackportGitClient.collect_subject_map",
+            staticmethod(lambda p: {}),
+        )
+
+        captured_base_config: dict[str, Any] = {}
+
+        def fake_run(self, args, cwd):
+            # 捕获 base_config 写入
+            base_cfg_path = cwd / "backport.base.yml"
+            if base_cfg_path.exists():
+                captured_base_config.update(
+                    yaml.safe_load(base_cfg_path.read_text(encoding="utf-8")) or {}
+                )
+            if "--stop-at-first-conflict" in args:
+                for a in args:
+                    if a.endswith("backport-batch.yml"):
+                        Path(a + ".report.yml").write_text(
+                            yaml.safe_dump({"commits": [{"row_id": "1", "v": "ok"}]}),
+                            encoding="utf-8",
+                        )
+                        break
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+        client.generate_report(
+            excel_path=str(excel), project_url="u", project_dir="d", source_branch="s",
+            target_path=str(target), target_release="r", patch_dataset_dir="pd",
+            signer_name="n", signer_email="e", commit_message_template="",
+            commit_message_source="auto", linux_repo_path="lr",
+            target_config_layout="anolis",
+            target_config_layout_opts={"default_level": "L2-OPTIONAL"},
+        )
+        assert captured_base_config.get("target_config_layout") == "anolis"
+        assert captured_base_config.get("target_config_layout_opts") == {"default_level": "L2-OPTIONAL"}
+
+    def test_generate_report_layout_none_omits_fields(
+        self, client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """layout=none 时 base_config YAML 不含 layout 字段"""
+        excel = tmp_path / "in.xlsx"
+        excel.write_text("x")
+        target = _git_repo(tmp_path / "repo")
+        monkeypatch.setattr(
+            "witty_service.application.backport_cvekit_client.BackportGitClient.ensure_git_repo",
+            staticmethod(lambda p: None),
+        )
+        monkeypatch.setattr(
+            "witty_service.application.backport_cvekit_client.BackportGitClient.get_repo_state",
+            staticmethod(lambda p: {
+                "target_path": str(target), "target_branch": "main",
+                "target_head": "h", "target_status_clean": True,
+            }),
+        )
+        monkeypatch.setattr(
+            "witty_service.application.backport_cvekit_client.BackportGitClient.collect_subject_map",
+            staticmethod(lambda p: {}),
+        )
+
+        captured_base_config: dict[str, Any] = {}
+
+        def fake_run(self, args, cwd):
+            base_cfg_path = cwd / "backport.base.yml"
+            if base_cfg_path.exists():
+                captured_base_config.update(
+                    yaml.safe_load(base_cfg_path.read_text(encoding="utf-8")) or {}
+                )
+            if "--stop-at-first-conflict" in args:
+                for a in args:
+                    if a.endswith("backport-batch.yml"):
+                        Path(a + ".report.yml").write_text(
+                            yaml.safe_dump({"commits": [{"row_id": "1", "v": "ok"}]}),
+                            encoding="utf-8",
+                        )
+                        break
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+        client.generate_report(
+            excel_path=str(excel), project_url="u", project_dir="d", source_branch="s",
+            target_path=str(target), target_release="r", patch_dataset_dir="pd",
+            signer_name="n", signer_email="e", commit_message_template="",
+            commit_message_source="auto", linux_repo_path="lr",
+            target_config_layout="none",
+            target_config_layout_opts={"default_level": "L1-RECOMMEND"},
+        )
+        assert "target_config_layout" not in captured_base_config
+        assert "target_config_layout_opts" not in captured_base_config
+
+    def test_execute_selected_writes_layout_to_filtered_config(
+        self, client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """execute_selected 在 filtered config YAML 中写入 layout 字段"""
+        base = tmp_path / "b.yml"
+        _write_report(base, commits=[{"row_id": "1", "status": "pending", "patch_path": "/p"}])
+
+        captured_config: dict[str, Any] = {}
+
+        def fake_run(self, args, cwd):
+            for a in args:
+                if a.endswith(".yml") and "filtered" in a:
+                    captured_config.update(
+                        yaml.safe_load(Path(a).read_text(encoding="utf-8")) or {}
+                    )
+            cfg = next(a for a in args if a.endswith(".yml"))
+            Path(cfg).write_text(
+                yaml.safe_dump({"commits": [{"row_id": "1", "status": "success"}]}),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+        client.execute_selected(
+            base_report_path=str(base), selected_commits=[{"row_id": "1"}],
+            target_path="/t", patch_dataset_dir="pd", signer_name="n", signer_email="e",
+            commit_message_template="tpl", commit_message_source="openEuler", linux_repo_path="lr",
+            target_config_layout="anolis",
+            target_config_layout_opts={"default_level": "L0-MANDATORY"},
+        )
+        assert captured_config.get("target_config_layout") == "anolis"
+        assert captured_config.get("target_config_layout_opts") == {"default_level": "L0-MANDATORY"}
+
+    def test_execute_selected_layout_none_omits_fields(
+        self, client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """execute_selected layout=none 时 filtered config 不含 layout 字段"""
+        base = tmp_path / "b.yml"
+        _write_report(base, commits=[{"row_id": "1", "status": "pending", "patch_path": "/p"}])
+
+        captured_config: dict[str, Any] = {}
+
+        def fake_run(self, args, cwd):
+            for a in args:
+                if a.endswith(".yml") and "filtered" in a:
+                    captured_config.update(
+                        yaml.safe_load(Path(a).read_text(encoding="utf-8")) or {}
+                    )
+            cfg = next(a for a in args if a.endswith(".yml"))
+            Path(cfg).write_text(
+                yaml.safe_dump({"commits": [{"row_id": "1", "status": "success"}]}),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+        client.execute_selected(
+            base_report_path=str(base), selected_commits=[{"row_id": "1"}],
+            target_path="/t", patch_dataset_dir="pd", signer_name="n", signer_email="e",
+            commit_message_template="tpl", commit_message_source="openEuler", linux_repo_path="lr",
+            target_config_layout="none",
+            target_config_layout_opts=None,
+        )
+        assert "target_config_layout" not in captured_config
+        assert "target_config_layout_opts" not in captured_config
+
+    def test_execute_selected_strips_old_layout_when_current_is_none(
+        self, client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """原 report 有 layout，当前传 none 时 filtered config 不含 layout 字段"""
+        base = tmp_path / "b.yml"
+        _write_report(
+            base,
+            commits=[{"row_id": "1", "status": "pending", "patch_path": "/p"}],
+            target_config_layout="anolis",
+            target_config_layout_opts={"default_level": "L2-OPTIONAL"},
+        )
+
+        captured_config: dict[str, Any] = {}
+
+        def fake_run(self, args, cwd):
+            for a in args:
+                if a.endswith(".yml") and "filtered" in a:
+                    captured_config.update(
+                        yaml.safe_load(Path(a).read_text(encoding="utf-8")) or {}
+                    )
+            cfg = next(a for a in args if a.endswith(".yml"))
+            Path(cfg).write_text(
+                yaml.safe_dump({"commits": [{"row_id": "1", "status": "success"}]}),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+        client.execute_selected(
+            base_report_path=str(base), selected_commits=[{"row_id": "1"}],
+            target_path="/t", patch_dataset_dir="pd", signer_name="n", signer_email="e",
+            commit_message_template="tpl", commit_message_source="openEuler", linux_repo_path="lr",
+            target_config_layout="none",
+            target_config_layout_opts=None,
+        )
+        assert "target_config_layout" not in captured_config
+        assert "target_config_layout_opts" not in captured_config
+
+    def test_continue_report_writes_layout_to_config(
+        self, client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """continue_report 写入当前 layout 到 CVEKit YAML"""
+        base = tmp_path / "b.yml"
+        _write_report(
+            base,
+            commits=[
+                {"row_id": "1", "status": "success"},
+                {"row_id": "2", "status": "pending"},
+            ],
+            target_config_layout="none",
+        )
+
+        captured_config: dict[str, Any] = {}
+
+        def fake_run(self, args, cwd):
+            for a in args:
+                if a.endswith(".report.yml"):
+                    captured_config.update(
+                        yaml.safe_load(Path(a).read_text(encoding="utf-8")) or {}
+                    )
+            cfg = next(a for a in args if a.endswith(".report.yml"))
+            Path(cfg).write_text(
+                yaml.safe_dump({"commits": [
+                    {"row_id": "1", "status": "success"},
+                    {"row_id": "2", "status": "success"},
+                ]}),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+        client.continue_report(
+            base_report_path=str(base),
+            target_config_layout="anolis",
+            target_config_layout_opts={"default_level": "L0-MANDATORY"},
+        )
+        assert captured_config.get("target_config_layout") == "anolis"
+        assert captured_config.get("target_config_layout_opts") == {"default_level": "L0-MANDATORY"}
+
+    def test_preview_commit_message_sanitizes_layout_and_uses_report_suffix(
+        self, client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """preview 传 .report.yml 配置，layout=none 清掉旧 layout"""
+        base = tmp_path / "b.yml"
+        _write_report(
+            base,
+            commits=[{"row_id": "1", "status": "pending", "patch_path": "/p"}],
+            target_config_layout="anolis",
+            target_config_layout_opts={"default_level": "L2-OPTIONAL"},
+        )
+
+        captured_config_path: str = ""
+        captured_config: dict[str, Any] = {}
+
+        def fake_run(self, args, cwd):
+            nonlocal captured_config_path
+            for i, a in enumerate(args):
+                if a == "--backport-config" and i + 1 < len(args):
+                    captured_config_path = args[i + 1]
+            if captured_config_path:
+                captured_config.update(
+                    yaml.safe_load(Path(captured_config_path).read_text(encoding="utf-8")) or {}
+                )
+            return subprocess.CompletedProcess(
+                args=args, returncode=0,
+                stdout=json.dumps({"status": "success", "commit_message": "fix: test"}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+        client.preview_commit_message(
+            base_report_path=str(base),
+            row={"row_id": "1"},
+            commit_message_template="tpl",
+            commit_message_source="auto",
+            linux_repo_path="lr",
+            target_config_layout="none",
+            target_config_layout_opts=None,
+        )
+        # 验证传给 CVEKit 的配置文件以 .report.yml 结尾
+        assert captured_config_path.endswith(".report.yml"), \
+            f"preview config should end with .report.yml, got: {captured_config_path}"
+        # layout=none 时旧 layout 被清掉
+        assert "target_config_layout" not in captured_config
+        assert "target_config_layout_opts" not in captured_config

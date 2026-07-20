@@ -410,9 +410,24 @@ class BackportCvekitClient:
         return str(row.get("status") or "").strip().lower() == "pending"
 
     @staticmethod
-    def _write_report_config(path: Path, report_data: dict[str, Any], commits: list[dict[str, Any]]) -> None:
+    def _write_report_config(
+        path: Path,
+        report_data: dict[str, Any],
+        commits: list[dict[str, Any]],
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
+    ) -> None:
         config_data = {key: value for key, value in report_data.items() if key != "commits"}
         config_data.pop("api_key", None)
+        config_data.pop("target_config_layout", None)
+        config_data.pop("target_config_layout_opts", None)
+        target_config_layout, target_config_layout_opts = BackportCvekitClient._normalize_layout_fields(
+            target_config_layout, target_config_layout_opts
+        )
+        if target_config_layout and target_config_layout != "none":
+            config_data["target_config_layout"] = target_config_layout
+            if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
+                config_data["target_config_layout_opts"] = target_config_layout_opts
         config_data["commits"] = commits
         with path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config_data, handle, allow_unicode=True, sort_keys=False)
@@ -423,6 +438,8 @@ class BackportCvekitClient:
         report_data: dict[str, Any],
         commits: list[dict[str, Any]],
         run_prefix: str,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
         self._runs_root.mkdir(parents=True, exist_ok=True)
         run_dir = Path(
@@ -432,7 +449,13 @@ class BackportCvekitClient:
             )
         )
         report_config_path = run_dir / f"{run_prefix}.report.yml"
-        self._write_report_config(report_config_path, report_data, commits)
+        self._write_report_config(
+            report_config_path,
+            report_data,
+            commits,
+            target_config_layout=target_config_layout,
+            target_config_layout_opts=target_config_layout_opts,
+        )
 
         self._run_cvekit(
             [
@@ -504,6 +527,8 @@ class BackportCvekitClient:
         commit_message_source: str,
         linux_repo_path: str,
         commit_sort: str = "describe",
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         excel = Path(excel_path).expanduser().resolve()
         if not excel.exists():
@@ -545,6 +570,18 @@ class BackportCvekitClient:
         }.items():
             if isinstance(value, str) and value.strip():
                 base_config[key] = value.strip()
+
+        # 校验并归一化 layout 字段
+        target_config_layout, target_config_layout_opts = self._normalize_layout_fields(
+            target_config_layout, target_config_layout_opts
+        )
+
+        # 仅在 layout != "none" 时写入新字段
+        if target_config_layout and target_config_layout != "none":
+            base_config["target_config_layout"] = target_config_layout
+            if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
+                base_config["target_config_layout_opts"] = target_config_layout_opts
+
         with base_config_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(base_config, handle, allow_unicode=True, sort_keys=False)
 
@@ -603,6 +640,8 @@ class BackportCvekitClient:
     def continue_report(
         self,
         base_report_path: str,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -652,6 +691,8 @@ class BackportCvekitClient:
             report_data=report_data,
             commits=commits,
             run_prefix="continue-backport-batch",
+            target_config_layout=target_config_layout,
+            target_config_layout_opts=target_config_layout_opts,
         )
         self._write_report(base_path, report_data, updated_commits)
         _, persisted_commits = self._read_report(base_path)
@@ -714,6 +755,8 @@ class BackportCvekitClient:
         base_report_path: str,
         row: dict[str, Any],
         working_report_path: str | None = None,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -749,6 +792,8 @@ class BackportCvekitClient:
                 report_data=report_data,
                 commits=[row_for_check],
                 run_prefix="check-backport-row",
+                target_config_layout=target_config_layout,
+                target_config_layout_opts=target_config_layout_opts,
             )
             updated_row = updated_rows[0] if updated_rows else row_for_check
             next_commits = self._merge_report_rows(commits, [updated_row])
@@ -805,6 +850,8 @@ class BackportCvekitClient:
         base_report_path: str,
         row: dict[str, Any],
         working_report_path: str | None = None,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -860,6 +907,8 @@ class BackportCvekitClient:
             report_data=report_data,
             commits=[row_for_check],
             run_prefix="recheck-backport-conflict",
+            target_config_layout=target_config_layout,
+            target_config_layout_opts=target_config_layout_opts,
         )
         updated_row = updated_rows[0] if updated_rows else row_for_check
         next_commits = self._merge_report_rows(commits, [updated_row])
@@ -894,6 +943,8 @@ class BackportCvekitClient:
         commit_message_source: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
         cvekit_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
@@ -945,6 +996,8 @@ class BackportCvekitClient:
         config_data = dict(orig_report)
         config_data["commits"] = actionable_commits
         config_data.pop("api_key", None)
+        config_data.pop("target_config_layout", None)
+        config_data.pop("target_config_layout_opts", None)
         if patch_dataset_dir.strip():
             config_data["patch_dataset_dir"] = patch_dataset_dir.strip()
         if signer_name.strip():
@@ -960,6 +1013,18 @@ class BackportCvekitClient:
             config_data["commit_message_source"] = commit_message_source
         if linux_repo_path.strip():
             config_data["linux_repo_path"] = linux_repo_path.strip()
+
+        # 校验并归一化 layout 字段
+        target_config_layout, target_config_layout_opts = self._normalize_layout_fields(
+            target_config_layout, target_config_layout_opts
+        )
+
+        # 仅在 layout != "none" 时写入新字段
+        if target_config_layout and target_config_layout != "none":
+            config_data["target_config_layout"] = target_config_layout
+            if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
+                config_data["target_config_layout_opts"] = target_config_layout_opts
+
         with filtered_report_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config_data, handle, allow_unicode=True, sort_keys=False)
 
@@ -1022,6 +1087,8 @@ class BackportCvekitClient:
         commit_message_source: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
         cvekit_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
@@ -1071,6 +1138,8 @@ class BackportCvekitClient:
             commit_message_source=commit_message_source,
             linux_repo_path=linux_repo_path,
             working_report_path=working_report_path,
+            target_config_layout=target_config_layout,
+            target_config_layout_opts=target_config_layout_opts,
             cvekit_options=cvekit_options,
         )
         affected_rows = [
@@ -1118,6 +1187,8 @@ class BackportCvekitClient:
         signer_email: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -1156,6 +1227,8 @@ class BackportCvekitClient:
             signer_name=signer_name,
             signer_email=signer_email,
             linux_repo_path=linux_repo_path,
+            target_config_layout=target_config_layout,
+            target_config_layout_opts=target_config_layout_opts,
         )
 
         result = self._run_cvekit(
@@ -1208,6 +1281,8 @@ class BackportCvekitClient:
         commit_message_source: str,
         linux_repo_path: str,
         working_report_path: str | None = None,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_path = Path(base_report_path).expanduser().resolve()
         if not base_path.exists():
@@ -1218,27 +1293,59 @@ class BackportCvekitClient:
             if candidate_path.exists():
                 preview_config_path = candidate_path
 
-        resolved_row = self._resolve_commit_row(
-            row=row,
-            base_report_path=base_report_path,
-            working_report_path=working_report_path,
-        )
-        apply_value = self._resolve_apply_value(resolved_row)
-        cmd = [
-            "--action", "backport-batch",
-            "--backport-config", str(preview_config_path),
-            "--debug", "--json",
-            "--preview-commit-message",
-            "--apply", apply_value,
-        ]
-        if commit_message_template.strip():
-            cmd.extend(["--commit-message-template", commit_message_template])
-        commit_message_source = self._normalize_commit_message_source(commit_message_source)
-        if commit_message_source != "auto":
-            cmd.extend(["--commit-message-source", commit_message_source])
-        if linux_repo_path.strip():
-            cmd.extend(["--linux-repo-path", linux_repo_path.strip()])
-        result = self._run_cvekit(cmd, preview_config_path.parent)
+        # Always sanitize: strip stale layout, inject normalized current layout
+        effective_config = preview_config_path
+        sanitized_config_path: Path | None = None
+        try:
+            with preview_config_path.open("r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f)
+        except Exception:
+            cfg = None
+        if isinstance(cfg, dict):
+            cfg.pop("target_config_layout", None)
+            cfg.pop("target_config_layout_opts", None)
+            layout, opts = self._normalize_layout_fields(
+                target_config_layout, target_config_layout_opts
+            )
+            if layout and layout != "none":
+                cfg["target_config_layout"] = layout
+                if opts and isinstance(opts, dict):
+                    cfg["target_config_layout_opts"] = opts
+            sanitized_fd, sanitized_config_path_str = tempfile.mkstemp(
+                suffix=".report.yml",
+                prefix="preview_sanitized_",
+                dir=str(preview_config_path.parent),
+            )
+            sanitized_config_path = Path(sanitized_config_path_str)
+            with os.fdopen(sanitized_fd, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+            effective_config = sanitized_config_path
+
+        try:
+            resolved_row = self._resolve_commit_row(
+                row=row,
+                base_report_path=base_report_path,
+                working_report_path=working_report_path,
+            )
+            apply_value = self._resolve_apply_value(resolved_row)
+            cmd = [
+                "--action", "backport-batch",
+                "--backport-config", str(effective_config),
+                "--debug", "--json",
+                "--preview-commit-message",
+                "--apply", apply_value,
+            ]
+            if commit_message_template.strip():
+                cmd.extend(["--commit-message-template", commit_message_template])
+            commit_message_source = self._normalize_commit_message_source(commit_message_source)
+            if commit_message_source != "auto":
+                cmd.extend(["--commit-message-source", commit_message_source])
+            if linux_repo_path.strip():
+                cmd.extend(["--linux-repo-path", linux_repo_path.strip()])
+            result = self._run_cvekit(cmd, preview_config_path.parent)
+        finally:
+            if sanitized_config_path is not None:
+                sanitized_config_path.unlink(missing_ok=True)
         preview_result = self._parse_json_output(result.stdout)
         if preview_result.get("status") != "success":
             raise RuntimeError(str(preview_result.get("error") or preview_result))
@@ -1299,6 +1406,8 @@ class BackportCvekitClient:
         signer_name: str,
         signer_email: str,
         linux_repo_path: str,
+        target_config_layout: str = "none",
+        target_config_layout_opts: dict[str, Any] | None = None,
     ) -> None:
         try:
             with config_path.open("r", encoding="utf-8") as handle:
@@ -1318,6 +1427,16 @@ class BackportCvekitClient:
             config_data["signer_email"] = signer_email.strip()
         if linux_repo_path.strip():
             config_data["linux_repo_path"] = linux_repo_path.strip()
+        # Strip stale layout, inject current
+        config_data.pop("target_config_layout", None)
+        config_data.pop("target_config_layout_opts", None)
+        layout, opts = BackportCvekitClient._normalize_layout_fields(
+            target_config_layout, target_config_layout_opts
+        )
+        if layout and layout != "none":
+            config_data["target_config_layout"] = layout
+            if opts and isinstance(opts, dict):
+                config_data["target_config_layout_opts"] = opts
         with config_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config_data, handle, allow_unicode=True, sort_keys=False)
 
@@ -1336,6 +1455,32 @@ class BackportCvekitClient:
             if isinstance(val, str) and val.strip():
                 return val.strip()
         return json.dumps(row, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _normalize_layout_fields(
+        target_config_layout: str,
+        target_config_layout_opts: dict[str, Any] | None,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """校验并归一化 layout 字段，非法值回落到安全默认。"""
+        layout = target_config_layout
+        if not isinstance(layout, str) or layout.strip() not in {"none", "anolis"}:
+            layout = "none"
+        else:
+            layout = layout.strip()
+
+        if layout == "none":
+            return layout, None
+
+        # 非 none layout：opts 缺失或非法时补默认值
+        if isinstance(target_config_layout_opts, dict):
+            try:
+                from witty_service.api.backport_schemas import TargetConfigLayoutOpts
+                opts: dict[str, Any] | None = TargetConfigLayoutOpts(**target_config_layout_opts).model_dump()
+            except Exception:
+                opts = {"default_level": "L1-RECOMMEND"}
+        else:
+            opts = {"default_level": "L1-RECOMMEND"}
+        return layout, opts
 
     @staticmethod
     def _normalize_commit_message_source(value: str) -> str:
