@@ -27,7 +27,7 @@ from witty_service.persistence.repositories import (
 @pytest.fixture()
 def repo() -> SqliteRepository:
     engine = create_sqlite_engine("sqlite:///:memory:")
-    init_db(engine)
+    init_db(engine, auto_create=True)
     factory = create_session_factory(engine)
     try:
         yield SqliteRepository(factory)
@@ -38,7 +38,7 @@ def repo() -> SqliteRepository:
 @pytest.fixture()
 def session_factory() -> sessionmaker[Session]:
     engine = create_sqlite_engine("sqlite:///:memory:")
-    init_db(engine)
+    init_db(engine, auto_create=True)
     factory = create_session_factory(engine)
     try:
         yield factory

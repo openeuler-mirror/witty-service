@@ -54,7 +54,7 @@ from witty_service.persistence.orm import (
 def session() -> Session:
     """每个测试一个全新的 in-memory SQLite session。"""
     engine = create_sqlite_engine("sqlite:///:memory:")
-    init_db(engine)
+    init_db(engine, auto_create=True)
     factory = create_session_factory(engine)
     s = factory()
     try:
