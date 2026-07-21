@@ -83,6 +83,14 @@ class DockerSandboxBackend(SandboxBackend):
     ) -> None:
         self._client = client
         self._client_factory = client_factory or _create_default_client
+
+        _last_segment = image.rsplit("/", 1)[-1]
+        if ":" in _last_segment or "@" in image:
+            raise ValueError(
+                f"Docker image '{image}' 不得包含 tag 或 digest,因为 tag 现在由 start() 的"
+                "image_tag kwarg 动态拼接。若运维在 WITTY_DOCKER_IMAGE 中设置了 "
+                "带 tag 的镜像名(如 :v1),拼接后会得到双冒号的无效镜像引用。 "
+            )
         self.base_image = image
         self.host = host
         self.container_port = container_port

@@ -27,7 +27,6 @@ Witty Service 统一配置管理
     WITTY_DOCKER_CONTAINER_WORKSPACE_PATH  Docker容器内工作空间路径 (默认: /witty-workspace)
     WITTY_DOCKER_STOP_TIMEOUT      Docker容器停止超时时间(秒) (默认: 10)
     WITTY_DOCKER_IMAGE             Docker镜像名称 (默认: ghcr.io/openwitty/witty-agent-server)
-    WITTY_DOCKER_IMAGE_TAG         Docker镜像标签 (默认: latest)
 
     # OpenClaw Gateway配置
     OPENCLAW_GATEWAY_IDLE_TIMEOUT            网关空闲超时时间(秒) (默认: 1200)
@@ -186,12 +185,6 @@ class DockerSettings:
             tmpfs_size=os.getenv("WITTY_DOCKER_TMPFS_SIZE", "256M"),
             read_only=os.getenv("WITTY_DOCKER_READ_ONLY", "true").lower() not in ("0", "false", "no"),
         )
-
-    @staticmethod
-    def _has_explicit_tag(image: str) -> bool:
-        """检查镜像名是否包含显式标签"""
-        last_segment = image.rsplit("/", 1)[-1]
-        return ":" in last_segment
 
 
 # ==============================================================================
