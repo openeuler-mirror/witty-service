@@ -129,6 +129,8 @@ class OpenCodeRuntime(RuntimeBase):
             result = OpenCodeRuntime._map_question_asked(raw)
             if result is not None:
                 yield result
+            else:
+                yield {"type": TurnEventType.STREAM_ERROR, "payload": {"error": raw}}
             return
 
         if event_type == "question.replied":

@@ -188,6 +188,18 @@ class SessionWSOrchestrator:
                 message=f"current runtime does not support question answering, runtime_type={runtime.runtime_type}",
                 status_code=400,
             )
+        except Exception:
+            logger.exception(
+                "answer question upstream error: agent_id=%s session_id=%s request_id=%s",
+                agent_id,
+                session_id,
+                request_id,
+            )
+            raise SessionWSOrchestratorError(
+                code="RUNTIME_UPSTREAM_ERROR",
+                message="failed to send answer to runtime",
+                status_code=502,
+            )
         return result
 
     def reject_question(
@@ -205,6 +217,18 @@ class SessionWSOrchestrator:
                 code="RUNTIME_NOT_SUPPORTED",
                 message=f"current runtime does not support question rejection, runtime_type={runtime.runtime_type}",
                 status_code=400,
+            )
+        except Exception:
+            logger.exception(
+                "reject question upstream error: agent_id=%s session_id=%s request_id=%s",
+                agent_id,
+                session_id,
+                request_id,
+            )
+            raise SessionWSOrchestratorError(
+                code="RUNTIME_UPSTREAM_ERROR",
+                message="failed to send rejection to runtime",
+                status_code=502,
             )
         return result
 
