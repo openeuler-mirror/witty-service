@@ -46,6 +46,15 @@ class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1)
 
 
+class QuestionReplyRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    answers: list[list[str]] = Field(default_factory=list, max_length=100)
+
+
+class QuestionRejectRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+
+
 class InstallAgentSkillRequest(BaseModel):
     skill_id: str = Field(
         min_length=1,

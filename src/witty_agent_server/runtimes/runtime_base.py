@@ -30,6 +30,9 @@ class TurnEventType(StrEnum):
     SESSION_USAGE = "session.usage"
     SESSION_RUNTIME_CHANGED = "session.runtime.changed"
     STREAM_ERROR = "stream.error"
+    QUESTION_ASKED = "question.asked"
+    QUESTION_REPLIED = "question.replied"
+    QUESTION_REJECTED = "question.rejected"
 
 
 class RuntimeResult(TypedDict):
@@ -131,6 +134,24 @@ class RuntimeBase(ABC):
     def abort_session(self, *, session_key: str) -> None:
         """终止 runtime 侧会话执行。"""
         self._ensure_client().abort_session(session_key=session_key)
+
+    def answer_question(self, *, request_id: str, answers: list[list[str]]) -> bool:
+        """回答 AI 提问。
+
+        默认抛 NotImplementedError: 子类按需覆盖。
+        """
+        raise NotImplementedError(
+            f"{self.runtime_type} runtime does not support question answering"
+        )
+
+    def reject_question(self, *, request_id: str) -> bool:
+        """拒绝 AI 提问。
+
+        默认抛 NotImplementedError: 子类按需覆盖。
+        """
+        raise NotImplementedError(
+            f"{self.runtime_type} runtime does not support question rejection"
+        )
 
     def list_sessions(self, *, agent_id: str) -> list[dict[str, Any]]:
         """列出指定 agent 在 runtime 侧可见的会话。"""

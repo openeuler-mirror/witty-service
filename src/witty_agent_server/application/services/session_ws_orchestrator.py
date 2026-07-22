@@ -172,6 +172,50 @@ class SessionWSOrchestrator:
              reason="message.abort",
         )
 
+    def answer_question(
+        self, *, agent_id: str, session_id: str, request_id: str, answers: list[list[str]]
+    ) -> bool:
+        """回答 AI 提问，使暂停的 SSE 流继续产出事件。
+
+        由 WS 路由在收到 ``question.reply`` 消息时调用。
+        """
+        runtime = self._get_runtime_for_session(agent_id=agent_id, session_id=session_id)
+        try:
+            result = runtime.answer_question(request_id=request_id, answers=answers)
+        except NotImplementedError:
+            raise SessionWSOrchestratorError(
+                code="RUNTIME_NOT_SUPPORTED",
+                message=f"current runtime does not support question answering, runtime_type={runtime.runtime_type}",
+                status_code=400,
+            )
+        return result
+
+    def reject_question(
+        self, *, agent_id: str, session_id: str, request_id: str
+    ) -> bool:
+        """拒绝 AI 提问，使暂停的 SSE 流继续产出事件。
+
+        由 WS 路由在收到 ``question.reject`` 消息时调用。
+        """
+        runtime = self._get_runtime_for_session(agent_id=agent_id, session_id=session_id)
+        try:
+            result = runtime.reject_question(request_id=request_id)
+        except NotImplementedError:
+            raise SessionWSOrchestratorError(
+                code="RUNTIME_NOT_SUPPORTED",
+                message=f"current runtime does not support question rejection, runtime_type={runtime.runtime_type}",
+                status_code=400,
+            )
+        return result
+
+    def _get_runtime_for_session(
+        self, *, agent_id: str, session_id: str
+    ) -> RuntimeBase:
+        """根据 session 记录的 runtime_type 获取 runtime 实例。"""
+        session = self._require_session(agent_id=agent_id, session_id=session_id)
+        runtime_type = cast(RuntimeType, session.get("runtime_type"))
+        return self._require_runtime(runtime_type)
+
     def precheck_message(self, *, agent_id: str, session_id: str, message: str) -> None:
         if not isinstance(message, str) or not message.strip():
             raise SessionWSOrchestratorError(
@@ -411,4 +455,6 @@ class SessionWSOrchestrator:
             return "tool"
         if event_type.startswith("usage"):
             return "system"
+        if event_type.startswith("question"):
+            return "assistant"
         return "system"

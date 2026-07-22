@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 
 if TYPE_CHECKING:
@@ -87,6 +90,27 @@ class TaskPool:
             self._orchestrator.abort_turn(agent_id=agent_id, session_id=session_id)
         return event is not None
 
+    def answer_question(
+        self, *, agent_id: str, session_id: str, request_id: str, answers: list[list[str]]
+    ) -> bool:
+        """回答提问事件，使 SSE 流继续。"""
+        return self._orchestrator.answer_question(
+            agent_id=agent_id,
+            session_id=session_id,
+            request_id=request_id,
+            answers=answers,
+        )
+
+    def reject_question(
+        self, *, agent_id: str, session_id: str, request_id: str
+    ) -> bool:
+        """拒绝提问事件，使 SSE 流继续。"""
+        return self._orchestrator.reject_question(
+            agent_id=agent_id,
+            session_id=session_id,
+            request_id=request_id,
+        )
+
     async def _run_turn(
         self,
         *,
@@ -111,6 +135,21 @@ class TaskPool:
                     if cancel_event.is_set():
                         break
                     loop.call_soon_threadsafe(queue.put_nowait, dict(item))
+            except Exception:
+                logger.exception(
+                    "stream producer error: agent_id=%s session_id=%s",
+                    agent_id,
+                    session_id,
+                )
+                loop.call_soon_threadsafe(queue.put_nowait, {
+                    "type": "stream.error",
+                    "agent_id": agent_id,
+                    "session_id": session_id,
+                    "payload": {
+                        "code": "PRODUCER_ERROR",
+                        "message": "Internal stream producer encountered an error",
+                    },
+                })
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, None)
 

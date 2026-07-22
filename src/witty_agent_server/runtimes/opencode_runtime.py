@@ -5,6 +5,7 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 from witty_agent_server.infra.clients.base import ClientBase
+from witty_agent_server.infra.clients.opencode_client import OpenCodeClient
 from witty_agent_server.runtimes.runtime_base import (
     RuntimeBase,
     RuntimeTurnEvent,
@@ -52,6 +53,32 @@ class OpenCodeRuntime(RuntimeBase):
             }
         yield event
 
+    def answer_question(self, *, request_id: str, answers: list[list[str]]) -> bool:
+        """回答 OpenCode 提问。
+
+        委托给底层 OpenCode HTTP client。
+        """
+        client = self._ensure_client()
+
+        if isinstance(client, OpenCodeClient):
+            return client.answer_question(request_id=request_id, answers=answers)
+        raise NotImplementedError(
+            "current client does not support question answering"
+        )
+
+    def reject_question(self, *, request_id: str) -> bool:
+        """拒绝 OpenCode 提问。
+
+        委托给底层 OpenCode HTTP client。
+        """
+        client = self._ensure_client()
+
+        if isinstance(client, OpenCodeClient):
+            return client.reject_question(request_id=request_id)
+        raise NotImplementedError(
+            "current client does not support question rejection"
+        )
+
     @staticmethod
     def _map_opencode_event(
         raw: dict[str, Any],
@@ -96,6 +123,24 @@ class OpenCodeRuntime(RuntimeBase):
 
         if event_type == "session.error":
             yield {"type": TurnEventType.STREAM_ERROR, "payload": {"error": raw}}
+            return
+
+        if event_type == "question.asked":
+            result = OpenCodeRuntime._map_question_asked(raw)
+            if result is not None:
+                yield result
+            return
+
+        if event_type == "question.replied":
+            result = OpenCodeRuntime._map_question_replied(raw)
+            if result is not None:
+                yield result
+            return
+
+        if event_type == "question.rejected":
+            result = OpenCodeRuntime._map_question_rejected(raw)
+            if result is not None:
+                yield result
             return
 
         logger.debug("opencode unmapped event type: %s", event_type)
@@ -284,3 +329,74 @@ class OpenCodeRuntime(RuntimeBase):
         if isinstance(status, dict) and status.get("type") == "busy":
             return {"type": TurnEventType.MESSAGE_STARTED, "payload": {"status": status}}
         return None
+
+    @staticmethod
+    def _map_question_asked(raw: dict[str, Any]) -> dict[str, Any]:
+        """映射 ``question.asked`` → ``question.asked``。
+
+        OpenCode 事件结构::
+
+            {
+              "type": "question.asked",
+              "id": "que_xxx",             # question request ID
+              "sessionID": "ses_xxx",
+              "questions": [QuestionInfo],
+              "tool": {messageID, callID} | None,
+            }
+        """
+        question_id = raw.get("id", "")
+        if not isinstance(question_id, str) or not question_id:
+            logger.warning(
+                "_map_question_asked: missing or invalid question id, raw keys=%s",
+                list(raw.keys()),
+            )
+            return None
+        questions = raw.get("questions", [])
+        tool = raw.get("tool")
+        payload: dict[str, Any] = {
+            "question_id": question_id,
+            "questions": questions,
+        }
+        if isinstance(tool, dict):
+            payload["tool"] = tool
+        return {"type": TurnEventType.QUESTION_ASKED, "payload": payload}
+
+    @staticmethod
+    def _map_question_replied(raw: dict[str, Any]) -> dict[str, Any]:
+        """映射 ``question.replied`` → ``question.replied``。
+
+        OpenCode 事件结构::
+
+            {
+              "type": "question.replied",
+              "sessionID": "ses_xxx",
+              "requestID": "que_xxx",
+              "answers": [QuestionAnswer],
+            }
+        """
+        return {
+            "type": TurnEventType.QUESTION_REPLIED,
+            "payload": {
+                "request_id": raw.get("requestID", ""),
+                "answers": raw.get("answers", []),
+            },
+        }
+
+    @staticmethod
+    def _map_question_rejected(raw: dict[str, Any]) -> dict[str, Any]:
+        """映射 ``question.rejected`` → ``question.rejected``。
+
+        OpenCode 事件结构::
+
+            {
+              "type": "question.rejected",
+              "sessionID": "ses_xxx",
+              "requestID": "que_xxx",
+            }
+        """
+        return {
+            "type": TurnEventType.QUESTION_REJECTED,
+            "payload": {
+                "request_id": raw.get("requestID", ""),
+            },
+        }
