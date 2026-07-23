@@ -227,6 +227,19 @@ class OpenCodeClient(ClientBase):
         response = self.http_client().post(f"/session/{session_id}/abort")
         self._raise_for_status(response, action="abort_session")
 
+    def answer_question(self, *, request_id: str, answers: list[list[str]]) -> bool:
+        response = self.http_client().post(
+            f"/question/{request_id}/reply",
+            json={"answers": answers},
+        )
+        self._raise_for_status(response, action="answer_question")
+        return True
+
+    def reject_question(self, *, request_id: str) -> bool:
+        response = self.http_client().post(f"/question/{request_id}/reject")
+        self._raise_for_status(response, action="reject_question")
+        return True
+
     def stream_turn(
         self, *, session_key: str, message: str
     ) -> Iterator[dict[str, Any]]:
@@ -407,6 +420,10 @@ def _is_turn_activity(event: dict[str, Any]) -> bool:
     if event_type == "message.part.delta":
         delta = event.get("delta")
         return isinstance(delta, str) and bool(delta)
+
+    # question.asked 表示模型已产生有意义的提问交互，视为有效轮次活动
+    if event_type == "question.asked":
+        return True
 
     if event_type != "message.part.updated":
         return False

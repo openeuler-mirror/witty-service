@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -13,6 +14,8 @@ from witty_agent_server.application.services.session_ws_orchestrator import (
     SessionWSOrchestratorError,
 )
 from witty_agent_server.application.services.task_pool import SessionBusyError, TaskPool
+
+logger = logging.getLogger(__name__)
 
 
 class SessionConnectionRegistry:
@@ -121,8 +124,29 @@ async def _dispatch_event(
         payload = {}
 
     if event_type == "message.abort":
- 	    cancelled = task_pool.abort_session(agent_id=agent_id, session_id=session_id)
- 	    return
+        cancelled = task_pool.abort_session(agent_id=agent_id, session_id=session_id)
+        return
+    if event_type == "question.reply":
+        await _dispatch_question_event(
+            agent_id=agent_id,
+            session_id=session_id,
+            task_pool=task_pool,
+            outbound=outbound,
+            action_type="reply",
+            request_id=payload.get("request_id"),
+            answers=payload.get("answers"),
+        )
+        return
+    if event_type == "question.reject":
+        await _dispatch_question_event(
+            agent_id=agent_id,
+            session_id=session_id,
+            task_pool=task_pool,
+            outbound=outbound,
+            action_type="reject",
+            request_id=payload.get("request_id"),
+        )
+        return
     if event_type != "message.create":
         await outbound.put(
             _client_error(
@@ -160,6 +184,96 @@ async def _dispatch_event(
                 code=exc.code,
                 message=exc.message,
                 details=exc.details,
+            )
+        )
+
+
+async def _dispatch_question_event(
+    *,
+    agent_id: str,
+    session_id: str,
+    task_pool: TaskPool,
+    outbound: asyncio.Queue[dict[str, Any] | None],
+    action_type: str,
+    request_id: Any,
+    answers: Any = None,
+) -> None:
+    """处理 question.reply 与 question.reject 两类 WS 事件。"""
+    logger.info(
+        "received question.%s: agent_id=%s session_id=%s request_id=%s",
+        action_type,
+        agent_id,
+        session_id,
+        request_id,
+    )
+    if not isinstance(request_id, str) or not request_id:
+        await outbound.put(
+            _client_error(
+                agent_id=agent_id,
+                session_id=session_id,
+                code=f"INVALID_QUESTION_{action_type.upper()}",
+                message=f"question.{action_type} requires a valid request_id",
+            )
+        )
+        return
+
+    if action_type == "reply" and not isinstance(answers, list):
+        answers = []
+
+    try:
+        if action_type == "reply":
+            task_pool.answer_question(
+                agent_id=agent_id,
+                session_id=session_id,
+                request_id=request_id,
+                answers=answers,
+            )
+        else:
+            task_pool.reject_question(
+                agent_id=agent_id,
+                session_id=session_id,
+                request_id=request_id,
+            )
+        logger.info(
+            "question.%s succeeded: agent_id=%s session_id=%s request_id=%s",
+            action_type,
+            agent_id,
+            session_id,
+            request_id,
+        )
+    except SessionWSOrchestratorError as exc:
+        logger.warning(
+            "question.%s orchestrator error: agent_id=%s session_id=%s request_id=%s code=%s message=%s",
+            action_type,
+            agent_id,
+            session_id,
+            request_id,
+            exc.code,
+            exc.message,
+        )
+        await outbound.put(
+            _client_error(
+                agent_id=agent_id,
+                session_id=session_id,
+                code=exc.code,
+                message=exc.message,
+                details=exc.details,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "question.%s unexpected error: agent_id=%s session_id=%s request_id=%s",
+            action_type,
+            agent_id,
+            session_id,
+            request_id,
+        )
+        await outbound.put(
+            _client_error(
+                agent_id=agent_id,
+                session_id=session_id,
+                code=f"QUESTION_{action_type.upper()}_FAILED",
+                message=f"failed to process question {action_type}",
             )
         )
 

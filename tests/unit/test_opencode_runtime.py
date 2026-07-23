@@ -93,3 +93,179 @@ def test_runtime_without_client_raises_on_session_ops() -> None:
         runtime.abort_session(session_key="k")
     with pytest.raises(RuntimeError):
         runtime.list_sessions(agent_id="x")
+
+
+# =============================================================================
+# answer_question / reject_question — delegation
+# =============================================================================
+
+
+def test_answer_question_delegates_to_opencode_client() -> None:
+    from witty_agent_server.infra.clients.opencode_client import OpenCodeClient
+
+    client = OpenCodeClient()
+    client._http_client = _FakeHttpClient()
+
+    runtime = OpenCodeRuntime(client=client)
+    result = runtime.answer_question(request_id="que_1", answers=[["yes"]])
+
+    assert result is True
+    assert client._http_client.calls == [
+        ("POST", "/question/que_1/reply", {"answers": [["yes"]]}),
+    ]
+
+
+def test_reject_question_delegates_to_opencode_client() -> None:
+    from witty_agent_server.infra.clients.opencode_client import OpenCodeClient
+
+    client = OpenCodeClient()
+    client._http_client = _FakeHttpClient()
+
+    runtime = OpenCodeRuntime(client=client)
+    result = runtime.reject_question(request_id="que_2")
+
+    assert result is True
+    assert client._http_client.calls == [
+        ("POST", "/question/que_2/reject", None),
+    ]
+
+
+def test_answer_question_with_non_opencode_client_raises_not_implemented() -> None:
+    runtime = OpenCodeRuntime(client=_RecordingClient())
+
+    with pytest.raises(NotImplementedError, match="question answering"):
+        runtime.answer_question(request_id="q1", answers=[["a"]])
+
+
+def test_reject_question_with_non_opencode_client_raises_not_implemented() -> None:
+    runtime = OpenCodeRuntime(client=_RecordingClient())
+
+    with pytest.raises(NotImplementedError, match="question rejection"):
+        runtime.reject_question(request_id="q1")
+
+
+# =============================================================================
+# _map_question_asked / _map_question_replied / _map_question_rejected
+# =============================================================================
+
+
+def test_map_question_asked_returns_mapped_event() -> None:
+    raw = {
+        "type": "question.asked",
+        "id": "que_abc",
+        "sessionID": "ses_1",
+        "questions": [{"question": "Do you approve?", "options": ["yes", "no"]}],
+    }
+
+    result = OpenCodeRuntime._map_question_asked(raw)
+
+    assert result == {
+        "type": "question.asked",
+        "payload": {
+            "question_id": "que_abc",
+            "questions": [{"question": "Do you approve?", "options": ["yes", "no"]}],
+        },
+    }
+
+
+def test_map_question_asked_missing_id_returns_none() -> None:
+    raw = {"type": "question.asked", "questions": []}
+
+    result = OpenCodeRuntime._map_question_asked(raw)
+
+    assert result is None
+
+
+@pytest.mark.parametrize("invalid_id", ["", None])
+def test_map_question_asked_invalid_id_returns_none(invalid_id: object) -> None:
+    raw = {"type": "question.asked", "id": invalid_id, "questions": []}
+
+    result = OpenCodeRuntime._map_question_asked(raw)
+
+    assert result is None
+
+
+def test_map_question_replied_returns_mapped_event() -> None:
+    raw = {
+        "type": "question.replied",
+        "sessionID": "ses_1",
+        "requestID": "que_abc",
+        "answers": [{"answer": "approved"}],
+    }
+
+    result = OpenCodeRuntime._map_question_replied(raw)
+
+    assert result == {
+        "type": "question.replied",
+        "payload": {
+            "request_id": "que_abc",
+            "answers": [{"answer": "approved"}],
+        },
+    }
+
+
+def test_map_question_rejected_returns_mapped_event() -> None:
+    raw = {
+        "type": "question.rejected",
+        "sessionID": "ses_1",
+        "requestID": "que_abc",
+    }
+
+    result = OpenCodeRuntime._map_question_rejected(raw)
+
+    assert result == {
+        "type": "question.rejected",
+        "payload": {"request_id": "que_abc"},
+    }
+
+
+# =============================================================================
+# _map_opencode_event — question events + STREAM_ERROR fallback
+# =============================================================================
+
+
+def test_map_opencode_event_question_asked_yields_event() -> None:
+    raw = {"type": "question.asked", "id": "que_1", "questions": []}
+
+    events = list(OpenCodeRuntime._map_opencode_event(raw))
+
+    assert len(events) == 1
+    assert events[0]["type"] == "question.asked"
+
+
+def test_map_opencode_event_question_asked_missing_id_yields_stream_error() -> None:
+    """畸形 question.asked 事件（缺少 id）应产出 STREAM_ERROR 而非静默丢弃。"""
+    raw = {"type": "question.asked", "questions": []}
+
+    events = list(OpenCodeRuntime._map_opencode_event(raw))
+
+    assert len(events) == 1
+    assert events[0]["type"] == "stream.error"
+    assert events[0]["payload"]["error"] == raw
+
+
+# =============================================================================
+# Fake HTTP client for OpenCodeClient testing
+# =============================================================================
+
+
+class _FakeHttpClient:
+    """伪造 httpx.Client，仅支持 answer_question / reject_question 的 POST 调用。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, object]] = []
+
+    def post(self, url: str, json: object = None) -> _FakeResponse:
+        self.calls.append(("POST", url, json))
+        return _FakeResponse()
+
+    def close(self) -> None:
+        pass
+
+    @property
+    def is_closed(self) -> bool:
+        return False
+
+
+class _FakeResponse:
+    status_code: int = 200

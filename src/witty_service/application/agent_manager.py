@@ -1397,6 +1397,7 @@ class AgentManager:
                             "Stream error in background consumer: agent_id=%s session_id=%s code=%s message=%s",
                             agent_id, session_id, error_code, error_message,
                         )
+                        _stream_registry.push_event(session_id, event_dict, stream_gen)
                         _stream_registry.end_stream(session_id)
                         return
 
@@ -1493,6 +1494,13 @@ class AgentManager:
                     "Background WS consumer error: agent_id=%s session_id=%s",
                     agent_id, session_id, exc_info=True,
                 )
+                _stream_registry.push_event(session_id, {
+                    "type": "stream.error",
+                    "payload": {
+                        "code": "CONSUMER_ERROR",
+                        "message": "Background WS consumer encountered an error",
+                    },
+                }, stream_gen)
             finally:
                 _stream_registry.end_stream(session_id)
                 _stream_registry.cleanup(session_id)
@@ -1594,6 +1602,66 @@ class AgentManager:
             agent_id,
             session_id,
         )
+
+    async def answer_question(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        request_id: str,
+        answers: list[list[str]],
+    ) -> None:
+        """通过现有 WS 连接向 agent server 发送 question.reply 消息。"""
+        ws_client = self._get_active_ws_client(agent_id, session_id)
+        await ws_client.send({
+            "type": "question.reply",
+            "payload": {
+                "request_id": request_id,
+                "answers": answers,
+            },
+        })
+        self._logger.info(
+            "answer_question sent: agent_id=%s session_id=%s request_id=%s",
+            agent_id, session_id, request_id,
+        )
+
+    async def reject_question(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        request_id: str,
+    ) -> None:
+        """通过现有 WS 连接向 agent server 发送 question.reject 消息。"""
+        ws_client = self._get_active_ws_client(agent_id, session_id)
+        await ws_client.send({
+            "type": "question.reject",
+            "payload": {
+                "request_id": request_id,
+            },
+        })
+        self._logger.info(
+            "reject_question sent: agent_id=%s session_id=%s request_id=%s",
+            agent_id, session_id, request_id,
+        )
+
+    def _get_active_ws_client(
+        self, agent_id: str, session_id: str
+    ) -> WebSocketClient:
+        """获取当前 session 的活动 WS 客户端。"""
+        endpoint = self._get_adaptor_endpoint(agent_id, session_id)
+        ws_client = self._ws_client_pool.get_client(
+            agent_id=agent_id,
+            endpoint=endpoint,
+            factory=lambda url: WebSocketClient(base_url=url),
+        )
+        if not ws_client.is_connected:
+            raise DomainError(
+                code="WS_NOT_CONNECTED",
+                message="WebSocket is not connected for this session.",
+                details={"agent_id": agent_id, "session_id": session_id},
+            )
+        return ws_client
 
     async def create_session(
         self,

@@ -23,6 +23,8 @@ from witty_service.api.schemas import (
     CreateAgentRequest,
     InstallAgentSkillRequest,
     McpServerResponse,
+    QuestionRejectRequest,
+    QuestionReplyRequest,
     UninstallAgentSkillRequest,
     MessageEventsResponse,
     SendMessageRequest,
@@ -507,6 +509,47 @@ async def abort_session(
 ) -> dict[str, object]:
     manager = services.get_agent_manager_for_agent(agent_id)
     return await manager.abort_session(agent_id, session_id, runtime_agent_id=runtime_agent_id)
+
+
+@router.post(
+    "/{agent_id}/sessions/{session_id}/question/reply",
+    status_code=status.HTTP_200_OK,
+)
+async def answer_question(
+    agent_id: str,
+    session_id: str,
+    payload: QuestionReplyRequest,
+    services: ServiceContainer = Depends(get_services),
+) -> dict[str, str]:
+    """回答 AI 提问，使暂停的 SSE 流继续产出事件。"""
+    manager = services.get_agent_manager_for_agent(agent_id)
+    await manager.answer_question(
+        agent_id=agent_id,
+        session_id=session_id,
+        request_id=payload.request_id,
+        answers=payload.answers,
+    )
+    return {"status": "ok"}
+
+
+@router.post(
+    "/{agent_id}/sessions/{session_id}/question/reject",
+    status_code=status.HTTP_200_OK,
+)
+async def reject_question(
+    agent_id: str,
+    session_id: str,
+    payload: QuestionRejectRequest,
+    services: ServiceContainer = Depends(get_services),
+) -> dict[str, str]:
+    """拒绝 AI 提问，使暂停的 SSE 流继续产出事件。"""
+    manager = services.get_agent_manager_for_agent(agent_id)
+    await manager.reject_question(
+        agent_id=agent_id,
+        session_id=session_id,
+        request_id=payload.request_id,
+    )
+    return {"status": "ok"}
 
 
 @router.post(

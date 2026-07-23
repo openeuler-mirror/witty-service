@@ -39,3 +39,21 @@ class ClientBase(ABC):
         self, *, session_key: str, message: str
     ) -> Iterator[dict[str, Any]]:
         """流式执行单轮并返回网关原始事件。"""
+
+    def answer_question(self, *, request_id: str, answers: list[list[str]]) -> bool:
+        """回答 AI 提问。
+
+        子类按需覆盖；默认抛 NotImplementedError。
+        """
+        raise NotImplementedError(
+            "current client does not support question answering"
+        )
+
+    def reject_question(self, *, request_id: str) -> bool:
+        """拒绝 AI 提问。
+
+        子类按需覆盖；默认抛 NotImplementedError。
+        """
+        raise NotImplementedError(
+            "current client does not support question rejection"
+        )
