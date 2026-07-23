@@ -5,7 +5,6 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 from witty_agent_server.infra.clients.base import ClientBase
-from witty_agent_server.infra.clients.opencode_client import OpenCodeClient
 from witty_agent_server.runtimes.runtime_base import (
     RuntimeBase,
     RuntimeTurnEvent,
@@ -56,28 +55,20 @@ class OpenCodeRuntime(RuntimeBase):
     def answer_question(self, *, request_id: str, answers: list[list[str]]) -> bool:
         """回答 OpenCode 提问。
 
-        委托给底层 OpenCode HTTP client。
+        委托给底层 client；client 不支持时由 ClientBase 默认实现抛
+        NotImplementedError。
         """
-        client = self._ensure_client()
-
-        if isinstance(client, OpenCodeClient):
-            return client.answer_question(request_id=request_id, answers=answers)
-        raise NotImplementedError(
-            "current client does not support question answering"
+        return self._ensure_client().answer_question(
+            request_id=request_id, answers=answers
         )
 
     def reject_question(self, *, request_id: str) -> bool:
         """拒绝 OpenCode 提问。
 
-        委托给底层 OpenCode HTTP client。
+        委托给底层 client；client 不支持时由 ClientBase 默认实现抛
+        NotImplementedError。
         """
-        client = self._ensure_client()
-
-        if isinstance(client, OpenCodeClient):
-            return client.reject_question(request_id=request_id)
-        raise NotImplementedError(
-            "current client does not support question rejection"
-        )
+        return self._ensure_client().reject_question(request_id=request_id)
 
     @staticmethod
     def _map_opencode_event(
@@ -134,15 +125,11 @@ class OpenCodeRuntime(RuntimeBase):
             return
 
         if event_type == "question.replied":
-            result = OpenCodeRuntime._map_question_replied(raw)
-            if result is not None:
-                yield result
+            yield OpenCodeRuntime._map_question_replied(raw)
             return
 
         if event_type == "question.rejected":
-            result = OpenCodeRuntime._map_question_rejected(raw)
-            if result is not None:
-                yield result
+            yield OpenCodeRuntime._map_question_rejected(raw)
             return
 
         logger.debug("opencode unmapped event type: %s", event_type)
@@ -333,7 +320,7 @@ class OpenCodeRuntime(RuntimeBase):
         return None
 
     @staticmethod
-    def _map_question_asked(raw: dict[str, Any]) -> dict[str, Any]:
+    def _map_question_asked(raw: dict[str, Any]) -> dict[str, Any] | None:
         """映射 ``question.asked`` → ``question.asked``。
 
         OpenCode 事件结构::

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -394,5 +395,65 @@ def test_close_is_idempotent() -> None:
     client.close()
 
     assert client._http_client is None
+
+
+# =============================================================================
+# answer_question / reject_question
+# =============================================================================
+
+
+def test_answer_question_posts_to_reply_endpoint() -> None:
+    captured_urls: list[str] = []
+    captured_body: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_urls.append(request.url.path)
+        captured_body.update(json.loads(request.read()))
+        return httpx.Response(200, json={"status": "ok"})
+
+    client = _client_with_transport(handler)
+    result = client.answer_question(request_id="que_abc", answers=[["yes"], ["no"]])
+
+    assert result is True
+    assert captured_urls == ["/question/que_abc/reply"]
+    assert captured_body == {"answers": [["yes"], ["no"]]}
+
+
+def test_reject_question_posts_to_reject_endpoint() -> None:
+    captured_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_urls.append(request.url.path)
+        return httpx.Response(200, json={"status": "ok"})
+
+    client = _client_with_transport(handler)
+    result = client.reject_question(request_id="que_xyz")
+
+    assert result is True
+    assert captured_urls == ["/question/que_xyz/reject"]
+
+
+def test_answer_question_raises_on_http_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="internal error")
+
+    client = _client_with_transport(handler)
+
+    with pytest.raises(OpenCodeClientError) as exc:
+        client.answer_question(request_id="q1", answers=[["x"]])
+
+    assert exc.value.status == 500
+
+
+def test_reject_question_raises_on_http_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="bad gateway")
+
+    client = _client_with_transport(handler)
+
+    with pytest.raises(OpenCodeClientError) as exc:
+        client.reject_question(request_id="q1")
+
+    assert exc.value.status == 502
 
 
