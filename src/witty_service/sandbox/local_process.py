@@ -52,6 +52,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
         *,
         agent_id: str,
         workspace_path: str,
+        env: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> SandboxHandle:
         """启动本地 witty-agent-server 子进程并返回沙箱句柄。"""
@@ -67,13 +68,12 @@ class LocalProcessSandboxBackend(SandboxBackend):
         logger.info(f"[LocalProcessSandbox] Stderr log path: {stderr_log_path}")
 
         # 透传调用方注入的额外环境变量（例如 WITTY_RUNTIME_DEFAULT），
-        env = os.environ.copy()
-        extra_env = kwargs.get("env")
-        if isinstance(extra_env, dict):
-            env.update(extra_env)
+        env_vars = os.environ.copy()
+        if env:
+            env_vars.update(env)
             logger.info(
                 "[LocalProcessSandbox] Merging extra env vars: %s",
-                list(extra_env.keys()),
+                list(env.keys()),
             )
 
         try:
@@ -85,7 +85,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
                     cwd=workspace_path,
                     stdout=subprocess.DEVNULL,
                     stderr=stderr_file,
-                    env=env,
+                    env=env_vars,
                     text=True,
                 )
             logger.info(f"[LocalProcessSandbox] Process started with PID: {process.pid} in cwd: {app_dir}")

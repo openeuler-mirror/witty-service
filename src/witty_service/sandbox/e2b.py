@@ -22,6 +22,7 @@ class E2BSandboxBackend(SandboxBackend):
         *,
         agent_id: str,
         workspace_path: str,
+        env: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> SandboxHandle:
         self._raise_not_supported("start")

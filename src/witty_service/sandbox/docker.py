@@ -20,7 +20,7 @@ from witty_service.sandbox.base import (
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_DOCKER_IMAGE = "ghcr.io/openwitty/witty-agent-server:latest"
+DEFAULT_DOCKER_BASE_IMAGE = "ghcr.io/openwitty/witty-agent-server"
 DEFAULT_CONTAINER_PORT = 8080
 # 默认契约必须保持为 /witty-workspace，除非显式配置 container_workspace_path。
 DEFAULT_CONTAINER_WORKSPACE_PATH = "/witty-workspace"
@@ -67,7 +67,7 @@ class DockerSandboxBackend(SandboxBackend):
         *,
         client: Any | None = None,
         client_factory: Callable[[], Any] | None = None,
-        image: str = DEFAULT_DOCKER_IMAGE,
+        image: str = DEFAULT_DOCKER_BASE_IMAGE,
         host: str = "127.0.0.1",
         container_port: int = DEFAULT_CONTAINER_PORT,
         container_workspace_path: str = DEFAULT_CONTAINER_WORKSPACE_PATH,
@@ -83,13 +83,20 @@ class DockerSandboxBackend(SandboxBackend):
     ) -> None:
         self._client = client
         self._client_factory = client_factory or _create_default_client
-        self.image = image
+
+        _last_segment = image.rsplit("/", 1)[-1]
+        if ":" in _last_segment or "@" in image:
+            raise ValueError(
+                f"Docker image '{image}' 不得包含 tag 或 digest,因为 tag 现在由 start() 的"
+                "image_tag kwarg 动态拼接。若运维在 WITTY_DOCKER_IMAGE 中设置了 "
+                "带 tag 的镜像名(如 :v1),拼接后会得到双冒号的无效镜像引用。 "
+            )
+        self.base_image = image
         self.host = host
         self.container_port = container_port
         self.container_workspace_path = (
             workspace_mount_path or container_workspace_path
         )
-        self.workspace_mount_path = self.container_workspace_path
         self.stop_timeout = stop_timeout
         self.memory_limit = memory_limit
         self.pids_limit = pids_limit
@@ -106,6 +113,7 @@ class DockerSandboxBackend(SandboxBackend):
         *,
         agent_id: str,
         workspace_path: str,
+        env: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> SandboxHandle:
         resolved_workspace_path = self._validate_workspace_path(workspace_path)
@@ -129,11 +137,23 @@ class DockerSandboxBackend(SandboxBackend):
             self._handles[handle.sandbox_id] = handle
             return handle
 
-        environment = dict(kwargs.get("environment", {}))
+        image_tag = kwargs.get("image_tag")
+        if not image_tag:
+            raise sandbox_start_failed(
+                sandbox_type=self.sandbox_type,
+                message="Docker sandbox requires 'image_tag' kwarg.",
+                details={"kwargs_keys": list(kwargs.keys())},
+            )
+        image = f"{self.base_image}:{image_tag}"
+
+        environment = dict(env or {})
+
+        # 允许通过 kwargs 按启动覆盖内存限制，否则回退到实例默认值
+        memory_limit = kwargs.get("memory_limit", self.memory_limit)
 
         try:
             container = self._get_client().containers.run(
-                self.image,
+                image,
                 name=container_name,
                 detach=True,
                 user="witty",
@@ -147,7 +167,7 @@ class DockerSandboxBackend(SandboxBackend):
                 environment=environment,
                 cap_drop=["ALL"],
                 security_opt=["no-new-privileges:true"],
-                mem_limit=self.memory_limit,
+                mem_limit=memory_limit,
                 pids_limit=self.pids_limit,
                 cpu_shares=self.cpu_shares,
                 read_only=self.read_only,
@@ -164,7 +184,7 @@ class DockerSandboxBackend(SandboxBackend):
                 sandbox_type=self.sandbox_type,
                 message="Failed to start docker sandbox.",
                 details={
-                    "image": self.image,
+                    "image": self.base_image,
                     "path": workspace_path,
                     "container_workspace_path": self.container_workspace_path,
                     "stderr": str(exc),
@@ -222,10 +242,9 @@ class DockerSandboxBackend(SandboxBackend):
                 "container_id": str(container.id),
                 "host_port": host_port,
                 "base_url": base_url,
-                "image": self.image,
+                "image": self.base_image,
                 "container_port": self.container_port,
                 "container_workspace_path": self.container_workspace_path,
-                "workspace_mount_path": self.container_workspace_path,
             },
         )
         self._handles[sandbox_id] = handle
