@@ -27,7 +27,7 @@ from witty_service.persistence.repositories import (
 @pytest.fixture()
 def repo() -> SqliteRepository:
     engine = create_sqlite_engine("sqlite:///:memory:")
-    init_db(engine)
+    init_db(engine, auto_create=True)
     factory = create_session_factory(engine)
     try:
         yield SqliteRepository(factory)
@@ -38,7 +38,7 @@ def repo() -> SqliteRepository:
 @pytest.fixture()
 def session_factory() -> sessionmaker[Session]:
     engine = create_sqlite_engine("sqlite:///:memory:")
-    init_db(engine)
+    init_db(engine, auto_create=True)
     factory = create_session_factory(engine)
     try:
         yield factory
@@ -648,7 +648,7 @@ def test_replace_installed_agent_skills_from_runtime_normalizes_snapshot(
                 "source": "runtime",
                 "filePath": "/skills/read.md",
             },
-            {"name": "Read", "source": "duplicate"},
+            {"name": "Read", "source": "duplicate", "filePath": "/skills/read.md"},
             {"name": "  Write  ", "source": "runtime"},
             {"source": "invalid"},
         ],
@@ -668,6 +668,59 @@ def test_replace_installed_agent_skills_from_runtime_normalizes_snapshot(
     assert [
         item.skill_name for item in repo.list_installed_agent_skills("agent-1")
     ] == ["Write"]
+
+
+def test_replace_installed_agent_skills_from_runtime_preserves_non_builtin_records(
+    repo: SqliteRepository,
+) -> None:
+    _create_agent(repo)
+    repository = repo.create_skill_repository(
+        name="https://github.com/example/skills@main",
+        source_type="git",
+        branch="main",
+        url="https://github.com/example/skills",
+        local_path="/tmp/skills",
+        skill_discover_status="done",
+    )
+    repo.upsert_installed_agent_skill(
+        agent_id="agent-1",
+        skill_id="git-1",
+        source_type="git",
+        repo_id=repository.repo_id,
+        skill_name="Repository Skill",
+    )
+    repo.upsert_installed_agent_skill(
+        agent_id="agent-1",
+        skill_id="wittyhub-1",
+        source_type="wittyhub",
+        repo_id=None,
+        skill_name="Witty Skill",
+        relative_path="  /skills/witty/SKILL.md  ",
+        skill_source="https://gitcode.com/example/repo",
+    )
+
+    repo.replace_installed_agent_skills_from_runtime(
+        agent_id="agent-1",
+        skills=[
+            {
+                "name": "Witty Skill",
+                "source": "runtime",
+                "filePath": "/skills/witty/SKILL.md",
+            },
+            {"name": "Builtin Skill", "source": "runtime"},
+        ],
+    )
+
+    installed = repo.list_installed_agent_skills("agent-1")
+    assert [item.skill_name for item in installed] == [
+        "Repository Skill",
+        "Witty Skill",
+        "Builtin Skill",
+    ]
+    assert [item.source_type for item in installed] == ["git", "wittyhub", "builtin"]
+    assert [item.skill_id for item in installed if item.skill_name == "Witty Skill"] == [
+        "wittyhub-1"
+    ]
 
 
 def test_repository_summary_queries_and_agent_delete(repo: SqliteRepository) -> None:

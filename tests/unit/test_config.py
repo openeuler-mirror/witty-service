@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import witty_service.config as config_module
 
 
@@ -11,6 +13,40 @@ def _clear_insight_env(monkeypatch) -> None:
         "WITTY_INSIGHT_BEARER_TOKEN",
     ):
         monkeypatch.delenv(key, raising=False)
+
+
+def _clear_database_env(monkeypatch) -> None:
+    for key in ("WITTY_DATABASE_URL", "WITTY_DATABASE_AUTO_CREATE"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_database_settings_defaults_disable_auto_create(monkeypatch) -> None:
+    _clear_database_env(monkeypatch)
+
+    settings = config_module.DatabaseSettings.from_env()
+
+    assert settings.url.endswith("/.witty/db/witty_service.sqlite3")
+    assert settings.auto_create is False
+
+
+@pytest.mark.parametrize("raw_value", ["1", "true", "TRUE", "yes"])
+def test_database_settings_enables_auto_create(raw_value, monkeypatch) -> None:
+    monkeypatch.setenv("WITTY_DATABASE_URL", "sqlite:////tmp/witty.sqlite3")
+    monkeypatch.setenv("WITTY_DATABASE_AUTO_CREATE", raw_value)
+
+    settings = config_module.DatabaseSettings.from_env()
+
+    assert settings.url == "sqlite:////tmp/witty.sqlite3"
+    assert settings.auto_create is True
+
+
+@pytest.mark.parametrize("raw_value", ["0", "false", "no", "unexpected"])
+def test_database_settings_disables_auto_create(raw_value, monkeypatch) -> None:
+    monkeypatch.setenv("WITTY_DATABASE_AUTO_CREATE", raw_value)
+
+    settings = config_module.DatabaseSettings.from_env()
+
+    assert settings.auto_create is False
 
 
 def test_insight_settings_defaults(monkeypatch) -> None:

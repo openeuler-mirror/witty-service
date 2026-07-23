@@ -17,7 +17,7 @@ from witty_service.persistence.repositories import SqliteRepository
 @pytest.fixture()
 def repo() -> SqliteRepository:
     engine = create_sqlite_engine("sqlite:///:memory:")
-    init_db(engine)
+    init_db(engine, auto_create=True)
     factory = create_session_factory(engine)
     try:
         yield SqliteRepository(factory)

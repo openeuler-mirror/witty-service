@@ -8,6 +8,19 @@ import pytest
 from witty_service.api import services as services_module
 from witty_service.api.services import ServiceContainer
 from witty_service.adapter.http_client import AdaptorHttpClient
+from witty_service.config import (
+    CorsSettings,
+    DatabaseSettings,
+    DockerSettings,
+    InsightSettings,
+    LoggingSettings,
+    OpenClawGatewaySettings,
+    OpenClawSettings,
+    OpenCodeSettings,
+    RuntimeSettings,
+    Settings,
+    WorkspaceSettings,
+)
 from witty_service.domain.errors import DomainError
 
 
@@ -129,6 +142,37 @@ def test_build_default_services_creates_insight_http_client_when_enabled(monkeyp
     assert container.insight_http_client._default_headers == {
         "Authorization": "Bearer secret-token"
     }
+
+
+def test_build_default_services_passes_database_auto_create_flag(monkeypatch, tmp_path) -> None:
+    engine = MagicMock()
+    captured: dict[str, object] = {}
+    settings = Settings(
+        auth_token="test-token",
+        cors=CorsSettings(),
+        database=DatabaseSettings(url="sqlite:///:memory:", auto_create=False),
+        logging=LoggingSettings(),
+        docker=DockerSettings(),
+        openclaw_gateway=OpenClawGatewaySettings(),
+        workspace=WorkspaceSettings(root=str(tmp_path)),
+        openclaw=OpenClawSettings(),
+        insight=InsightSettings(enabled=False),
+        opencode=OpenCodeSettings(),
+        runtime=RuntimeSettings(),
+    )
+
+    monkeypatch.setattr(services_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(services_module, "create_sqlite_engine", lambda *_args, **_kwargs: engine)
+    monkeypatch.setattr(
+        services_module,
+        "init_db",
+        lambda _engine, **kwargs: captured.update(engine=_engine, **kwargs),
+    )
+    monkeypatch.setattr(services_module, "create_session_factory", lambda *_args, **_kwargs: MagicMock())
+
+    services_module.build_default_services()
+
+    assert captured == {"engine": engine, "auto_create": False}
 
 
 @pytest.mark.asyncio

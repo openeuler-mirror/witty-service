@@ -55,23 +55,33 @@ def _services() -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_install_agent_skill_returns_installed_record(monkeypatch):
+async def test_install_agent_skill_returns_installed_record(monkeypatch, tmp_path):
     services = _services()
     manager = MagicMock()
-    manager.install_agent_skill = AsyncMock(return_value={"ok": True})
+    installed_file_path = str(tmp_path / "workspace-agent-1/skills/terminal-helper/SKILL.md")
+    manager.install_agent_skill = AsyncMock(
+        return_value={"ok": True, "filePath": installed_file_path}
+    )
     services.get_agent_manager_for_agent.return_value = manager
 
     skill_service = MagicMock()
     skill_service.get_skill_by_skill_id.return_value = _skill_record()
     skill_service.get_repository_by_repo_id.return_value = _repo_record()
     skill_service.get_skill_source_path.return_value = "/tmp/terminal-helper"
-    services.repository.upsert_installed_agent_skill.return_value = _installed_record()
+    services.repository.upsert_installed_agent_skill.return_value = _installed_record(
+        relative_path=installed_file_path
+    )
 
     monkeypatch.setattr(agents_api, "SkillManager", lambda repository: skill_service)
 
     resp = await agents_api.install_agent_skill(
         agent_id="agent-1",
-        payload=SimpleNamespace(skill_id="skill-1", skill_name="terminal-helper"),
+        payload=SimpleNamespace(
+            skill_id="skill-1",
+            skill_name="terminal-helper",
+            source_type=None,
+            skill_source=None,
+        ),
         services=services,
     )
 
@@ -82,15 +92,18 @@ async def test_install_agent_skill_returns_installed_record(monkeypatch):
         "repo_id": "repo-1",
         "skill_name": "terminal-helper",
         "installed_at": "2026-06-03T10:00:00Z",
-        "relative_path": "skills/terminal-helper/SKILL.md",
+        "relative_path": installed_file_path,
         "metadata": {"title": "Terminal Helper"},
         "skill_source": "git",
         "skill_md_url": "https://example.com/SKILL.md",
     }
     manager.install_agent_skill.assert_awaited_once_with(
-        "agent-1",
-        "terminal-helper",
+        agent_id="agent-1",
+        skill_name="terminal-helper",
         source_path="/tmp/terminal-helper",
+    )
+    assert services.repository.upsert_installed_agent_skill.call_args.kwargs["relative_path"] == (
+        installed_file_path
     )
 
 
@@ -104,12 +117,93 @@ async def test_install_agent_skill_raises_not_found_when_skill_missing(monkeypat
     with pytest.raises(DomainError) as exc_info:
         await agents_api.install_agent_skill(
             agent_id="agent-1",
-            payload=SimpleNamespace(skill_id="skill-1", skill_name="terminal-helper"),
+            payload=SimpleNamespace(
+                skill_id="skill-1",
+                skill_name="terminal-helper",
+                source_type=None,
+                skill_source=None,
+            ),
             services=services,
         )
 
     assert exc_info.value.code == "SKILL_NOT_FOUND"
     assert exc_info.value.details == {"skill_name": "terminal-helper", "skill_id": "skill-1"}
+
+
+@pytest.mark.asyncio
+async def test_install_agent_skill_supports_wittyhub(monkeypatch, tmp_path):
+    services = _services()
+    manager = MagicMock()
+    installed_file_path = str(tmp_path / "workspace-agent-1/skills/vmcore-analysis/SKILL.md")
+    manager.install_agent_skill = AsyncMock(
+        return_value={"ok": True, "filePath": installed_file_path}
+    )
+    services.get_agent_manager_for_agent.return_value = manager
+    wittyhub_install_id = agents_api._build_wittyhub_skill_id(
+        skill_source="https://gitcode.com/openeuler/IB_Robot",
+        skill_name="vmcore-analysis",
+    )
+    wittyhub_metadata = {
+        "description": "Analyze vmcore dumps",
+        "author": "openEuler",
+        "category": "diagnostics",
+    }
+    services.repository.upsert_installed_agent_skill.return_value = _installed_record(
+        skill_id=wittyhub_install_id,
+        source_type="wittyhub",
+        repo_id=None,
+        skill_name="vmcore-analysis",
+        relative_path=installed_file_path,
+        metadata=wittyhub_metadata,
+        skill_source="https://gitcode.com/openeuler/IB_Robot",
+        skill_md_url="https://gitcode.com/openeuler/IB_Robot",
+    )
+
+    skill_manager = MagicMock()
+    monkeypatch.setattr(agents_api, "SkillManager", lambda repository: skill_manager)
+
+    resp = await agents_api.install_agent_skill(
+        agent_id="agent-1",
+        payload=SimpleNamespace(
+            skill_id="owner/repo/vmcore-analysis",
+            skill_name="vmcore-analysis",
+            source_type="wittyhub",
+            skill_source="https://gitcode.com/openeuler/IB_Robot",
+            metadata=wittyhub_metadata,
+        ),
+        services=services,
+    )
+
+    assert resp.model_dump() == {
+        "agent_id": "agent-1",
+        "skill_id": wittyhub_install_id,
+        "source_type": "wittyhub",
+        "repo_id": None,
+        "skill_name": "vmcore-analysis",
+        "installed_at": "2026-06-03T10:00:00Z",
+        "relative_path": installed_file_path,
+        "metadata": wittyhub_metadata,
+        "skill_source": "https://gitcode.com/openeuler/IB_Robot",
+        "skill_md_url": "https://gitcode.com/openeuler/IB_Robot",
+    }
+    manager.install_agent_skill.assert_awaited_once_with(
+        agent_id="agent-1",
+        skill_name="vmcore-analysis",
+        source_type="wittyhub",
+        skill_source="https://gitcode.com/openeuler/IB_Robot",
+    )
+    services.repository.upsert_installed_agent_skill.assert_called_once_with(
+        agent_id="agent-1",
+        skill_id=wittyhub_install_id,
+        source_type="wittyhub",
+        repo_id=None,
+        skill_name="vmcore-analysis",
+        relative_path=installed_file_path,
+        metadata=wittyhub_metadata,
+        skill_source="https://gitcode.com/openeuler/IB_Robot",
+        skill_md_url="https://gitcode.com/openeuler/IB_Robot",
+    )
+    skill_manager.get_skill_by_skill_id.assert_not_called()
 
 
 def test_list_installed_agent_skills_raises_not_found_when_agent_missing():
@@ -190,6 +284,79 @@ async def test_uninstall_agent_skill_returns_removed_record(monkeypatch):
     services.repository.delete_installed_agent_skill.assert_called_once_with(
         agent_id="agent-1",
         skill_id="skill-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_uninstall_agent_skill_supports_wittyhub(monkeypatch):
+    services = _services()
+    manager = MagicMock()
+    manager.uninstall_agent_skill = AsyncMock(return_value=None)
+    services.get_agent_manager_for_agent.return_value = manager
+    wittyhub_install_id = agents_api._build_wittyhub_skill_id(
+        skill_source="https://gitcode.com/openeuler/IB_Robot",
+        skill_name="vmcore-analysis",
+    )
+    services.repository.get_installed_agent_skill.return_value = _installed_record(
+        skill_id=wittyhub_install_id,
+        source_type="wittyhub",
+        repo_id=None,
+        skill_name="vmcore-analysis",
+        relative_path="owner/repo/vmcore-analysis",
+        metadata={"description": "Analyze vmcore dumps"},
+        skill_source="https://gitcode.com/openeuler/IB_Robot",
+        skill_md_url="https://gitcode.com/openeuler/IB_Robot",
+    )
+
+    skill_manager = MagicMock()
+    monkeypatch.setattr(agents_api, "SkillManager", lambda repository: skill_manager)
+
+    resp = await agents_api.uninstall_agent_skill(
+        agent_id="agent-1",
+        payload=SimpleNamespace(skill_id=wittyhub_install_id),
+        services=services,
+    )
+
+    assert resp.model_dump()["source_type"] == "wittyhub"
+    manager.uninstall_agent_skill.assert_awaited_once_with(
+        agent_id="agent-1",
+        skill_name="vmcore-analysis",
+        source_type="wittyhub",
+        source_path=None,
+    )
+    skill_manager.get_skill_by_skill_id.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_uninstall_agent_skill_passes_runtime_source_for_builtin(monkeypatch, tmp_path):
+    services = _services()
+    manager = MagicMock()
+    manager.uninstall_agent_skill = AsyncMock(return_value=None)
+    services.get_agent_manager_for_agent.return_value = manager
+    skill_file_path = tmp_path / "plugin-skills/browser-automation/SKILL.md"
+    services.repository.get_installed_agent_skill.return_value = _installed_record(
+        source_type="builtin",
+        skill_name="browser-automation",
+        skill_source="openclaw-extra",
+        relative_path=str(skill_file_path),
+    )
+
+    skill_manager = MagicMock()
+    skill_manager.get_skill_by_skill_id.return_value = None
+    monkeypatch.setattr(agents_api, "SkillManager", lambda repository: skill_manager)
+
+    await agents_api.uninstall_agent_skill(
+        agent_id="agent-1",
+        payload=SimpleNamespace(skill_id="skill-1"),
+        services=services,
+    )
+
+    manager.uninstall_agent_skill.assert_awaited_once_with(
+        agent_id="agent-1",
+        skill_name="browser-automation",
+        source_type="builtin",
+        source_path=str(skill_file_path.parent),
+        runtime_source="openclaw-extra",
     )
 
 
