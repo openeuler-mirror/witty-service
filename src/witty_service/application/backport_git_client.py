@@ -24,8 +24,56 @@ class BackportGitClient:
     def ensure_git_repo(path: Path) -> None:
         if not path.exists():
             raise FileNotFoundError(f"target_path 不存在: {path}")
-        if not (path / ".git").exists():
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if result.returncode != 0 or result.stdout.strip() != "true":
             raise NotADirectoryError(f"target_path 不是 git 仓库: {path}")
+
+    @staticmethod
+    def remote_url(path: Path) -> str:
+        result = BackportGitClient._run_git(path, ["remote", "get-url", "origin"])
+        return result.stdout.strip() if result.returncode == 0 else ""
+
+    @staticmethod
+    def current_branch(path: Path) -> str:
+        result = BackportGitClient._run_git(path, ["branch", "--show-current"])
+        return result.stdout.strip() if result.returncode == 0 else ""
+
+    @staticmethod
+    def head(path: Path) -> str:
+        result = BackportGitClient._run_git(path, ["rev-parse", "HEAD"])
+        if result.returncode != 0:
+            raise RuntimeError(f"git rev-parse HEAD 失败: {result.stderr.strip()}")
+        return result.stdout.strip()
+
+    @staticmethod
+    def branches(path: Path) -> tuple[list[str], list[str]]:
+        local_result = BackportGitClient._run_git(path, ["branch", "--format=%(refname:short)"])
+        remote_result = BackportGitClient._run_git(path, ["branch", "-r", "--format=%(refname:short)"])
+        local_branches = [
+            line.strip()
+            for line in local_result.stdout.splitlines()
+            if line.strip() and not line.strip().startswith("(")
+        ] if local_result.returncode == 0 else []
+        remote_branches = [
+            line.strip()
+            for line in remote_result.stdout.splitlines()
+            if line.strip() and not line.strip().endswith("/HEAD")
+        ] if remote_result.returncode == 0 else []
+        return local_branches, remote_branches
+
+    @staticmethod
+    def default_branch(path: Path) -> str:
+        result = BackportGitClient._run_git(path, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        if result.returncode == 0:
+            return result.stdout.strip().removeprefix("origin/")
+        return BackportGitClient.current_branch(path)
 
     @staticmethod
     def get_repo_state(target_path: str) -> dict[str, Any]:

@@ -555,6 +555,7 @@ class BackportCvekitClient:
             "project": "linux",
             "target_path": str(target_repo),
         }
+        normalized_message_source = self._normalize_commit_message_source(commit_message_source)
         for key, value in {
             "project_url": project_url,
             "project_dir": project_dir,
@@ -564,24 +565,20 @@ class BackportCvekitClient:
             "signer_name": signer_name,
             "signer_email": signer_email,
             "commit_message_template": commit_message_template,
-            "commit_message_source": self._normalize_commit_message_source(commit_message_source),
-            "linux_repo_path": linux_repo_path,
+            "commit_message_source": normalized_message_source,
             "commit_sort": commit_sort,
         }.items():
             if isinstance(value, str) and value.strip():
                 base_config[key] = value.strip()
-
-        # 校验并归一化 layout 字段
         target_config_layout, target_config_layout_opts = self._normalize_layout_fields(
             target_config_layout, target_config_layout_opts
         )
-
-        # 仅在 layout != "none" 时写入新字段
         if target_config_layout and target_config_layout != "none":
             base_config["target_config_layout"] = target_config_layout
             if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
                 base_config["target_config_layout_opts"] = target_config_layout_opts
-
+        if normalized_message_source == "auto" and linux_repo_path.strip():
+            base_config["linux_repo_path"] = linux_repo_path.strip()
         with base_config_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(base_config, handle, allow_unicode=True, sort_keys=False)
 
@@ -1011,7 +1008,7 @@ class BackportCvekitClient:
         commit_message_source = self._normalize_commit_message_source(commit_message_source)
         if commit_message_source != "auto":
             config_data["commit_message_source"] = commit_message_source
-        if linux_repo_path.strip():
+        if commit_message_source == "auto" and linux_repo_path.strip():
             config_data["linux_repo_path"] = linux_repo_path.strip()
 
         # 校验并归一化 layout 字段
@@ -1293,7 +1290,6 @@ class BackportCvekitClient:
             if candidate_path.exists():
                 preview_config_path = candidate_path
 
-        # Always sanitize: strip stale layout, inject normalized current layout
         effective_config = preview_config_path
         sanitized_config_path: Path | None = None
         try:
@@ -1340,7 +1336,7 @@ class BackportCvekitClient:
             commit_message_source = self._normalize_commit_message_source(commit_message_source)
             if commit_message_source != "auto":
                 cmd.extend(["--commit-message-source", commit_message_source])
-            if linux_repo_path.strip():
+            if commit_message_source == "auto" and linux_repo_path.strip():
                 cmd.extend(["--linux-repo-path", linux_repo_path.strip()])
             result = self._run_cvekit(cmd, preview_config_path.parent)
         finally:
@@ -1425,7 +1421,7 @@ class BackportCvekitClient:
             config_data["signer_name"] = signer_name.strip()
         if signer_email.strip():
             config_data["signer_email"] = signer_email.strip()
-        if linux_repo_path.strip():
+        if commit_message_source == "auto" and linux_repo_path.strip():
             config_data["linux_repo_path"] = linux_repo_path.strip()
         # Strip stale layout, inject current
         config_data.pop("target_config_layout", None)
@@ -1484,4 +1480,4 @@ class BackportCvekitClient:
 
     @staticmethod
     def _normalize_commit_message_source(value: str) -> str:
-        return value if value in {"auto", "openEuler", "upstream"} else "auto"
+        return value if value in {"auto", "openEuler", "upstream"} else "upstream"

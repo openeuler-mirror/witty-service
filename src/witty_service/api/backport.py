@@ -12,6 +12,9 @@ from witty_service.api.backport_schemas import (
     BackportConfigPayload,
     BackportAsyncRunResponse,
     BackportConfigUpdateResponse,
+    BackportRepositoryPrepareRequest,
+    BackportRepositoryPrepareResponse,
+    BackportRepositoryRefreshRequest,
     BackportRuntimeStatusResponse,
     BackportRunRequest,
     BackportRunResponse,
@@ -45,6 +48,16 @@ def _ensure_backport_runs(request: Request) -> tuple[dict, threading.Lock]:
     return request.app.state.backport_runs, request.app.state.backport_runs_lock
 
 
+def _ensure_repository_prepare_tasks(request: Request) -> tuple[dict, threading.Lock]:
+    if not hasattr(request.app.state, "backport_repository_prepare_tasks"):
+        request.app.state.backport_repository_prepare_tasks = {}
+        request.app.state.backport_repository_prepare_tasks_lock = threading.Lock()
+    return (
+        request.app.state.backport_repository_prepare_tasks,
+        request.app.state.backport_repository_prepare_tasks_lock,
+    )
+
+
 @router.get("/config", response_model=BackportConfigPayload)
 def get_config(
     backport_service: BackportService = Depends(get_backport_service),
@@ -75,6 +88,97 @@ def browse_path(
     backport_service: BackportService = Depends(get_backport_service),
 ) -> dict:
     return backport_service.browse_path(path)
+
+
+@router.get("/repositories/recent")
+def list_recent_repositories(
+    backport_service: BackportService = Depends(get_backport_service),
+) -> dict:
+    return backport_service.list_recent_repositories()
+
+
+@router.post("/repositories/refresh")
+def refresh_repository(
+    payload: BackportRepositoryRefreshRequest,
+    backport_service: BackportService = Depends(get_backport_service),
+) -> dict:
+    return backport_service.refresh_repository(
+        role=payload.role,
+        local_path=payload.local_path,
+        source_url=payload.source_url,
+        selected_branch=payload.selected_branch,
+    )
+
+
+@router.post("/repositories/prepare", response_model=BackportRepositoryPrepareResponse)
+def prepare_repository(
+    payload: BackportRepositoryPrepareRequest,
+    request: Request,
+) -> BackportRepositoryPrepareResponse:
+    tasks, tasks_lock = _ensure_repository_prepare_tasks(request)
+    task_id = uuid.uuid4().hex
+    task_record = {
+        "task_id": task_id,
+        "status": "running",
+        "role": payload.role,
+        "input": payload.input,
+        "progress": 0,
+        "steps": [],
+        "result": None,
+        "error": "",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    with tasks_lock:
+        tasks[task_id] = task_record
+
+    services = request.app.state.services
+
+    def worker() -> None:
+        def update_progress(progress: dict) -> None:
+            with tasks_lock:
+                task_record["progress"] = progress.get("progress", task_record["progress"])
+                task_record["steps"] = progress.get("steps", task_record["steps"])
+                task_record["updated_at"] = time.time()
+
+        service = BackportService(services)
+        try:
+            result = service.prepare_repository(
+                role=payload.role,
+                raw_input=payload.input,
+                preferred_branch=payload.preferred_branch,
+                progress_callback=update_progress,
+            )
+            steps = result.pop("steps", task_record["steps"])
+            with tasks_lock:
+                task_record["status"] = "success"
+                task_record["progress"] = 100
+                task_record["steps"] = steps
+                task_record["result"] = result
+                task_record["updated_at"] = time.time()
+        except Exception as exc:
+            logger.exception("Backport repository prepare failed: task_id=%s", task_id)
+            with tasks_lock:
+                task_record["status"] = "failed"
+                task_record["error"] = str(exc)
+                task_record["progress"] = 100
+                task_record["updated_at"] = time.time()
+
+    threading.Thread(target=worker, daemon=True, name=f"backport-repo-{task_id[:8]}").start()
+    return BackportRepositoryPrepareResponse(**task_record)
+
+
+@router.get("/repositories/prepare/{task_id}", response_model=BackportRepositoryPrepareResponse)
+def get_repository_prepare_task(
+    task_id: str,
+    request: Request,
+) -> BackportRepositoryPrepareResponse:
+    tasks, tasks_lock = _ensure_repository_prepare_tasks(request)
+    with tasks_lock:
+        task_record = tasks.get(task_id)
+        if task_record is None:
+            raise HTTPException(status_code=404, detail="Backport repository prepare task not found.")
+        return BackportRepositoryPrepareResponse(**dict(task_record))
 
 
 @router.post("/runs", response_model=BackportAsyncRunResponse)
