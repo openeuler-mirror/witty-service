@@ -25,6 +25,8 @@ class OpenClawGatewayRuntime(RuntimeBase):
     def _on_turn_begin(self, session_key: str, message: str) -> None:
         del session_key, message
         self._turn.acc_delta = ""
+        self._turn.acc_thinking = ""
+        self._turn.thinking_suppress = ""
 
     def _map_events(self, raw: dict[str, Any]) -> Iterator[RuntimeTurnEvent]:
         yield from self._map_gateway_events(raw)
@@ -32,15 +34,22 @@ class OpenClawGatewayRuntime(RuntimeBase):
     def _on_mapped_event(
         self, event: RuntimeTurnEvent
     ) -> Iterator[RuntimeTurnEvent]:
+        event_type = event.get("type")
+        if event_type == TurnEventType.THINKING:
+            yield from self._on_thinking_event(event)
+            return
+        if event_type == TurnEventType.THINKING_DELTA:
+            yield from self._on_thinking_delta_event(event)
+            return
         # 追踪 message.delta 累积文本
-        if event.get("type") == TurnEventType.MESSAGE_DELTA:
+        if event_type == TurnEventType.MESSAGE_DELTA:
             delta = event.get("payload", {}).get("delta", "")
             if isinstance(delta, str) and delta:
                 self._turn.acc_delta += delta
         # 上游 OpenClaw runtime 可能将最后几个字符直接打包到 session.message
         # 的完整文本中，而未通过 assistant stream 以 delta 形式下发。此处检测
         # message.completed 文本是否比累积 delta 更长，补发缺失的末尾 delta。
-        elif event.get("type") == TurnEventType.MESSAGE_COMPLETED:
+        elif event_type == TurnEventType.MESSAGE_COMPLETED:
             full_text = event.get("payload", {}).get("text", "")
             if (
                 isinstance(full_text, str)
@@ -55,6 +64,88 @@ class OpenClawGatewayRuntime(RuntimeBase):
                     }
                     self._turn.acc_delta = full_text
         yield event
+
+    def _on_thinking_event(
+        self, event: RuntimeTurnEvent
+    ) -> Iterator[RuntimeTurnEvent]:
+        """完整 thinking 块到达时，立即补发尚未通过 delta 下发的尾巴。
+
+        OpenClaw 的 thinking delta 流为异步刷出，块尾 delta 可能滞后于随后的
+        tool.call.started 到达，导致思考被工具事件劈开、错序。完整 thinking
+        事件在同一条 session.message 中先于 tool.call.started 产出，此处提前
+        补发缺失尾巴，并记录到 thinking_suppress 供后续抵扣迟到的 delta。
+        """
+        thinking = event.get("payload", {}).get("thinking", "")
+        acc = self._turn.acc_thinking
+        if not isinstance(thinking, str) or not thinking:
+            yield event
+            return
+        # 进入新 thinking block 前清空旧的 suppress，防止不同 block
+        # 之间发生前缀碰撞导致陈旧 suppress 污染后续 delta 抵扣。
+        self._turn.thinking_suppress = ""
+        if (
+            acc
+            and thinking.startswith(acc)
+            and len(thinking) > len(acc)
+        ):
+            missing = thinking[len(acc):]
+            self._turn.thinking_suppress += missing
+            yield {
+                "type": TurnEventType.THINKING_DELTA,
+                "payload": {"delta": missing, "text": thinking},
+            }
+        self._turn.acc_thinking = thinking
+        yield event
+
+    def _on_thinking_delta_event(
+        self, event: RuntimeTurnEvent
+    ) -> Iterator[RuntimeTurnEvent]:
+        """抵扣已提前补发的 thinking 尾巴，丢弃/截断迟到的 delta。"""
+        payload = event.get("payload", {})
+        delta = payload.get("delta", "")
+        if not isinstance(delta, str) or not delta:
+            return
+        text = payload.get("text")
+        text = text if isinstance(text, str) else None
+        acc = self._turn.acc_thinking
+        suppress = self._turn.thinking_suppress
+        # 仅当 delta 属于当前 block（text 与 acc 存在前缀延续关系）时才抵扣，
+        # 避免误吞新 block 的内容
+        same_block = (
+            text is not None
+            and (acc.startswith(text) or text.startswith(acc))
+        )
+        if suppress and not same_block:
+            # 新 block 的 delta 到达，旧 suppress（未等到的迟到尾巴）作废
+            self._turn.thinking_suppress = ""
+            suppress = ""
+        if suppress:
+            common = 0
+            limit = min(len(suppress), len(delta))
+            while common < limit and suppress[common] == delta[common]:
+                common += 1
+            if common == len(delta):
+                # delta 整体是已补发尾巴的一部分（可能分块不同），丢弃
+                self._turn.thinking_suppress = suppress[common:]
+                return
+            if common:
+                # 部分抵扣，只下发剩余部分
+                self._turn.thinking_suppress = suppress[common:]
+                delta = delta[common:]
+            else:
+                # 对不上则 suppress 作废，放行避免丢文本
+                logger.warning(
+                    "thinking_suppress mismatch, dropping suppress state: "
+                    "suppress_head=%r delta_head=%r",
+                    suppress[:20],
+                    delta[:20],
+                )
+                self._turn.thinking_suppress = ""
+        self._turn.acc_thinking = text if text else acc + delta
+        yield {
+            "type": TurnEventType.THINKING_DELTA,
+            "payload": {**payload, "delta": delta},
+        }
 
 
     def _map_gateway_events(

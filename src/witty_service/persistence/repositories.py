@@ -167,6 +167,12 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
     usage: dict[str, Any] | None = None
     event_items: list[dict[str, Any]] = []
 
+    # Message-level question fields
+    question: list[dict[str, Any]] | None = None
+    question_id: str | None = None
+    question_status: str | None = None
+    question_answers: list[list[str]] | None = None
+
     for evt in events:
         payload = dict(evt.payload_json or {})
         item: dict[str, Any] = {
@@ -227,6 +233,36 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
                 "totalCost": payload.get("total_cost"),
             }
             item["usage"] = usage
+
+        elif evt.event_type == "question.asked":
+            raw_questions = payload.get("questions")
+            question = raw_questions if isinstance(raw_questions, list) else None
+            question_id = payload.get("question_id")
+            question_status = "asked"
+            item["payload"] = {
+                "question_id": question_id,
+                "questions": question,
+            }
+
+        elif evt.event_type == "question.replied":
+            raw_answers = payload.get("answers")
+            question_answers = raw_answers if isinstance(raw_answers, list) else None
+            if question_id is None:
+                question_id = payload.get("request_id")
+            question_status = "replied"
+            item["payload"] = {
+                "question_id": question_id,
+                "answers": question_answers,
+            }
+
+        elif evt.event_type == "question.rejected":
+            if question_id is None:
+                question_id = payload.get("request_id")
+            question_status = "rejected"
+            item["payload"] = {
+                "question_id": question_id,
+            }
+
         event_items.append(item)
 
     msg_status = msg.status.value if isinstance(msg.status, MessageStatus) else msg.status
@@ -264,6 +300,14 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
         result["thinking"] = thinking
     if usage:
         result["usage"] = usage
+    if question is not None:
+        result["question"] = question
+    if question_id is not None:
+        result["questionId"] = question_id
+    if question_status is not None:
+        result["questionStatus"] = question_status
+    if question_answers is not None:
+        result["questionAnswers"] = question_answers
     return result
 
 
