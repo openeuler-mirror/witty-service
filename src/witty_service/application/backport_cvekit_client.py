@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,9 @@ class BackportCvekitClient:
 
     def set_runtime_config(self, runtime_config: BackportRuntimeConfig | None) -> None:
         self._runtime_config = runtime_config
+        self._run_store.set_secrets(
+            [runtime_config.api_key] if runtime_config and runtime_config.api_key else []
+        )
 
     def set_archive_run_id(self, run_id: str | None) -> None:
         self._run_store.set_run_id(run_id)
@@ -215,11 +219,12 @@ class BackportCvekitClient:
         )
         if result.returncode != 0:
             redacted_cmd = self._redact_command(cmd)
+            secrets = [runtime_config.api_key] if runtime_config.api_key else []
             raise RuntimeError(
                 "cvekit 执行失败\n"
                 f"command: {' '.join(redacted_cmd)}\n"
-                f"stdout: {result.stdout}\n"
-                f"stderr: {result.stderr}"
+                f"stdout: {self._run_store.redact(result.stdout or '', secrets)}\n"
+                f"stderr: {self._run_store.redact(result.stderr or '', secrets)}"
             )
         return result
 
@@ -504,19 +509,20 @@ class BackportCvekitClient:
             if isinstance(row, dict)
         ]
 
-    @staticmethod
-    def _write_report(path: Path, report_data: dict[str, Any], commits: list[dict[str, Any]]) -> None:
+    def _write_report(
+        self,
+        path: Path,
+        report_data: dict[str, Any],
+        commits: list[dict[str, Any]],
+    ) -> None:
+        if self._run_store.is_report_frozen(path):
+            raise RuntimeError("已结束 Run 的报告不可修改，请创建新 Run。")
         next_report = dict(report_data)
         next_report["commits"] = commits
-        with path.open("w", encoding="utf-8") as handle:
+        temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(next_report, handle, allow_unicode=True, sort_keys=False)
-
-    @staticmethod
-    def _filtered_report_path(base_path: Path) -> Path:
-        report_suffix = ".report.yml"
-        if base_path.name.endswith(report_suffix):
-            return base_path.with_name(f"{base_path.name[:-len(report_suffix)]}.filtered.report.yml")
-        return base_path.with_name(f"{base_path.stem}.filtered{base_path.suffix}")
+        temp_path.replace(path)
 
     @staticmethod
     def _infer_likely_missing_prerequisite(text: str) -> bool:
@@ -578,9 +584,12 @@ class BackportCvekitClient:
             },
         )
         self._run_store.archive_excel(run_dir, excel)
+        archive_root = Path(self._run_store.artifacts(run_dir)["run_dir"])
         base_config_path = run_dir / "input" / "backport.base.yml"
         config_path = run_dir / "reports" / "backport-batch.yml"
         report_path = run_dir / "reports" / "backport-batch.yml.report.yml"
+        base_config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
 
         base_config: dict[str, Any] = {
             "project": "linux",
@@ -612,10 +621,25 @@ class BackportCvekitClient:
             base_config["linux_repo_path"] = linux_repo_path.strip()
         with base_config_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(base_config, handle, allow_unicode=True, sort_keys=False)
-        shutil.copy2(base_config_path, run_dir / "backport.base.yml")
-        archive_root = Path(self._run_store.artifacts(run_dir)["run_dir"])
-        shutil.copy2(base_config_path, archive_root / "backport.base.yml")
-        self._run_store.write_json(run_dir / "input" / "config.json", base_config)
+        archived_config_path = archive_root / "input" / "config.json"
+        try:
+            archived_config = json.loads(archived_config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            archived_config = {}
+        if not isinstance(archived_config, dict):
+            archived_config = {}
+        archived_config.update(base_config)
+        if self._runtime_config is not None:
+            archived_config["model"] = {
+                "record_id": str(archived_config.get("backport_model_id") or ""),
+                "display_name": self._runtime_config.llm_model_name,
+                "provider": self._runtime_config.llm_provider,
+                "base_url": self._runtime_config.llm_base_url,
+                "model_name": self._runtime_config.llm_model_name,
+                "backport_engine": self._runtime_config.backport_engine,
+                "format_mode": self._runtime_config.format_mode,
+            }
+        self._run_store.write_json(archived_config_path, archived_config)
 
         self._run_cvekit(
             ["--action", "backport-batch",
@@ -639,20 +663,6 @@ class BackportCvekitClient:
         report_data, commits = self._read_report(report_path)
         report_data = self._reconcile_report(report_data, str(target_repo))
         target_state = BackportGitClient.get_repo_state(str(target_repo))
-        run_manifest = self._run_store.read_manifest(run_dir)
-        self._run_store.update_current_execution(
-            run_dir,
-            {
-                "excel_version": int(run_manifest.get("current_excel_version") or 0),
-                "source": {
-                    "project_url": project_url,
-                    "project_dir": project_dir,
-                    "source_branch": source_branch,
-                },
-                "target": target_state,
-                "config": base_config,
-            },
-        )
         self._write_refresh_meta(
             report_data,
             target_state,
@@ -664,39 +674,48 @@ class BackportCvekitClient:
             yaml.safe_dump(report_data, handle, allow_unicode=True, sort_keys=False)
 
         _, commits = self._read_report(report_path)
-        latest_report_path = run_dir / "reports" / "latest.report.yml"
-        shutil.copy2(report_path, latest_report_path)
-        if config_path.exists():
-            shutil.copy2(config_path, archive_root / "backport-batch.yml")
-        shutil.copy2(report_path, archive_root / "backport-batch.yml.report.yml")
+        initial_report_path = archive_root / "input" / "initial-report.yml"
+        self._run_store.write_text(
+            initial_report_path,
+            report_path.read_text(encoding="utf-8"),
+        )
         self._run_store.update_manifest(
-            run_dir,
+            archive_root,
             {
-                "status": "success",
-                "report_path": str(report_path),
-                "latest_report_path": str(latest_report_path),
-                "commit_count": len(commits),
+                "status": "ready",
+                "current_report": "input/initial-report.yml",
+                "summary": {"total": len(commits), "success": 0, "failed": 0},
+                "target": {
+                    "repository": str(
+                        (
+                            self._run_store.read_manifest(archive_root).get("target")
+                            or {}
+                        ).get("repository")
+                        or target_repo
+                    ),
+                    "branch": str(target_state.get("target_branch") or target_release),
+                    "head": str(target_state.get("target_head") or ""),
+                },
             },
         )
 
-        return {
+        response = {
             "operation": "generate_report",
             "status": "success",
             "stage": "interactive_editing",
             "summary": f"生成报告成功，共 {len(commits)} 条 commit",
             "artifacts": {
-                "report_path": str(report_path),
-                "config_path": str(config_path),
-                "base_config_path": str(base_config_path),
-                "latest_report_path": str(latest_report_path),
+                "report_path": str(initial_report_path),
                 **self._run_store.artifacts(run_dir),
             },
             "report": {
-                "report_path": str(report_path),
+                "report_path": str(initial_report_path),
                 "commit_count": len(commits),
                 "commits": commits,
             },
         }
+        self._run_store.cleanup_work_dir(run_dir)
+        return response
 
     def continue_report(
         self,
@@ -765,16 +784,24 @@ class BackportCvekitClient:
         _, persisted_commits = self._read_report(base_path)
         if (attempt_dir / "report.report.yml").exists():
             shutil.copy2(attempt_dir / "report.report.yml", attempt_dir / "report.yml")
-            shutil.copy2(attempt_dir / "report.report.yml", archive_run_dir / "reports" / "latest.report.yml")
         self._run_store.update_manifest(
             archive_run_dir,
             {
                 "status": "running",
-                "report_path": str(base_path),
-                "latest_report_path": str(archive_run_dir / "reports" / "latest.report.yml"),
-                "commit_count": len(persisted_commits),
+                "summary": {
+                    "total": len(persisted_commits),
+                    "success": sum(
+                        1 for row in persisted_commits
+                        if str(row.get("status") or "").lower() in {"success", "applied", "resolved"}
+                    ),
+                    "failed": sum(
+                        1 for row in persisted_commits
+                        if str(row.get("status") or "").lower() == "failed"
+                    ),
+                },
             },
         )
+        self._run_store.cleanup_work_dir(attempt_dir)
         return {
             "operation": "continue_report",
             "status": "success",
@@ -1072,8 +1099,6 @@ class BackportCvekitClient:
         if not selected_commits:
             raise ValueError("selected_commits 为空")
 
-        filtered_report_path = self._filtered_report_path(base_path)
-
         resolved_commits = [
             self._resolve_commit_row(
                 row=item,
@@ -1123,6 +1148,7 @@ class BackportCvekitClient:
         else:
             case_dir = None
             attempt_dir = self._run_store.next_attempt_dir(archive_run_dir / "reports" / "execute")
+        filtered_report_path = attempt_dir / "report.yml"
 
         config_data = dict(orig_report)
         config_data["commits"] = actionable_commits
@@ -1169,6 +1195,16 @@ class BackportCvekitClient:
         combined_output = "\n".join(part for part in [result.stdout, result.stderr] if part)
 
         _, commits = self._read_report(filtered_report_path)
+        report_data, base_commits = self._read_report(base_path)
+        merged_commits = self._merge_report_rows(base_commits, commits)
+        self._write_report(base_path, report_data, merged_commits)
+        commits = [
+            item
+            for item in merged_commits
+            if self._build_row_id(item) in {
+                self._build_row_id(updated) for updated in commits
+            }
+        ]
         archive_payload: dict[str, Any] | None = None
         if case_dir is not None:
             archive_payload = self._run_store.archive_case_attempt(
@@ -1180,15 +1216,11 @@ class BackportCvekitClient:
                 result={"operation": "execute_selected", "status": "success"},
             )
         else:
-            shutil.copy2(filtered_report_path, attempt_dir / "report.yml")
-        shutil.copy2(filtered_report_path, archive_run_dir / "reports" / "latest.report.yml")
+            self._run_store.cleanup_work_dir(attempt_dir)
         self._run_store.update_manifest(
             archive_run_dir,
             {
                 "status": "running",
-                "report_path": str(base_path),
-                "filtered_report_path": str(filtered_report_path),
-                "latest_report_path": str(archive_run_dir / "reports" / "latest.report.yml"),
             },
         )
         return {
@@ -1441,8 +1473,6 @@ class BackportCvekitClient:
             archive_run_dir,
             {
                 "status": "running",
-                "report_path": str(base_path),
-                "latest_report_path": str(apply_config_path),
             },
         )
         return {
