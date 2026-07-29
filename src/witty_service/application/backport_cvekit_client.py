@@ -14,6 +14,7 @@ from typing import Any
 import yaml
 
 from witty_service.application.backport_git_client import BackportGitClient
+from witty_service.application.backport_run_store import BackportRunStore
 
 
 @dataclass(slots=True)
@@ -79,6 +80,7 @@ class BackportCvekitClient:
         runs_root: str | Path,
     ) -> None:
         self._runs_root = Path(runs_root).expanduser().resolve()
+        self._run_store = BackportRunStore(self._runs_root)
         self._conflict_reporter_url = ""
         self._runtime_config: BackportRuntimeConfig | None = None
 
@@ -102,6 +104,14 @@ class BackportCvekitClient:
 
     def set_runtime_config(self, runtime_config: BackportRuntimeConfig | None) -> None:
         self._runtime_config = runtime_config
+
+    def set_archive_run_id(self, run_id: str | None) -> None:
+        self._run_store.set_run_id(run_id)
+
+    def archive_artifacts_for_report(self, report_path: str) -> dict[str, str]:
+        base_path = Path(report_path).expanduser().resolve()
+        run_dir = self._run_store.ensure_for_report(base_path)
+        return self._run_store.artifacts(run_dir)
 
     @classmethod
     def build_cvekit_option_args(
@@ -195,6 +205,13 @@ class BackportCvekitClient:
             cwd=str(cwd),
             env=env,
             capture_output=True, text=True, encoding="utf-8", check=False,
+        )
+        self._run_store.write_command_logs(
+            cwd=cwd,
+            command=self._redact_command(cmd),
+            returncode=result.returncode,
+            stdout=result.stdout or "",
+            stderr=result.stderr or "",
         )
         if result.returncode != 0:
             redacted_cmd = self._redact_command(cmd)
@@ -438,17 +455,22 @@ class BackportCvekitClient:
         report_data: dict[str, Any],
         commits: list[dict[str, Any]],
         run_prefix: str,
+        run_dir: Path | None = None,
+        report_name: str | None = None,
         target_config_layout: str = "none",
         target_config_layout_opts: dict[str, Any] | None = None,
     ) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
-        self._runs_root.mkdir(parents=True, exist_ok=True)
-        run_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f"{run_prefix}_{int(time.time())}_",
-                dir=str(self._runs_root),
+        if run_dir is None:
+            self._runs_root.mkdir(parents=True, exist_ok=True)
+            run_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=f"{run_prefix}_{int(time.time())}_",
+                    dir=str(self._runs_root),
+                )
             )
-        )
-        report_config_path = run_dir / f"{run_prefix}.report.yml"
+        else:
+            run_dir.mkdir(parents=True, exist_ok=True)
+        report_config_path = run_dir / (report_name or f"{run_prefix}.report.yml")
         self._write_report_config(
             report_config_path,
             report_data,
@@ -540,16 +562,25 @@ class BackportCvekitClient:
         target_repo = Path(target_path).expanduser().resolve()
         BackportGitClient.ensure_git_repo(target_repo)
 
-        self._runs_root.mkdir(parents=True, exist_ok=True)
-        run_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f"{os.getpid()}_{time.time_ns()}_",
-                dir=str(self._runs_root),
-            )
+        run_dir = self._run_store.create_run_dir(
+            operation="generate_report",
+            request={
+                "excel_path": str(excel),
+                "project_url": project_url,
+                "project_dir": project_dir,
+                "source_branch": source_branch,
+                "target_path": str(target_repo),
+                "target_release": target_release,
+                "patch_dataset_dir": patch_dataset_dir,
+                "commit_sort": commit_sort,
+                "target_config_layout": target_config_layout,
+                "target_config_layout_opts": target_config_layout_opts or {},
+            },
         )
-        base_config_path = run_dir / "backport.base.yml"
-        config_path = run_dir / "backport-batch.yml"
-        report_path = run_dir / "backport-batch.yml.report.yml"
+        self._run_store.archive_excel(run_dir, excel)
+        base_config_path = run_dir / "input" / "backport.base.yml"
+        config_path = run_dir / "reports" / "backport-batch.yml"
+        report_path = run_dir / "reports" / "backport-batch.yml.report.yml"
 
         base_config: dict[str, Any] = {
             "project": "linux",
@@ -581,6 +612,10 @@ class BackportCvekitClient:
             base_config["linux_repo_path"] = linux_repo_path.strip()
         with base_config_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(base_config, handle, allow_unicode=True, sort_keys=False)
+        shutil.copy2(base_config_path, run_dir / "backport.base.yml")
+        archive_root = Path(self._run_store.artifacts(run_dir)["run_dir"])
+        shutil.copy2(base_config_path, archive_root / "backport.base.yml")
+        self._run_store.write_json(run_dir / "input" / "config.json", base_config)
 
         self._run_cvekit(
             ["--action", "backport-batch",
@@ -604,6 +639,20 @@ class BackportCvekitClient:
         report_data, commits = self._read_report(report_path)
         report_data = self._reconcile_report(report_data, str(target_repo))
         target_state = BackportGitClient.get_repo_state(str(target_repo))
+        run_manifest = self._run_store.read_manifest(run_dir)
+        self._run_store.update_current_execution(
+            run_dir,
+            {
+                "excel_version": int(run_manifest.get("current_excel_version") or 0),
+                "source": {
+                    "project_url": project_url,
+                    "project_dir": project_dir,
+                    "source_branch": source_branch,
+                },
+                "target": target_state,
+                "config": base_config,
+            },
+        )
         self._write_refresh_meta(
             report_data,
             target_state,
@@ -615,6 +664,20 @@ class BackportCvekitClient:
             yaml.safe_dump(report_data, handle, allow_unicode=True, sort_keys=False)
 
         _, commits = self._read_report(report_path)
+        latest_report_path = run_dir / "reports" / "latest.report.yml"
+        shutil.copy2(report_path, latest_report_path)
+        if config_path.exists():
+            shutil.copy2(config_path, archive_root / "backport-batch.yml")
+        shutil.copy2(report_path, archive_root / "backport-batch.yml.report.yml")
+        self._run_store.update_manifest(
+            run_dir,
+            {
+                "status": "success",
+                "report_path": str(report_path),
+                "latest_report_path": str(latest_report_path),
+                "commit_count": len(commits),
+            },
+        )
 
         return {
             "operation": "generate_report",
@@ -625,7 +688,8 @@ class BackportCvekitClient:
                 "report_path": str(report_path),
                 "config_path": str(config_path),
                 "base_config_path": str(base_config_path),
-                "run_dir": str(run_dir),
+                "latest_report_path": str(latest_report_path),
+                **self._run_store.artifacts(run_dir),
             },
             "report": {
                 "report_path": str(report_path),
@@ -653,12 +717,13 @@ class BackportCvekitClient:
             None,
         )
         if blocking_conflict is not None:
+            archive_run_dir = self._run_store.ensure_for_report(base_path)
             return {
                 "operation": "continue_report",
                 "status": "failed",
                 "stage": "interactive_editing",
                 "summary": "当前仍有阻塞冲突，请先检测或处理当前冲突后再继续检查。",
-                "artifacts": {"base_report_path": str(base_path)},
+                "artifacts": {"base_report_path": str(base_path), **self._run_store.artifacts(archive_run_dir)},
                 "report": {
                     "report_path": str(base_path),
                     "commit_count": len(commits),
@@ -671,12 +736,13 @@ class BackportCvekitClient:
             None,
         )
         if first_pending_index is None:
+            archive_run_dir = self._run_store.ensure_for_report(base_path)
             return {
                 "operation": "continue_report",
                 "status": "success",
                 "stage": "interactive_editing",
                 "summary": "当前 report 没有待检查的 pending 条目。",
-                "artifacts": {"base_report_path": str(base_path)},
+                "artifacts": {"base_report_path": str(base_path), **self._run_store.artifacts(archive_run_dir)},
                 "report": {
                     "report_path": str(base_path),
                     "commit_count": len(commits),
@@ -684,15 +750,31 @@ class BackportCvekitClient:
                 },
             }
 
-        run_dir, _, updated_commits = self._run_stop_at_first_conflict_report(
+        archive_run_dir = self._run_store.ensure_for_report(base_path)
+        attempt_dir = self._run_store.next_attempt_dir(archive_run_dir / "reports" / "continue")
+        _, _, updated_commits = self._run_stop_at_first_conflict_report(
             report_data=report_data,
             commits=commits,
             run_prefix="continue-backport-batch",
+            run_dir=attempt_dir,
+            report_name="report.report.yml",
             target_config_layout=target_config_layout,
             target_config_layout_opts=target_config_layout_opts,
         )
         self._write_report(base_path, report_data, updated_commits)
         _, persisted_commits = self._read_report(base_path)
+        if (attempt_dir / "report.report.yml").exists():
+            shutil.copy2(attempt_dir / "report.report.yml", attempt_dir / "report.yml")
+            shutil.copy2(attempt_dir / "report.report.yml", archive_run_dir / "reports" / "latest.report.yml")
+        self._run_store.update_manifest(
+            archive_run_dir,
+            {
+                "status": "running",
+                "report_path": str(base_path),
+                "latest_report_path": str(archive_run_dir / "reports" / "latest.report.yml"),
+                "commit_count": len(persisted_commits),
+            },
+        )
         return {
             "operation": "continue_report",
             "status": "success",
@@ -700,7 +782,8 @@ class BackportCvekitClient:
             "summary": f"继续检查完成，从第 {first_pending_index + 1} 条 pending 开始推进。",
             "artifacts": {
                 "base_report_path": str(base_path),
-                "run_dir": str(run_dir),
+                "attempt_dir": str(attempt_dir),
+                **self._run_store.artifacts(archive_run_dir),
             },
             "report": {
                 "report_path": str(base_path),
@@ -714,11 +797,12 @@ class BackportCvekitClient:
         if not base_path.exists():
             raise FileNotFoundError(f"base_report_path 不存在: {base_path}")
         _, commits = self._read_report(base_path)
+        archive_run_dir = self._run_store.ensure_for_report(base_path)
         return {
             "operation": "load_report",
             "status": "success",
             "stage": "interactive_editing",
-            "artifacts": {"base_report_path": str(base_path)},
+            "artifacts": {"base_report_path": str(base_path), **self._run_store.artifacts(archive_run_dir)},
             "report": {
                 "report_path": str(base_path),
                 "commit_count": len(commits),
@@ -783,35 +867,51 @@ class BackportCvekitClient:
             row_for_check["original_patch_path"] = original_patch_path
             row_for_check["patch_path"] = original_patch_path
 
-        run_dir: Path | None = None
-        try:
-            run_dir, _, updated_rows = self._run_stop_at_first_conflict_report(
-                report_data=report_data,
-                commits=[row_for_check],
-                run_prefix="check-backport-row",
-                target_config_layout=target_config_layout,
-                target_config_layout_opts=target_config_layout_opts,
-            )
-            updated_row = updated_rows[0] if updated_rows else row_for_check
-            next_commits = self._merge_report_rows(commits, [updated_row])
-            self._write_report(base_path, report_data, next_commits)
-            return {
-                "operation": "check_row",
-                "status": "success",
-                "stage": "interactive_editing",
-                "summary": "当前提交已检查。",
-                "artifacts": {
-                    "base_report_path": str(base_path),
-                },
-                "report": {
-                    "report_path": str(base_path),
-                    "commit_count": 1,
-                    "commits": [updated_row],
-                },
-            }
-        finally:
-            if run_dir is not None:
-                shutil.rmtree(run_dir, ignore_errors=True)
+        archive_run_dir = self._run_store.ensure_for_report(base_path)
+        case_dir = self._run_store.case_dir(
+            archive_run_dir,
+            row_for_check,
+            row_id=self._build_row_id(row_for_check),
+        )
+        attempt_dir = self._run_store.next_attempt_dir(case_dir)
+        _, _, updated_rows = self._run_stop_at_first_conflict_report(
+            report_data=report_data,
+            commits=[row_for_check],
+            run_prefix="check-backport-row",
+            run_dir=attempt_dir,
+            report_name="report.report.yml",
+            target_config_layout=target_config_layout,
+            target_config_layout_opts=target_config_layout_opts,
+        )
+        updated_row = updated_rows[0] if updated_rows else row_for_check
+        next_commits = self._merge_report_rows(commits, [updated_row])
+        self._write_report(base_path, report_data, next_commits)
+        case_result = self._run_store.archive_case_attempt(
+            attempt_dir=attempt_dir,
+            report_path=attempt_dir / "report.report.yml",
+            rows=[updated_row],
+            sanitized_rows=[self.sanitize_commit_item(updated_row)],
+            patch_keys=self.PATCH_KEYS,
+            result={"operation": "check_row", "status": "success"},
+        )
+        return {
+            "operation": "check_row",
+            "status": "success",
+            "stage": "interactive_editing",
+            "summary": "当前提交已检查。",
+            "artifacts": {
+                "base_report_path": str(base_path),
+                "attempt_dir": str(attempt_dir),
+                "case_dir": str(case_dir),
+                **self._run_store.artifacts(archive_run_dir),
+            },
+            "report": {
+                "report_path": str(base_path),
+                "commit_count": 1,
+                "commits": [updated_row],
+            },
+            "archive": case_result,
+        }
 
     def merge_rows_into_report(
         self,
@@ -900,16 +1000,33 @@ class BackportCvekitClient:
             row_for_check["original_patch_path"] = original_patch_path
             row_for_check["patch_path"] = original_patch_path
 
-        run_dir, _, updated_rows = self._run_stop_at_first_conflict_report(
+        archive_run_dir = self._run_store.ensure_for_report(base_path)
+        case_dir = self._run_store.case_dir(
+            archive_run_dir,
+            row_for_check,
+            row_id=self._build_row_id(row_for_check),
+        )
+        attempt_dir = self._run_store.next_attempt_dir(case_dir)
+        _, _, updated_rows = self._run_stop_at_first_conflict_report(
             report_data=report_data,
             commits=[row_for_check],
             run_prefix="recheck-backport-conflict",
+            run_dir=attempt_dir,
+            report_name="report.report.yml",
             target_config_layout=target_config_layout,
             target_config_layout_opts=target_config_layout_opts,
         )
         updated_row = updated_rows[0] if updated_rows else row_for_check
         next_commits = self._merge_report_rows(commits, [updated_row])
         self._write_report(base_path, report_data, next_commits)
+        case_result = self._run_store.archive_case_attempt(
+            attempt_dir=attempt_dir,
+            report_path=attempt_dir / "report.report.yml",
+            rows=[updated_row],
+            sanitized_rows=[self.sanitize_commit_item(updated_row)],
+            patch_keys=self.PATCH_KEYS,
+            result={"operation": "recheck_conflict", "status": "success"},
+        )
         return {
             "operation": "recheck_conflict",
             "status": "success",
@@ -917,13 +1034,16 @@ class BackportCvekitClient:
             "summary": "当前冲突已重新检测。",
             "artifacts": {
                 "base_report_path": str(base_path),
-                "run_dir": str(run_dir),
+                "attempt_dir": str(attempt_dir),
+                "case_dir": str(case_dir),
+                **self._run_store.artifacts(archive_run_dir),
             },
             "report": {
                 "report_path": str(base_path),
                 "commit_count": 1,
                 "commits": [updated_row],
             },
+            "archive": case_result,
         }
 
     # ── 执行选中 commit ────────────────────────────────────────
@@ -976,11 +1096,13 @@ class BackportCvekitClient:
             and str(item.get("merged_in_target") or "").strip().lower() != "skipped"
         ]
         if not actionable_commits:
+            archive_run_dir = self._run_store.ensure_for_report(base_path)
             return {
                 "operation": "execute_selected",
                 "status": "success",
                 "stage": "interactive_editing",
                 "summary": f"选中的 {len(resolved_commits)} 条 commit 均无需执行",
+                "artifacts": {"base_report_path": str(base_path), **self._run_store.artifacts(archive_run_dir)},
                 "report": {
                     "commit_count": len(resolved_commits),
                     "commits": resolved_commits,
@@ -989,6 +1111,18 @@ class BackportCvekitClient:
                     "likely_missing_prerequisite": False,
                 },
             }
+
+        archive_run_dir = self._run_store.ensure_for_report(base_path)
+        if len(actionable_commits) == 1:
+            case_dir = self._run_store.case_dir(
+                archive_run_dir,
+                actionable_commits[0],
+                row_id=self._build_row_id(actionable_commits[0]),
+            )
+            attempt_dir = self._run_store.next_attempt_dir(case_dir)
+        else:
+            case_dir = None
+            attempt_dir = self._run_store.next_attempt_dir(archive_run_dir / "reports" / "execute")
 
         config_data = dict(orig_report)
         config_data["commits"] = actionable_commits
@@ -1031,10 +1165,32 @@ class BackportCvekitClient:
             "-e", "--debug", "--json",
         ]
         cmd.extend(self.build_cvekit_option_args(cvekit_options))
-        result = self._run_cvekit(cmd, filtered_report_path.parent)
+        result = self._run_cvekit(cmd, attempt_dir)
         combined_output = "\n".join(part for part in [result.stdout, result.stderr] if part)
 
         _, commits = self._read_report(filtered_report_path)
+        archive_payload: dict[str, Any] | None = None
+        if case_dir is not None:
+            archive_payload = self._run_store.archive_case_attempt(
+                attempt_dir=attempt_dir,
+                report_path=filtered_report_path,
+                rows=commits,
+                sanitized_rows=self.sanitize_commit_list(commits),
+                patch_keys=self.PATCH_KEYS,
+                result={"operation": "execute_selected", "status": "success"},
+            )
+        else:
+            shutil.copy2(filtered_report_path, attempt_dir / "report.yml")
+        shutil.copy2(filtered_report_path, archive_run_dir / "reports" / "latest.report.yml")
+        self._run_store.update_manifest(
+            archive_run_dir,
+            {
+                "status": "running",
+                "report_path": str(base_path),
+                "filtered_report_path": str(filtered_report_path),
+                "latest_report_path": str(archive_run_dir / "reports" / "latest.report.yml"),
+            },
+        )
         return {
             "operation": "execute_selected",
             "status": "success",
@@ -1042,6 +1198,9 @@ class BackportCvekitClient:
             "summary": f"执行完成，共处理 {len(commits)} 条 commit",
             "artifacts": {
                 "filtered_report_path": str(filtered_report_path),
+                "attempt_dir": str(attempt_dir),
+                **({"case_dir": str(case_dir)} if case_dir is not None else {}),
+                **self._run_store.artifacts(archive_run_dir),
             },
             "report": {
                 "commit_count": len(commits),
@@ -1050,6 +1209,7 @@ class BackportCvekitClient:
             "diagnostics": {
                 "likely_missing_prerequisite": self._infer_likely_missing_prerequisite(combined_output),
             },
+            "archive": archive_payload or {},
         }
 
     @staticmethod
@@ -1228,11 +1388,18 @@ class BackportCvekitClient:
             target_config_layout_opts=target_config_layout_opts,
         )
 
+        archive_run_dir = self._run_store.ensure_for_report(base_path)
+        case_dir = self._run_store.case_dir(
+            archive_run_dir,
+            resolved_row,
+            row_id=self._build_row_id(resolved_row),
+        )
+        attempt_dir = self._run_store.next_attempt_dir(case_dir)
         result = self._run_cvekit(
             ["--action", "backport-batch",
              "--backport-config", str(apply_config_path), "--debug", "--json",
              "--apply", apply_value],
-            apply_config_path.parent,
+            attempt_dir,
         )
         apply_result = self._parse_json_output(result.stdout)
 
@@ -1262,12 +1429,35 @@ class BackportCvekitClient:
                 if self._build_row_id(item) in affected_ids
             ]
 
+        case_result = self._run_store.archive_case_attempt(
+            attempt_dir=attempt_dir,
+            report_path=apply_config_path,
+            rows=affected_rows,
+            sanitized_rows=self.sanitize_commit_list(affected_rows),
+            patch_keys=self.PATCH_KEYS,
+            result={"operation": "apply_row", "status": "failed" if apply_status == "failed" else "success"},
+        )
+        self._run_store.update_manifest(
+            archive_run_dir,
+            {
+                "status": "running",
+                "report_path": str(base_path),
+                "latest_report_path": str(apply_config_path),
+            },
+        )
         return {
             "operation": "apply_row",
             "status": "failed" if apply_status == "failed" else "success",
             "stage": "interactive_editing",
             "summary": apply_result.get("error") or "单条应用执行完成",
+            "artifacts": {
+                "base_report_path": str(base_path),
+                "attempt_dir": str(attempt_dir),
+                "case_dir": str(case_dir),
+                **self._run_store.artifacts(archive_run_dir),
+            },
             "report": {"commit_count": len(affected_rows), "commits": affected_rows},
+            "archive": case_result,
         }
 
     def preview_commit_message(

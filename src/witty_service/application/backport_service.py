@@ -364,6 +364,9 @@ class BackportService:
         )
         conflict_reporter_started = False
         runtime_configured = False
+        archive_run_id = self._get_string(normalized_payload, "_archive_run_id", "archive_run_id")
+        if archive_run_id:
+            self._cvekit_client.set_archive_run_id(archive_run_id)
         try:
             action_config: dict[str, Any] | None = None
             needs_config = (
@@ -412,6 +415,8 @@ class BackportService:
                 self._conflict_reporter_manager.stop()
             if runtime_configured:
                 self._cvekit_client.set_runtime_config(None)
+            if archive_run_id:
+                self._cvekit_client.set_archive_run_id(None)
 
     def _build_handlers(self) -> dict[str, Callable[[dict[str, Any]], dict[str, Any]]]:
         return {
@@ -778,12 +783,17 @@ class BackportService:
         if step_count >= max_steps and index < len(current_commits):
             final_report = self._cvekit_client.load_report(current_report_path)
             final_commits = self._resolve_result_commits(final_report)
+            archive_artifacts = (
+                self._cvekit_client.archive_artifacts_for_report(current_report_path)
+                if hasattr(self._cvekit_client, "archive_artifacts_for_report")
+                else {}
+            )
             return {
                 "operation": "run_all",
                 "status": "failed",
                 "stage": "failed",
                 "summary": f"一键运行超过最大步数 {max_steps}，仍未完成。",
-                "artifacts": {"base_report_path": current_report_path},
+                "artifacts": {"base_report_path": current_report_path, **archive_artifacts},
                 "report": {
                     "report_path": current_report_path,
                     "commit_count": len(final_commits),
@@ -794,6 +804,11 @@ class BackportService:
 
         final_report = self._cvekit_client.load_report(current_report_path)
         final_commits = self._resolve_result_commits(final_report)
+        archive_artifacts = (
+            self._cvekit_client.archive_artifacts_for_report(current_report_path)
+            if hasattr(self._cvekit_client, "archive_artifacts_for_report")
+            else {}
+        )
         self._emit_run_all_progress(
             phase="completed",
             message="一键运行完成。",
@@ -810,7 +825,7 @@ class BackportService:
             "status": "success",
             "stage": "completed",
             "summary": f"一键运行完成，共处理 {processed_count} 条 commit，失败 {failed_count} 条。",
-            "artifacts": {"base_report_path": current_report_path},
+            "artifacts": {"base_report_path": current_report_path, **archive_artifacts},
             "report": {
                 "report_path": current_report_path,
                 "commit_count": len(final_commits),
@@ -1537,12 +1552,17 @@ class BackportService:
             failed_count=failed_count,
             processed_count=processed_count,
         )
+        archive_artifacts = (
+            self._cvekit_client.archive_artifacts_for_report(current_report_path)
+            if hasattr(self._cvekit_client, "archive_artifacts_for_report")
+            else {}
+        )
         return {
             "operation": "run_all",
             "status": "success",
             "stage": "paused",
             "summary": "一键运行已暂停，当前 report 已保存，可继续。",
-            "artifacts": {"base_report_path": current_report_path},
+            "artifacts": {"base_report_path": current_report_path, **archive_artifacts},
             "report": {
                 "report_path": current_report_path,
                 "commit_count": len(current_commits),
