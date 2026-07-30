@@ -930,8 +930,8 @@ def test_assemble_message_question_events(repo: SqliteRepository) -> None:
     # questionId / questionStatus 应为最后一个 question 事件的状态
     assert msg["questionId"] == "que_002"
     assert msg["questionStatus"] == "rejected"
-    # questionAnswers 来自 question.replied
-    assert msg["questionAnswers"] == [["a.md"]]
+    # question.asked 会重置 question_answers，que_002 是 rejected 状态，不应有 answers
+    assert "questionAnswers" not in msg
     # question 列表来自最后一个 question.asked（最后一个有 questions 的事件赋值）
     assert msg["question"] == [{"question": "Proceed?", "header": "Confirm"}]
 

@@ -239,6 +239,7 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
             question = raw_questions if isinstance(raw_questions, list) else None
             question_id = payload.get("question_id")
             question_status = "asked"
+            question_answers = None
             item["payload"] = {
                 "question_id": question_id,
                 "questions": question,
