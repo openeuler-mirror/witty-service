@@ -24,7 +24,7 @@ class BackportRuntimeConfig:
     api_key: str
     llm_base_url: str = ""
     llm_model_name: str = ""
-    backport_engine: str = "mystique"
+    backport_engine: str = "opencode"
     format_mode: str = "changed"
 
 
@@ -210,13 +210,40 @@ class BackportCvekitClient:
             env=env,
             capture_output=True, text=True, encoding="utf-8", check=False,
         )
-        self._run_store.write_command_logs(
+        source_log_archive_dir = self._run_store.write_command_logs(
             cwd=cwd,
             command=self._redact_command(cmd),
             returncode=result.returncode,
             stdout=result.stdout or "",
             stderr=result.stderr or "",
         )
+        source_log_roots = {
+            (Path.home() / ".backport").resolve(),
+            (Path.home() / ".cvekit" / "backport_logs").resolve(),
+        }
+        source_log_paths = {
+            Path(value).expanduser().resolve()
+            for value in re.findall(
+                r"""(/[^\s"',]+\.log)""",
+                "\n".join((result.stdout or "", result.stderr or "")),
+            )
+        }
+        for source_log in sorted(source_log_paths):
+            if (
+                source_log.parent not in source_log_roots
+                or not source_log.name.startswith("backport-")
+                or not source_log.is_file()
+            ):
+                continue
+            archived_log = source_log_archive_dir / source_log.name
+            cleaned = self._run_store.redact(
+                source_log.read_text(encoding="utf-8", errors="replace"),
+                [self._runtime_config.api_key] if self._runtime_config else None,
+            )
+            self._run_store.write_text(archived_log, cleaned)
+            if not archived_log.is_file():
+                raise RuntimeError(f"Backport 日志归档失败: {source_log}")
+            source_log.unlink()
         if result.returncode != 0:
             redacted_cmd = self._redact_command(cmd)
             secrets = [runtime_config.api_key] if runtime_config.api_key else []
@@ -284,7 +311,11 @@ class BackportCvekitClient:
             raw_path = str(item.get(key) or "").strip()
             patch_file = Path(raw_path).expanduser() if raw_path else None
             patches[kind] = {
-                "exists": bool(patch_file and patch_file.is_file()),
+                "exists": bool(
+                    patch_file
+                    and patch_file.is_file()
+                    and patch_file.stat().st_size > 0
+                ),
                 "file_name": Path(raw_path).name if raw_path else "",
             }
         return patches
@@ -338,11 +369,13 @@ class BackportCvekitClient:
             if not candidate.exists():
                 continue
             _, commits = self._read_report(candidate)
-            for item in commits:
+            for row_number, item in enumerate(commits, start=1):
                 if not isinstance(item, dict):
                     continue
                 if self._build_row_id(item) == target_row_id:
-                    return self._overlay_commit(item, row)
+                    resolved = self._overlay_commit(item, row)
+                    resolved.setdefault("row_number", row_number)
+                    return resolved
 
         searched = ", ".join(str(path) for path in candidate_paths) or "<empty>"
         raise ValueError(f"report 中找不到 row_id={target_row_id}，searched={searched}")
@@ -375,8 +408,7 @@ class BackportCvekitClient:
             item["conflict_check_error"] = None
             item["status"] = "success"
             item["error"] = None
-            if not str(item.get("applied_commit") or "").strip():
-                item["applied_commit"] = matched_commit
+            item["existing_commit"] = matched_commit
         report_data["commits"] = commits
         return marked_count
 
@@ -801,6 +833,28 @@ class BackportCvekitClient:
                 },
             },
         )
+        previous_rows = {
+            self._build_row_id(row): row
+            for row in commits
+            if isinstance(row, dict)
+        }
+        changed_rows = [
+            row
+            for row in persisted_commits
+            if previous_rows.get(self._build_row_id(row)) != row
+        ]
+        archived_cases = [
+            self._run_store.archive_case_attempt(
+                attempt_dir=attempt_dir,
+                report_path=attempt_dir / "report.report.yml",
+                rows=[row],
+                sanitized_rows=[self.sanitize_commit_item(row)],
+                patch_keys=self.PATCH_KEYS,
+                result={"operation": "continue_report", "status": "success"},
+                cleanup=False,
+            )
+            for row in changed_rows
+        ]
         self._run_store.cleanup_work_dir(attempt_dir)
         return {
             "operation": "continue_report",
@@ -817,6 +871,7 @@ class BackportCvekitClient:
                 "commit_count": len(persisted_commits),
                 "commits": persisted_commits,
             },
+            "archive": {"cases": archived_cases},
         }
 
     def load_report(self, base_report_path: str) -> dict[str, Any]:
@@ -1148,7 +1203,7 @@ class BackportCvekitClient:
         else:
             case_dir = None
             attempt_dir = self._run_store.next_attempt_dir(archive_run_dir / "reports" / "execute")
-        filtered_report_path = attempt_dir / "report.yml"
+        filtered_report_path = attempt_dir / "report.report.yml"
 
         config_data = dict(orig_report)
         config_data["commits"] = actionable_commits
@@ -1216,6 +1271,20 @@ class BackportCvekitClient:
                 result={"operation": "execute_selected", "status": "success"},
             )
         else:
+            archive_payload = {
+                "cases": [
+                    self._run_store.archive_case_attempt(
+                        attempt_dir=attempt_dir,
+                        report_path=filtered_report_path,
+                        rows=[row],
+                        sanitized_rows=[self.sanitize_commit_item(row)],
+                        patch_keys=self.PATCH_KEYS,
+                        result={"operation": "execute_selected", "status": "success"},
+                        cleanup=False,
+                    )
+                    for row in commits
+                ]
+            }
             self._run_store.cleanup_work_dir(attempt_dir)
         self._run_store.update_manifest(
             archive_run_dir,
@@ -1247,6 +1316,14 @@ class BackportCvekitClient:
     @staticmethod
     def _normalize_try_resolve_row(row: dict[str, Any]) -> dict[str, Any]:
         updated = dict(row)
+        if updated.get("equivalent_exists") is True:
+            updated["has_conflict"] = False
+            updated["conflict_check_method"] = "llm-equivalence"
+            updated["conflict_check_error"] = None
+            updated["backported_patch_path"] = ""
+            updated["patch_path"] = ""
+            updated["error"] = None
+            return updated
         backported_patch_path = str(updated.get("backported_patch_path") or "").strip()
         applied_commit = str(updated.get("applied_commit") or "").strip()
         status = str(updated.get("status") or "").strip().lower()
@@ -1427,15 +1504,17 @@ class BackportCvekitClient:
             row_id=self._build_row_id(resolved_row),
         )
         attempt_dir = self._run_store.next_attempt_dir(case_dir)
+        execution_report_path = attempt_dir / "apply.report.yml"
+        shutil.copy2(apply_config_path, execution_report_path)
         result = self._run_cvekit(
             ["--action", "backport-batch",
-             "--backport-config", str(apply_config_path), "--debug", "--json",
+             "--backport-config", str(execution_report_path), "--debug", "--json",
              "--apply", apply_value],
             attempt_dir,
         )
         apply_result = self._parse_json_output(result.stdout)
 
-        _, commits = self._read_report(apply_config_path)
+        _, commits = self._read_report(execution_report_path)
         affected_rows = [c for c in commits if isinstance(c, dict) and self._build_row_id(c) == target_row_id] or [resolved_row]
         apply_status = str(apply_result.get("status") or "").strip().lower()
         if apply_status and apply_status != "success":
@@ -1463,11 +1542,15 @@ class BackportCvekitClient:
 
         case_result = self._run_store.archive_case_attempt(
             attempt_dir=attempt_dir,
-            report_path=apply_config_path,
+            report_path=execution_report_path,
             rows=affected_rows,
             sanitized_rows=self.sanitize_commit_list(affected_rows),
             patch_keys=self.PATCH_KEYS,
-            result={"operation": "apply_row", "status": "failed" if apply_status == "failed" else "success"},
+            result={
+                "operation": "apply_row",
+                "status": "failed" if apply_status == "failed" else "success",
+                "batch_logfile": apply_result.get("batch_logfile"),
+            },
         )
         self._run_store.update_manifest(
             archive_run_dir,

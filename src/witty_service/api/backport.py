@@ -319,9 +319,11 @@ def create_run(
         # 主要服务于_run_all，记录当前运行的progress
         def update_progress(progress: dict) -> None:
             with runs_lock:
+                execution_summary = run_store.record_progress(run_id, progress)
+                if execution_summary is not None:
+                    run_record["execution_summary"] = execution_summary
                 run_record["progress"] = progress
                 run_record["updated_at"] = time.time()
-                run_store.record_progress(run_id, progress)
 
         def pause_requested() -> bool:
             with runs_lock:
@@ -408,7 +410,7 @@ def create_run(
                         else run_store.read_manifest(run_id).get("summary", {}),
                     },
                 )
-                run_store.update_current_execution(
+                execution_summary = run_store.update_current_execution(
                     run_store.runs_root / run_id,
                     {
                         "status": archive_status,
@@ -426,6 +428,8 @@ def create_run(
                         },
                     },
                 )
+                if execution_summary is not None:
+                    run_record["execution_summary"] = execution_summary
         except Exception as exc:
             logger.exception("Backport async run failed: run_id=%s action=%s", run_id, action)
             with runs_lock:
@@ -439,10 +443,12 @@ def create_run(
                         "error": str(exc),
                     },
                 )
-                run_store.update_current_execution(
+                execution_summary = run_store.update_current_execution(
                     run_store.runs_root / run_id,
                     {"status": "failed", "error": str(exc)},
                 )
+                if execution_summary is not None:
+                    run_record["execution_summary"] = execution_summary
 
     threading.Thread(target=worker, daemon=True, name=f"backport-{run_id[:8]}").start()
     return BackportAsyncRunResponse(**run_record)

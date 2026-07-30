@@ -101,6 +101,7 @@ class BackportAsyncRunResponse(BaseModel):
     result: dict[str, Any] | None = None
     error: str = ""
     progress: dict[str, Any] | None = None
+    execution_summary: dict[str, Any] | None = None
     pause_requested: bool = False
     paused_at: float | None = None
 
