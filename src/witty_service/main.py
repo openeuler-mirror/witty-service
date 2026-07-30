@@ -71,6 +71,14 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
                 )
 
     @app.on_event("startup")
+    def recover_backport_runs() -> None:
+        from witty_service.application.backport_run_store import BackportRunStore
+
+        base_dir = app.state.services.workspace_store.base_dir
+        app.state.backport_run_store = BackportRunStore(base_dir / "backport-runs")
+        app.state.backport_run_store.list_runs(active_run_ids=set())
+
+    @app.on_event("startup")
     def recover_agents() -> None:
         import asyncio
         from witty_service.application.agent_manager import _recovery_lock
