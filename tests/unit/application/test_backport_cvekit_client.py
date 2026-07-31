@@ -601,9 +601,13 @@ def test_execute_selected_empty_or_unresolvable_raises(client: BackportCvekitCli
 def test_execute_selected_success_and_diagnose(
     client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    client.set_archive_run_id("execute-selected-test")
     base = tmp_path / "b.yml"
 
     def run_ok(self, args, cwd):
+        config_path = args[args.index("--backport-config") + 1]
+        assert "-e" in args
+        assert config_path.endswith(".report.yml")
         cfg = next(a for a in args if a.endswith(".yml"))
         Path(cfg).write_text(yaml.safe_dump({"commits": [{"row_id": "1", "status": "success"}]}), encoding="utf-8")
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr="")
@@ -693,6 +697,7 @@ def test_apply_row_already_merged_short_circuit(client: BackportCvekitClient, tm
 def test_apply_row_success_and_failure(
     client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    client.set_archive_run_id("apply-row-test")
     base = tmp_path / "b.yml"
     _write_report(base, commits=[{"row_id": "1", "status": "pending", "patch_path": "/p"}])
 
@@ -722,19 +727,37 @@ def test_apply_row_success_and_failure(
 def test_apply_row_uses_working_report_when_exists(
     client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    client.set_archive_run_id("apply-working-report-test")
     base = tmp_path / "b.yml"
     work = tmp_path / "w.yml"
     _write_report(base, commits=[{"row_id": "1", "status": "pending", "patch_path": "/p"}])
     _write_report(work, commits=[{"row_id": "1", "status": "pending", "patch_path": "/p"}])
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", lambda self, args, cwd: (seen.update(config=next(a for a in args if a.endswith(".yml"))) or subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps({"status": "success"}), stderr="")))
+
+    def run_ok(self, args, cwd):
+        config = Path(next(a for a in args if a.endswith(".yml")))
+        seen.update(
+            config=str(config),
+            report=yaml.safe_load(config.read_text(encoding="utf-8")),
+        )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps({"status": "success"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", run_ok)
     client.apply_row(
         base_report_path=str(base), row={"row_id": "1"},
         commit_message_template="", commit_message_source="auto",
         signer_name="", signer_email="", linux_repo_path="",
         working_report_path=str(work),
     )
-    assert seen["config"] == str(work.resolve())
+    execution_report = Path(seen["config"])
+    assert execution_report.name == "apply.report.yml"
+    assert execution_report.parent != work.parent
+    assert seen["report"]["commits"][0]["row_id"] == "1"
 
 
 def test_preview_commit_message_success_and_failure(

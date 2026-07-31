@@ -466,6 +466,7 @@ class BackportService:
             current_commits = self._resolve_result_commits(loaded)
             self._emit_run_all_progress(
                 phase="initializing",
+                phase_state="completed",
                 message="已加载当前 Backport 工作表，准备从现有状态继续。",
                 current_report_path=current_report_path,
                 commits=current_commits,
@@ -475,6 +476,7 @@ class BackportService:
             self._require_string(payload, "run_all", "excel_path", "excelPath")
             self._emit_run_all_progress(
                 phase="initializing",
+                phase_state="running",
                 message="当前没有可继续的 report，正在从 Excel 初始化工作表。",
                 current_report_path="",
                 commits=[],
@@ -487,6 +489,7 @@ class BackportService:
             current_commits = self._resolve_result_commits(generated)
             self._emit_run_all_progress(
                 phase="initializing",
+                phase_state="completed",
                 message="工作表已初始化，后续将按 commit 顺序逐条处理。",
                 current_report_path=current_report_path,
                 commits=current_commits,
@@ -508,6 +511,7 @@ class BackportService:
         )
         self._emit_run_all_progress(
             phase="initializing",
+            phase_state="completed",
             message=f"已固定本轮目标标题索引基线: {target_baseline_sha[:12]}。",
             current_report_path=current_report_path,
             commits=current_commits,
@@ -568,6 +572,7 @@ class BackportService:
                 processed_count += 1
                 self._emit_run_all_progress(
                     phase="skipped",
+                    phase_state="completed",
                     message=f"跳过第 {index + 1} 条：已完成、无需移植或已标记失败。",
                     current_report_path=current_report_path,
                     commits=current_commits,
@@ -585,6 +590,7 @@ class BackportService:
             if needs_check:
                 self._emit_run_all_progress(
                     phase="checking",
+                    phase_state="running",
                     message=f"正在检查第 {index + 1} 条 commit。",
                     current_report_path=current_report_path,
                     commits=current_commits,
@@ -605,6 +611,7 @@ class BackportService:
                     processed_count += 1
                     self._emit_run_all_progress(
                         phase="failed",
+                        phase_state="failed",
                         message=f"第 {index + 1} 条 commit 检查失败，已标记失败并继续后续 commit。",
                         current_report_path=current_report_path,
                         commits=current_commits,
@@ -617,6 +624,7 @@ class BackportService:
                     continue
                 self._emit_run_all_progress(
                     phase="checking",
+                    phase_state="completed",
                     message=f"第 {index + 1} 条 commit 检查完成。",
                     current_report_path=current_report_path,
                     commits=current_commits,
@@ -628,6 +636,7 @@ class BackportService:
             if row.get("has_conflict") is True:
                 self._emit_run_all_progress(
                     phase="resolving",
+                    phase_state="running",
                     message=f"第 {index + 1} 条存在冲突，正在尝试自动处理。",
                     current_report_path=current_report_path,
                     commits=current_commits,
@@ -665,6 +674,7 @@ class BackportService:
                     processed_count += 1
                     self._emit_run_all_progress(
                         phase="failed",
+                        phase_state="failed",
                         message=f"第 {index + 1} 条自动解冲突失败，已标记失败并继续后续 commit。",
                         current_report_path=current_report_path,
                         commits=current_commits,
@@ -678,6 +688,7 @@ class BackportService:
 
                 self._emit_run_all_progress(
                     phase="resolving",
+                    phase_state="completed",
                     message=f"第 {index + 1} 条自动处理完成，准备应用。",
                     current_report_path=current_report_path,
                     commits=current_commits,
@@ -694,6 +705,7 @@ class BackportService:
                     processed_count += 1
                     self._emit_run_all_progress(
                         phase="skipped",
+                        phase_state="completed",
                         message=f"第 {index + 1} 条自动处理后已完成或无需再次应用。",
                         current_report_path=current_report_path,
                         commits=current_commits,
@@ -707,6 +719,7 @@ class BackportService:
 
             self._emit_run_all_progress(
                 phase="applying",
+                phase_state="running",
                 message=f"正在应用第 {index + 1} 条 commit。",
                 current_report_path=current_report_path,
                 commits=current_commits,
@@ -725,6 +738,7 @@ class BackportService:
             if applied.get("status") == "failed" and was_unchecked:
                 self._emit_run_all_progress(
                     phase="checking",
+                    phase_state="running",
                     message=f"第 {index + 1} 条直接应用失败，正在回退到冲突检查。",
                     current_report_path=current_report_path,
                     commits=current_commits,
@@ -745,6 +759,7 @@ class BackportService:
                     processed_count += 1
                     self._emit_run_all_progress(
                         phase="failed",
+                        phase_state="failed",
                         message=f"第 {index + 1} 条 commit 检查失败，已标记失败并继续后续 commit。",
                         current_report_path=current_report_path,
                         commits=current_commits,
@@ -757,6 +772,7 @@ class BackportService:
                     continue
                 self._emit_run_all_progress(
                     phase="checking",
+                    phase_state="completed",
                     message=f"第 {index + 1} 条 commit 检查完成。",
                     current_report_path=current_report_path,
                     commits=current_commits,
@@ -770,6 +786,7 @@ class BackportService:
             processed_count += 1
             self._emit_run_all_progress(
                 phase="failed" if applied.get("status") == "failed" else "applying",
+                phase_state="failed" if applied.get("status") == "failed" else "completed",
                 message=applied.get("summary") or f"第 {index + 1} 条 commit 应用完成。",
                 current_report_path=current_report_path,
                 commits=current_commits,
@@ -811,6 +828,7 @@ class BackportService:
         )
         self._emit_run_all_progress(
             phase="completed",
+            phase_state="completed",
             message="一键运行完成。",
             current_report_path=current_report_path,
             commits=final_commits,
@@ -1404,7 +1422,7 @@ class BackportService:
             api_key=api_key,
             llm_base_url=base_url,
             llm_model_name=model_name,
-            backport_engine="mystique",
+            backport_engine="opencode",
             format_mode="changed",
         )
 
@@ -1486,6 +1504,7 @@ class BackportService:
         self,
         *,
         phase: str,
+        phase_state: str,
         message: str,
         current_report_path: str,
         commits: list[dict[str, Any]],
@@ -1503,6 +1522,7 @@ class BackportService:
         safe_updated = self._cvekit_client.sanitize_commit_list(updated_commits)
         progress = {
             "phase": phase,
+            "phase_state": phase_state,
             "message": message,
             "current_report_path": current_report_path,
             "current_index": current_index,
@@ -1543,6 +1563,7 @@ class BackportService:
     ) -> dict[str, Any]:
         self._emit_run_all_progress(
             phase="paused",
+            phase_state="completed",
             message="已暂停，report 已保存，可继续。",
             current_report_path=current_report_path,
             commits=current_commits,
