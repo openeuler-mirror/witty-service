@@ -6,11 +6,12 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -79,11 +80,14 @@ class BackportCvekitClient:
         self,
         *,
         runs_root: str | Path,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._runs_root = Path(runs_root).expanduser().resolve()
         self._run_store = BackportRunStore(self._runs_root)
         self._conflict_reporter_url = ""
         self._runtime_config: BackportRuntimeConfig | None = None
+        self._progress_callback = progress_callback
+        self._archive_run_id = ""
 
     # ── 初始化 ──────────────────────────────────────────────────
 
@@ -111,6 +115,7 @@ class BackportCvekitClient:
 
     def set_archive_run_id(self, run_id: str | None) -> None:
         self._run_store.set_run_id(run_id)
+        self._archive_run_id = self._run_store.safe_slug(run_id or "", fallback="")
 
     def archive_artifacts_for_report(self, report_path: str) -> dict[str, str]:
         base_path = Path(report_path).expanduser().resolve()
@@ -193,6 +198,8 @@ class BackportCvekitClient:
         }
         runtime_config = self._runtime_config
         env = self._build_env()
+        if self._archive_run_id:
+            env["CVEKIT_TASK_ID"] = self._archive_run_id
         for option, value in (
             ("--llm-provider", runtime_config.llm_provider),
             ("--llm-base-url", runtime_config.llm_base_url),
@@ -204,12 +211,58 @@ class BackportCvekitClient:
                 cmd_args.extend([option, value])
 
         cmd = [str(self.resolve_cvekit_path()), *cmd_args]
-        result = subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            env=env,
-            capture_output=True, text=True, encoding="utf-8", check=False,
-        )
+        progress_path = cwd / f".cvekit-progress-{uuid.uuid4().hex}.json"
+        env["CVEKIT_PROGRESS_FILE"] = str(progress_path)
+        stop_progress = threading.Event()
+        progress_thread: threading.Thread | None = None
+
+        if self._progress_callback is not None:
+            callback = self._progress_callback
+            last_progress_payload = [""]
+
+            def publish_progress() -> None:
+                try:
+                    payload_text = progress_path.read_text(encoding="utf-8")
+                except OSError:
+                    return
+                if payload_text == last_progress_payload[0]:
+                    return
+                last_progress_payload[0] = payload_text
+                try:
+                    payload = json.loads(payload_text)
+                except json.JSONDecodeError:
+                    return
+                if isinstance(payload, dict):
+                    try:
+                        callback(payload)
+                    except Exception:
+                        # Progress reporting must never terminate cvekit.
+                        return
+
+            def monitor_progress() -> None:
+                while not stop_progress.wait(0.5):
+                    publish_progress()
+
+            progress_thread = threading.Thread(
+                target=monitor_progress,
+                daemon=True,
+                name=f"cvekit-progress-{uuid.uuid4().hex[:8]}",
+            )
+            progress_thread.start()
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(cwd),
+                env=env,
+                capture_output=True, text=True, encoding="utf-8", check=False,
+            )
+        finally:
+            stop_progress.set()
+            if progress_thread is not None:
+                progress_thread.join(timeout=1)
+                publish_progress()
+            progress_path.unlink(missing_ok=True)
         source_log_archive_dir = self._run_store.write_command_logs(
             cwd=cwd,
             command=self._redact_command(cmd),
@@ -816,23 +869,23 @@ class BackportCvekitClient:
         _, persisted_commits = self._read_report(base_path)
         if (attempt_dir / "report.report.yml").exists():
             shutil.copy2(attempt_dir / "report.report.yml", attempt_dir / "report.yml")
-        self._run_store.update_manifest(
-            archive_run_dir,
-            {
-                "status": "running",
-                "summary": {
-                    "total": len(persisted_commits),
-                    "success": sum(
-                        1 for row in persisted_commits
-                        if str(row.get("status") or "").lower() in {"success", "applied", "resolved"}
-                    ),
-                    "failed": sum(
-                        1 for row in persisted_commits
-                        if str(row.get("status") or "").lower() == "failed"
-                    ),
-                },
+        manifest_updates: dict[str, Any] = {
+            "summary": {
+                "total": len(persisted_commits),
+                "success": sum(
+                    1 for row in persisted_commits
+                    if str(row.get("status") or "").lower()
+                    in {"success", "applied", "resolved"}
+                ),
+                "failed": sum(
+                    1 for row in persisted_commits
+                    if str(row.get("status") or "").lower() == "failed"
+                ),
             },
-        )
+        }
+        if self._archive_run_id:
+            manifest_updates["status"] = "running"
+        self._run_store.update_manifest(archive_run_dir, manifest_updates)
         previous_rows = {
             self._build_row_id(row): row
             for row in commits
@@ -852,6 +905,8 @@ class BackportCvekitClient:
                 patch_keys=self.PATCH_KEYS,
                 result={"operation": "continue_report", "status": "success"},
                 cleanup=False,
+                task_dir=archive_run_dir,
+                archive_scope="run" if self._archive_run_id else "interaction",
             )
             for row in changed_rows
         ]
@@ -975,6 +1030,8 @@ class BackportCvekitClient:
             sanitized_rows=[self.sanitize_commit_item(updated_row)],
             patch_keys=self.PATCH_KEYS,
             result={"operation": "check_row", "status": "success"},
+            task_dir=archive_run_dir,
+            archive_scope="run" if self._archive_run_id else "interaction",
         )
         return {
             "operation": "check_row",
@@ -1108,6 +1165,8 @@ class BackportCvekitClient:
             sanitized_rows=[self.sanitize_commit_item(updated_row)],
             patch_keys=self.PATCH_KEYS,
             result={"operation": "recheck_conflict", "status": "success"},
+            task_dir=archive_run_dir,
+            archive_scope="run" if self._archive_run_id else "interaction",
         )
         return {
             "operation": "recheck_conflict",
@@ -1269,6 +1328,8 @@ class BackportCvekitClient:
                 sanitized_rows=self.sanitize_commit_list(commits),
                 patch_keys=self.PATCH_KEYS,
                 result={"operation": "execute_selected", "status": "success"},
+                task_dir=archive_run_dir,
+                archive_scope="run" if self._archive_run_id else "interaction",
             )
         else:
             archive_payload = {
@@ -1281,17 +1342,18 @@ class BackportCvekitClient:
                         patch_keys=self.PATCH_KEYS,
                         result={"operation": "execute_selected", "status": "success"},
                         cleanup=False,
+                        task_dir=archive_run_dir,
+                        archive_scope="run" if self._archive_run_id else "interaction",
                     )
                     for row in commits
                 ]
             }
             self._run_store.cleanup_work_dir(attempt_dir)
-        self._run_store.update_manifest(
-            archive_run_dir,
-            {
-                "status": "running",
-            },
-        )
+        if self._archive_run_id:
+            self._run_store.update_manifest(
+                archive_run_dir,
+                {"status": "running"},
+            )
         return {
             "operation": "execute_selected",
             "status": "success",
@@ -1551,13 +1613,14 @@ class BackportCvekitClient:
                 "status": "failed" if apply_status == "failed" else "success",
                 "batch_logfile": apply_result.get("batch_logfile"),
             },
+            task_dir=archive_run_dir,
+            archive_scope="run" if self._archive_run_id else "interaction",
         )
-        self._run_store.update_manifest(
-            archive_run_dir,
-            {
-                "status": "running",
-            },
-        )
+        if self._archive_run_id:
+            self._run_store.update_manifest(
+                archive_run_dir,
+                {"status": "running"},
+            )
         return {
             "operation": "apply_row",
             "status": "failed" if apply_status == "failed" else "success",

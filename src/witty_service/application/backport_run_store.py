@@ -17,11 +17,6 @@ class BackportRunStore:
     """Store the small, user-facing Task/Run/Case Backport archive."""
 
     TERMINAL_STATUSES = {"completed", "completed_with_failures", "failed"}
-    ARTIFACT_NAMES = {
-        "original_patch": "original.patch",
-        "resolved_patch": "run-{run:03d}-resolved.patch",
-        "conflict_report": "run-{run:03d}-conflict-report.json",
-    }
     _locks_guard = threading.Lock()
     _locks: dict[str, threading.RLock] = {}
 
@@ -1091,155 +1086,239 @@ class BackportRunStore:
         patch_keys: tuple[str, ...] | list[str],
         result: dict[str, Any],
         cleanup: bool = True,
+        task_dir: Path | None = None,
+        archive_scope: str = "run",
     ) -> dict[str, Any]:
         del report_path
-        if not rows or not self._run_id:
-            return {}
-        task_dir = self._task_dir(self._run_id)
-        case_dir = self.case_dir(task_dir, rows[0], row_id=str(rows[0].get("row_id") or "0"))
-        task = self.read_manifest(task_dir)
-        run_number = int(task.get("current_run") or 0)
-        run_key = f"{run_number:03d}"
-        row = sanitized_rows[0] if sanitized_rows else rows[0]
-        status = str(row.get("status") or result.get("status") or "failed").lower()
-        artifacts: dict[str, str] = {}
+        if not rows:
+            raise ValueError("Backport case archive requires at least one row.")
+        if archive_scope not in {"run", "interaction"}:
+            raise ValueError(f"Invalid Backport archive scope: {archive_scope}")
 
-        original_source = next(
-            (
-                Path(str(rows[0].get(key))).expanduser()
-                for key in patch_keys
-                if "original" in key and rows[0].get(key) and Path(str(rows[0].get(key))).expanduser().is_file()
-            ),
-            None,
-        )
-        if original_source is not None and not (case_dir / "original.patch").is_file():
-            shutil.copy2(original_source, case_dir / "original.patch")
-        if (case_dir / "original.patch").is_file():
-            artifacts["original_patch"] = "original.patch"
+        task_root = self._task_root_for(task_dir) if task_dir is not None else None
+        if task_root is None and self._run_id:
+            task_root = self._task_dir(self._run_id)
+        if task_root is None or not (task_root / "task.json").is_file():
+            raise RuntimeError("Backport case archive cannot resolve its Task.")
 
-        resolved_source = next(
-            (
-                Path(str(rows[0].get(key))).expanduser()
-                for key in patch_keys
-                if "backport" in key and rows[0].get(key) and Path(str(rows[0].get(key))).expanduser().is_file()
-            ),
-            None,
-        )
-        if resolved_source is not None:
-            original_bytes = (case_dir / "original.patch").read_bytes() if (case_dir / "original.patch").is_file() else None
-            resolved_bytes = resolved_source.read_bytes()
-            if resolved_bytes and resolved_bytes != original_bytes:
-                name = self.ARTIFACT_NAMES["resolved_patch"].format(run=run_number)
-                name = self._available_artifact_name(case_dir, name)
-                shutil.copy2(resolved_source, case_dir / name)
-                artifacts["resolved_patch"] = name
-
-        operation = str(result.get("operation") or "")
-        log_source_value = (
-            result.get("batch_logfile")
-            or rows[0].get("batch_logfile")
-        )
-        log_source = Path(str(log_source_value)).expanduser() if log_source_value else None
-        if log_source is not None and not log_source.is_file():
-            archived_source = attempt_dir / log_source.name
-            if archived_source.is_file():
-                log_source = archived_source
-        if log_source is not None and log_source.is_file():
-            cleaned = self.redact(
-                log_source.read_text(encoding="utf-8"),
-                self._secrets,
-            ).strip()
-            if cleaned:
-                if operation == "apply_row":
-                    name = f"run-{run_number:03d}-apply.log"
-                else:
-                    engine = str(rows[0].get("backport_engine") or "").strip().lower()
-                    invoked_value = rows[0].get("backport_engine_invoked")
-                    used_engine = (
-                        bool(rows[0].get("logfile"))
-                        if invoked_value is None
-                        else bool(invoked_value)
+        with self._lock_for(task_root):
+            case_dir = self.case_dir(
+                task_root,
+                rows[0],
+                row_id=str(rows[0].get("row_id") or "0"),
+            )
+            case = self._read_json(case_dir / "case.json")
+            task = self.read_manifest(task_root)
+            if archive_scope == "run":
+                archive_number = int(task.get("current_run") or 0)
+                if archive_number < 1:
+                    raise RuntimeError(
+                        "Backport Run archive requires a current one-click Run."
                     )
-                    suffix = f"-{self.safe_slug(engine)}" if engine and used_engine else ""
-                    name = f"run-{run_number:03d}-backport{suffix}.log"
-                name = self._available_artifact_name(case_dir, name)
-                self.write_text(case_dir / name, cleaned + "\n")
-                artifacts["apply_log" if operation == "apply_row" else "backport_log"] = name
+                archive_collection = "runs"
+                last_archive_field = "last_run"
+            else:
+                existing_numbers = [
+                    int(key)
+                    for key in (case.get("interactions") or {})
+                    if str(key).isdigit()
+                ]
+                archive_number = max(
+                    [int(case.get("last_interaction") or 0), *existing_numbers]
+                ) + 1
+                archive_collection = "interactions"
+                last_archive_field = "last_interaction"
 
-        engine_log_value = rows[0].get("logfile")
-        engine_log = Path(str(engine_log_value)).expanduser() if engine_log_value else None
-        if engine_log is not None and not engine_log.is_file():
-            archived_engine_log = attempt_dir / engine_log.name
-            if archived_engine_log.is_file():
-                engine_log = archived_engine_log
-        if engine_log is not None and engine_log.is_file() and engine_log != log_source:
-            engine = self.safe_slug(
-                str(rows[0].get("backport_engine") or "engine"),
-                fallback="engine",
-            )
-            name = self._available_artifact_name(
-                case_dir,
-                f"run-{run_number:03d}-{engine}.log",
-            )
-            cleaned = self.redact(
-                engine_log.read_text(encoding="utf-8", errors="replace"),
-                self._secrets,
-            ).strip()
-            if cleaned:
-                self.write_text(case_dir / name, cleaned + "\n")
-                artifacts["engine_log"] = name
+            archive_key = f"{archive_number:03d}"
+            artifact_prefix = f"{archive_scope}-{archive_key}"
+            row = sanitized_rows[0] if sanitized_rows else rows[0]
+            status = str(
+                row.get("status") or result.get("status") or "failed"
+            ).lower()
+            artifacts: dict[str, str] = {}
 
-        conflict_source = attempt_dir / "conflict-report.json"
-        if conflict_source.is_file():
-            name = self.ARTIFACT_NAMES["conflict_report"].format(run=run_number)
-            name = self._available_artifact_name(case_dir, name)
-            self.write_text(
-                case_dir / name,
-                self.redact(
-                    conflict_source.read_text(encoding="utf-8"),
-                    self._secrets,
+            original_source = next(
+                (
+                    Path(str(rows[0].get(key))).expanduser()
+                    for key in patch_keys
+                    if "original" in key
+                    and rows[0].get(key)
+                    and Path(str(rows[0].get(key))).expanduser().is_file()
                 ),
+                None,
             )
-            artifacts["conflict_report"] = name
-        elif rows[0].get("conflict_summary") is not None:
-            name = self.ARTIFACT_NAMES["conflict_report"].format(run=run_number)
-            name = self._available_artifact_name(case_dir, name)
-            self.write_text(
-                case_dir / name,
-                self.redact(
-                    json.dumps(
-                        rows[0]["conflict_summary"],
-                        ensure_ascii=False,
-                        indent=2,
-                        default=str,
+            if original_source is not None and not (case_dir / "original.patch").is_file():
+                shutil.copy2(original_source, case_dir / "original.patch")
+            if (case_dir / "original.patch").is_file():
+                artifacts["original_patch"] = "original.patch"
+
+            resolved_source = next(
+                (
+                    Path(str(rows[0].get(key))).expanduser()
+                    for key in patch_keys
+                    if "backport" in key
+                    and rows[0].get(key)
+                    and Path(str(rows[0].get(key))).expanduser().is_file()
+                ),
+                None,
+            )
+            if resolved_source is not None:
+                original_bytes = (
+                    (case_dir / "original.patch").read_bytes()
+                    if (case_dir / "original.patch").is_file()
+                    else None
+                )
+                resolved_bytes = resolved_source.read_bytes()
+                if resolved_bytes and resolved_bytes != original_bytes:
+                    name = self._available_artifact_name(
+                        case_dir,
+                        f"{artifact_prefix}-resolved.patch",
+                    )
+                    shutil.copy2(resolved_source, case_dir / name)
+                    artifacts["resolved_patch"] = name
+
+            operation = str(result.get("operation") or "")
+            log_source_value = result.get("batch_logfile") or rows[0].get(
+                "batch_logfile"
+            )
+            log_source = (
+                Path(str(log_source_value)).expanduser()
+                if log_source_value
+                else None
+            )
+            if log_source is not None and not log_source.is_file():
+                archived_source = attempt_dir / log_source.name
+                if archived_source.is_file():
+                    log_source = archived_source
+            if log_source is not None and log_source.is_file():
+                cleaned = self.redact(
+                    log_source.read_text(encoding="utf-8"),
+                    self._secrets,
+                ).strip()
+                if cleaned:
+                    if operation == "apply_row":
+                        name = f"{artifact_prefix}-apply.log"
+                    else:
+                        engine = str(
+                            rows[0].get("backport_engine") or ""
+                        ).strip().lower()
+                        invoked_value = rows[0].get("backport_engine_invoked")
+                        used_engine = (
+                            bool(rows[0].get("logfile"))
+                            if invoked_value is None
+                            else bool(invoked_value)
+                        )
+                        suffix = (
+                            f"-{self.safe_slug(engine)}"
+                            if engine and used_engine
+                            else ""
+                        )
+                        name = f"{artifact_prefix}-backport{suffix}.log"
+                    name = self._available_artifact_name(case_dir, name)
+                    self.write_text(case_dir / name, cleaned + "\n")
+                    artifacts[
+                        "apply_log" if operation == "apply_row" else "backport_log"
+                    ] = name
+
+            engine_log_value = rows[0].get("logfile")
+            engine_log = (
+                Path(str(engine_log_value)).expanduser()
+                if engine_log_value
+                else None
+            )
+            if engine_log is not None and not engine_log.is_file():
+                archived_engine_log = attempt_dir / engine_log.name
+                if archived_engine_log.is_file():
+                    engine_log = archived_engine_log
+            if (
+                engine_log is not None
+                and engine_log.is_file()
+                and engine_log != log_source
+            ):
+                engine = self.safe_slug(
+                    str(rows[0].get("backport_engine") or "engine"),
+                    fallback="engine",
+                )
+                name = self._available_artifact_name(
+                    case_dir,
+                    f"{artifact_prefix}-{engine}.log",
+                )
+                cleaned = self.redact(
+                    engine_log.read_text(encoding="utf-8", errors="replace"),
+                    self._secrets,
+                ).strip()
+                if cleaned:
+                    self.write_text(case_dir / name, cleaned + "\n")
+                    artifacts["engine_log"] = name
+
+            conflict_source = attempt_dir / "conflict-report.json"
+            if conflict_source.is_file():
+                name = self._available_artifact_name(
+                    case_dir,
+                    f"{artifact_prefix}-conflict-report.json",
+                )
+                self.write_text(
+                    case_dir / name,
+                    self.redact(
+                        conflict_source.read_text(encoding="utf-8"),
+                        self._secrets,
                     ),
-                    self._secrets,
-                ),
-            )
-            artifacts["conflict_report"] = name
+                )
+                artifacts["conflict_report"] = name
+            elif rows[0].get("conflict_summary") is not None:
+                name = self._available_artifact_name(
+                    case_dir,
+                    f"{artifact_prefix}-conflict-report.json",
+                )
+                self.write_text(
+                    case_dir / name,
+                    self.redact(
+                        json.dumps(
+                            rows[0]["conflict_summary"],
+                            ensure_ascii=False,
+                            indent=2,
+                            default=str,
+                        ),
+                        self._secrets,
+                    ),
+                )
+                artifacts["conflict_report"] = name
 
-        case = self._read_json(case_dir / "case.json")
-        case.update(
-            {
-                "status": status,
-                "applied_commit": row.get("applied_commit"),
-                "last_run": run_number,
-                "updated_at": self.now_iso(),
-            }
-        )
-        case.setdefault("artifacts", {}).update(
-            {"original_patch": "original.patch"} if (case_dir / "original.patch").is_file() else {}
-        )
-        run_data = case.setdefault("runs", {}).setdefault(run_key, {})
-        run_data.update({
-            "status": status,
-            "applied_commit": row.get("applied_commit"),
-        })
-        run_data.setdefault("artifacts", {}).update(artifacts)
-        self.write_json(case_dir / "case.json", case)
+            case.update(
+                {
+                    "status": status,
+                    "applied_commit": row.get("applied_commit"),
+                    last_archive_field: archive_number,
+                    "updated_at": self.now_iso(),
+                }
+            )
+            case.setdefault("artifacts", {}).update(
+                {"original_patch": "original.patch"}
+                if (case_dir / "original.patch").is_file()
+                else {}
+            )
+            archive_data = case.setdefault(archive_collection, {}).setdefault(
+                archive_key, {}
+            )
+            archive_data.update(
+                {
+                    "operation": operation,
+                    "status": status,
+                    "applied_commit": row.get("applied_commit"),
+                    "updated_at": self.now_iso(),
+                }
+            )
+            archive_data.setdefault("artifacts", {}).update(artifacts)
+            self.write_json(case_dir / "case.json", case)
+
         if cleanup:
             self.cleanup_work_dir(attempt_dir)
-        return {"case_id": case_dir.name, "artifacts": artifacts}
+        return {
+            "case_id": case_dir.name,
+            "scope": archive_scope,
+            "number": archive_number,
+            "artifacts": artifacts,
+        }
 
     def list_case_attempts(self, task_id: str, row_key: str) -> list[dict[str, Any]]:
         task_dir = self._task_dir(task_id)
@@ -1250,32 +1329,58 @@ class BackportRunStore:
         items: list[dict[str, Any]] = []
         for case_dir in matches:
             case = self._read_json(case_dir / "case.json")
-            for run_key, data in (case.get("runs") or {}).items():
-                artifacts = data.get("artifacts") if isinstance(data, dict) else {}
-                log_name = (
-                    artifacts.get("engine_log")
-                    or artifacts.get("apply_log")
-                    or artifacts.get("backport_log")
-                )
-                items.append(
-                    {
-                        "execution": int(run_key),
-                        "attempt_number": 1,
-                        "attempt_dir": str(case_dir),
-                        "updated_at": str(case.get("updated_at") or ""),
-                        "report_path": "",
-                        "stdout_path": "",
-                        "stderr_path": str(case_dir / log_name) if log_name else "",
-                        "rows": [],
-                        "patches": [
-                            {"kind": kind, "source": "", "archive": str(case_dir / name)}
-                            for kind, name in artifacts.items() if name.endswith(".patch")
-                        ],
-                        "conflict_report": self._read_json(case_dir / artifacts["conflict_report"])
-                        if artifacts.get("conflict_report") else None,
-                    }
-                )
-        return sorted(items, key=lambda item: int(item["execution"]), reverse=True)
+            for collection, is_run in (("runs", True), ("interactions", False)):
+                for archive_key, data in (case.get(collection) or {}).items():
+                    if not isinstance(data, dict) or not str(archive_key).isdigit():
+                        continue
+                    artifacts = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
+                    log_name = (
+                        artifacts.get("engine_log")
+                        or artifacts.get("apply_log")
+                        or artifacts.get("backport_log")
+                    )
+                    items.append(
+                        {
+                            "execution": int(archive_key) if is_run else 0,
+                            "attempt_number": 1 if is_run else int(archive_key),
+                            "attempt_dir": str(case_dir),
+                            "updated_at": str(
+                                data.get("updated_at") or case.get("updated_at") or ""
+                            ),
+                            "report_path": "",
+                            "stdout_path": "",
+                            "stderr_path": str(case_dir / log_name) if log_name else "",
+                            "rows": [
+                                {
+                                    "status": data.get("status"),
+                                    "operation": data.get("operation"),
+                                }
+                            ],
+                            "patches": [
+                                {
+                                    "kind": kind,
+                                    "source": "",
+                                    "archive": str(case_dir / name),
+                                }
+                                for kind, name in artifacts.items()
+                                if name.endswith(".patch")
+                            ],
+                            "conflict_report": self._read_json(
+                                case_dir / artifacts["conflict_report"]
+                            )
+                            if artifacts.get("conflict_report")
+                            else None,
+                        }
+                    )
+        return sorted(
+            items,
+            key=lambda item: (
+                str(item["updated_at"]),
+                int(item["execution"]),
+                int(item["attempt_number"]),
+            ),
+            reverse=True,
+        )
 
     def read_artifact(self, task_id: str, case_id: str, artifact: str) -> tuple[Path, bytes]:
         task_dir = self._task_dir(task_id)
@@ -1284,9 +1389,10 @@ class BackportRunStore:
             raise ValueError("Invalid case path.")
         case = self._read_json(case_dir / "case.json")
         registered = set((case.get("artifacts") or {}).values())
-        for run in (case.get("runs") or {}).values():
-            if isinstance(run, dict):
-                registered.update((run.get("artifacts") or {}).values())
+        for collection in ("runs", "interactions"):
+            for archive in (case.get(collection) or {}).values():
+                if isinstance(archive, dict):
+                    registered.update((archive.get("artifacts") or {}).values())
         if artifact not in registered or artifact != Path(artifact).name:
             raise ValueError("Artifact is not registered.")
         path = case_dir / artifact

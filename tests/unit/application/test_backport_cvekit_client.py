@@ -636,6 +636,74 @@ def test_execute_selected_success_and_diagnose(
     assert out_diag["diagnostics"]["likely_missing_prerequisite"] is True
 
 
+def test_execute_selected_without_archive_run_uses_interaction(
+    client: BackportCvekitClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    excel = tmp_path / "input.xlsx"
+    excel.write_text("fixture", encoding="utf-8")
+    task_dir = client._run_store.create_task(
+        excel_path=excel,
+        target_repository="/repo/kernel",
+    )
+    base = task_dir / "input" / "initial-report.yml"
+    row = {
+        "row_id": "1",
+        "row_number": 1,
+        "commit": "d" * 40,
+        "status": "pending",
+        "patch_path": "/missing/original.patch",
+    }
+    _write_report(base, commits=[row])
+    client._run_store.update_manifest(
+        task_dir,
+        {
+            "status": "ready",
+            "current_run": None,
+            "current_report": "input/initial-report.yml",
+        },
+    )
+    client._run_store.set_run_id(None)
+
+    def fake_run(args, cwd):
+        config_path = Path(args[args.index("--backport-config") + 1])
+        _write_report(
+            config_path,
+            commits=[{**row, "status": "success"}],
+        )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+
+    monkeypatch.setattr(client, "_run_cvekit", fake_run)
+
+    result = client.execute_selected(
+        base_report_path=str(base),
+        selected_commits=[row],
+        target_path="/repo/kernel",
+        patch_dataset_dir="",
+        signer_name="",
+        signer_email="",
+        commit_message_template="",
+        commit_message_source="auto",
+        linux_repo_path="",
+    )
+
+    archive = result["archive"]
+    assert archive["scope"] == "interaction"
+    assert archive["number"] == 1
+    case_path = task_dir / "cases" / archive["case_id"] / "case.json"
+    case = json.loads(case_path.read_text(encoding="utf-8"))
+    assert case["last_interaction"] == 1
+    assert case["last_run"] is None
+    assert client._run_store.read_manifest(task_dir)["status"] == "ready"
+    assert not Path(result["artifacts"]["attempt_dir"]).exists()
+
+
 def test_try_resolve_no_blocking_or_wrong_row(
     client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
