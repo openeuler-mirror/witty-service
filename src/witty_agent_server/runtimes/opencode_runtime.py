@@ -158,13 +158,17 @@ class OpenCodeRuntime(RuntimeBase):
             return None
 
         if part_type == "tool":
+            tool_name = part.get("tool") or part.get("name", "")
+
+            # 此处跳过避免重复产出 question 的 tool.call.* 事件。
+            if tool_name == "question":
+                return None
+
             state = part.get("state", "")
             if isinstance(state, dict):
                 status = state.get("status", "")
             else:
                 status = state
-
-            tool_name = part.get("tool") or part.get("name", "")
             tool_call_id = part.get("callID") or part.get("id", "")
 
             # pending: input 总是 {}，真正的 input 要到 running 才填充，

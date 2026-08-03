@@ -853,3 +853,154 @@ def test_create_assistant_message_and_stream_updates(repo: SqliteRepository) -> 
     assert seq_no == 1
     assert messages[0]["id"] == message_id
     assert messages[0]["content"] == "hello"
+
+
+# ---------------------------------------------------------------------------
+# _assemble_message question 事件处理
+# ---------------------------------------------------------------------------
+
+
+def test_assemble_message_question_events(repo: SqliteRepository) -> None:
+    """question.asked + question.replied + question.rejected 事件正确组装。"""
+    _create_agent(repo)
+    _create_session(repo)
+    message_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="Let me ask you something",
+        status=MessageStatus.completed,
+    )
+    repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=message_id,
+        event_type="question.asked",
+        payload_json={
+            "question_id": "que_001",
+            "questions": [
+                {
+                    "question": "Which file?",
+                    "header": "File",
+                    "options": [{"label": "a.md", "description": "markdown"}],
+                }
+            ],
+            "tool": {"messageID": "msg-x", "callID": "call-x"},
+        },
+        seq_no=1,
+    )
+    # question.replied 使用 request_id 而非 question_id
+    repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=message_id,
+        event_type="question.replied",
+        payload_json={
+            "request_id": "que_001",
+            "answers": [["a.md"]],
+        },
+        seq_no=2,
+    )
+    # 第二个问题: 仅 asked + rejected（无 replied）
+    repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=message_id,
+        event_type="question.asked",
+        payload_json={
+            "question_id": "que_002",
+            "questions": [{"question": "Proceed?", "header": "Confirm"}],
+        },
+        seq_no=3,
+    )
+    repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=message_id,
+        event_type="question.rejected",
+        payload_json={
+            "request_id": "que_002",
+        },
+        seq_no=4,
+    )
+
+    messages, _ = repo.get_messages_with_events("session-1")
+
+    msg = messages[0]
+    # questionId / questionStatus 应为最后一个 question 事件的状态
+    assert msg["questionId"] == "que_002"
+    assert msg["questionStatus"] == "rejected"
+    # question.asked 会重置 question_answers，que_002 是 rejected 状态，不应有 answers
+    assert "questionAnswers" not in msg
+    # question 列表来自最后一个 question.asked（最后一个有 questions 的事件赋值）
+    assert msg["question"] == [{"question": "Proceed?", "header": "Confirm"}]
+
+    # 检查每个 event 的 item
+    events = msg["events"]
+    asked_1 = events[0]
+    assert asked_1["type"] == "question.asked"
+    assert asked_1["payload"] == {
+        "question_id": "que_001",
+        "questions": [
+            {
+                "question": "Which file?",
+                "header": "File",
+                "options": [{"label": "a.md", "description": "markdown"}],
+            }
+        ],
+    }
+
+    replied = events[1]
+    assert replied["type"] == "question.replied"
+    assert replied["payload"] == {
+        "question_id": "que_001",
+        "answers": [["a.md"]],
+    }
+
+    asked_2 = events[2]
+    assert asked_2["type"] == "question.asked"
+    assert asked_2["payload"]["question_id"] == "que_002"
+
+    rejected = events[3]
+    assert rejected["type"] == "question.rejected"
+    assert rejected["payload"] == {"question_id": "que_002"}
+
+
+def test_assemble_message_question_standalone_replied(repo: SqliteRepository) -> None:
+    """仅有 question.replied（无先前的 question.asked）时也能正确获取 question_id。"""
+    _create_agent(repo)
+    _create_session(repo)
+    message_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="answer recorded",
+        status=MessageStatus.completed,
+    )
+    repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=message_id,
+        event_type="question.replied",
+        payload_json={
+            "request_id": "que_solo",
+            "answers": [["yes"]],
+        },
+        seq_no=1,
+    )
+
+    messages, _ = repo.get_messages_with_events("session-1")
+    msg = messages[0]
+
+    assert msg["questionId"] == "que_solo"
+    assert msg["questionStatus"] == "replied"
+    assert msg["questionAnswers"] == [["yes"]]
+    # 无 question.asked 时不应有 question 字段
+    assert "question" not in msg
+
+    replied_event = msg["events"][0]
+    assert replied_event["type"] == "question.replied"
+    assert replied_event["payload"] == {
+        "question_id": "que_solo",
+        "answers": [["yes"]],
+    }
