@@ -22,7 +22,9 @@ def test_init_db_bootstraps_schema_when_enabled(monkeypatch) -> None:
         init_db(engine)
         tables = set(inspect(engine).get_table_names())
         assert "agents" in tables
-        assert "alembic_version" not in tables
+        assert "messages" in tables
+        # alembic_version 是 alembic 自动创建用于追踪迁移版本的表
+        assert "alembic_version" in tables
     finally:
         engine.dispose()
 
