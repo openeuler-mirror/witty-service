@@ -90,10 +90,84 @@ class BackportService:
         self._git_client = BackportGitClient()
         self._cvekit_client = BackportCvekitClient(
             runs_root=services.workspace_store.base_dir / "backport-runs",
+            progress_callback=self._handle_cvekit_progress,
         )
         self._conflict_reporter_manager = ConflictReporterManager()
         self._progress_callback = progress_callback
         self._pause_checker = pause_checker
+        self._last_progress: dict[str, Any] = {}
+        self._progress_before_repository_wait: dict[str, Any] = {}
+
+    def _handle_cvekit_progress(self, event: dict[str, Any]) -> None:
+        if self._progress_callback is None:
+            return
+        event_name = str(event.get("event") or "")
+        if not event_name.startswith("repository_lock_"):
+            return
+
+        if event_name == "repository_lock_waiting":
+            if self._last_progress.get("phase") != "waiting_for_repository":
+                self._progress_before_repository_wait = dict(self._last_progress)
+            wait_seconds = int(event.get("wait_seconds") or 0)
+            timeout_seconds = int(event.get("timeout_seconds") or 0)
+            progress = {
+                **self._last_progress,
+                "phase": "waiting_for_repository",
+                "phase_state": "running",
+                "message": (
+                    "目标仓库正被另一项任务使用，"
+                    f"已等待 {wait_seconds} 秒，最长等待 {timeout_seconds} 秒。"
+                ),
+            }
+        elif event_name == "repository_lock_timeout":
+            progress = {
+                **self._last_progress,
+                "phase": "waiting_for_repository",
+                "phase_state": "failed",
+                "message": "等待目标仓库可用超时，可稍后重试。",
+            }
+        elif event_name == "repository_lock_acquired":
+            if not self._progress_before_repository_wait:
+                # An uncontended lock acquisition is an implementation detail,
+                # not a user-visible state transition.
+                return
+            progress = {
+                **self._progress_before_repository_wait,
+                **self._last_progress,
+                "phase": (
+                    self._progress_before_repository_wait.get("phase")
+                    or self._last_progress.get("phase")
+                    or "initializing"
+                ),
+                "phase_state": "running",
+                "message": (
+                    f"已获得目标仓库锁，等待 {int(event.get('wait_seconds') or 0)} 秒，"
+                    "继续当前任务。"
+                ),
+            }
+            self._progress_before_repository_wait = {}
+        elif event_name in {
+            "repository_lock_releasing",
+            "repository_lock_released",
+        }:
+            return
+        else:
+            return
+
+        owner = event.get("owner")
+        if not isinstance(owner, dict):
+            owner = {}
+        progress.update(
+            {
+                "lock_event": event_name,
+                "lock_wait_seconds": int(event.get("wait_seconds") or 0),
+                "lock_timeout_seconds": int(event.get("timeout_seconds") or 0),
+                "lock_owner_task_id": str(owner.get("task_id") or ""),
+                "lock_owner_operation": str(owner.get("operation") or ""),
+            }
+        )
+        self._last_progress = progress
+        self._progress_callback(progress)
 
     def get_config(self) -> dict[str, Any]:
         if not self._config_path.exists():
@@ -1538,6 +1612,7 @@ class BackportService:
                 "message": "冲突总报告内容预留，后续从工具结果接入。",
             },
         }
+        self._last_progress = progress
         try:
             self._progress_callback(progress)
         except Exception:
