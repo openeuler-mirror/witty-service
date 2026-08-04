@@ -69,6 +69,8 @@ changelog = "https://github.com/openwitty/witty-service/blob/main/CHANGELOG.md"
 [tool.setuptools]
 packages = [
     "witty_service",
+    "witty_service.alembic",
+    "witty_service.alembic.versions",
     "witty_service.data",
     "witty_service.api",
     "witty_service.adapter",

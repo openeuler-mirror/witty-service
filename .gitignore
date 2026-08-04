@@ -267,3 +267,5 @@ test-results
 .sessions
 .eval_sessions
 .worktrees/
+
+build/
