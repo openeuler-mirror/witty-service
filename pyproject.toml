@@ -153,7 +153,13 @@ patch_tags = ["fix", "perf","refactor"]
 
 [dependency-groups]
 dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
     "pytest-cov>=7.1.0",
     "ruff>=0.15",
     "bandit>=1.9",
 ]
+
+[tool.uv]
+default-groups = ["dev"]
+index-url = "https://mirrors.aliyun.com/pypi/simple/"
