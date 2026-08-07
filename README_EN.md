@@ -460,11 +460,18 @@ witty-service/
 
 ### Development Standards
 
-- **Code style**: Adhere to the Black formatting standard (`line-length=88`). Run `black .` to verify formatting before committing code.
+- **Code style**: Use Ruff (lint + format, `line-length=88`) as the replacement for Black/Flake8; see `[tool.ruff]` in `pyproject.toml`.
 - **Type checking**: Use `mypy` for static type checking configured in `strict` mode.
-- **Commit conventions**: Follow semantic commit messaging (for example, `feat:`, `fix:`, `docs:`, and `refactor:`).
+- **Commit conventions**: Follow semantic commit messaging (for example, `feat:`, `fix:`, `docs:`, and `refactor:`); the pre-commit gitlint hook validates the format.
 - **Test coverage**: Any new features must include corresponding unit tests. Ensure all tests pass successfully before submission.
 - **Database migrations**: Whenever domain models are modified, a corresponding Alembic migration script must be generated.
+
+### Code Checks (pre-commit)
+
+1. Install pre-commit: `uv tool install pre-commit`
+2. Install the git hooks: `pre-commit install --hook-type pre-commit --hook-type commit-msg` (or keep the repo convention: `cp .githooks/pre-commit .git/hooks/pre-commit`, then run `pre-commit install --hook-type commit-msg` to enable gitlint commit-message validation)
+3. Staged files are checked automatically on commit; **for a full check, first clean up existing findings**: `uv run ruff check --fix . && uv run ruff format .`, then run `pre-commit run --all-files`
+4. Checks include: Ruff (lint/format), Bandit (security), Codespell (spelling), pre-commit-hooks (basic formatting and secrets), markdownlint, ShellCheck (when installed locally), and gitlint (commit messages); Gitleaks (deep secret scan) can be enabled once network access to go.dev/GitHub is available
 
 ---
 

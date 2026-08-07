@@ -37,9 +37,7 @@ class OpenCodeRuntime(RuntimeBase):
             started_tool_call_ids=self._turn.started_tool_call_ids,
         )
 
-    def _on_mapped_event(
-        self, event: RuntimeTurnEvent
-    ) -> Iterator[RuntimeTurnEvent]:
+    def _on_mapped_event(self, event: RuntimeTurnEvent) -> Iterator[RuntimeTurnEvent]:
         if event.get("type") == TurnEventType.MESSAGE_DELTA:
             self._turn.accumulated_text += event.get("payload", {}).get("delta", "")
         if (
@@ -165,10 +163,7 @@ class OpenCodeRuntime(RuntimeBase):
                 return None
 
             state = part.get("state", "")
-            if isinstance(state, dict):
-                status = state.get("status", "")
-            else:
-                status = state
+            status = state.get("status", "") if isinstance(state, dict) else state
             tool_call_id = part.get("callID") or part.get("id", "")
 
             # pending: input 总是 {}，真正的 input 要到 running 才填充，
@@ -208,12 +203,18 @@ class OpenCodeRuntime(RuntimeBase):
                         "stage": "started",
                         "tool_name": tool_name,
                         "tool_call_id": tool_call_id,
-                        "arguments": state.get("input", {}) if isinstance(state, dict) else {},
+                        "arguments": state.get("input", {})
+                        if isinstance(state, dict)
+                        else {},
                     },
                 }
             if status == "completed":
                 output = state.get("output", "") if isinstance(state, dict) else ""
-                exit_code = state.get("metadata", {}).get("exit") if isinstance(state, dict) else None
+                exit_code = (
+                    state.get("metadata", {}).get("exit")
+                    if isinstance(state, dict)
+                    else None
+                )
                 result: dict[str, Any] = {
                     "type": TurnEventType.TOOL_CALL_RESPONSE,
                     "payload": {
@@ -228,7 +229,9 @@ class OpenCodeRuntime(RuntimeBase):
                     result["payload"]["exitCode"] = exit_code
                 return result
             if status == "error":
-                error_output = state.get("output", "") if isinstance(state, dict) else ""
+                error_output = (
+                    state.get("output", "") if isinstance(state, dict) else ""
+                )
                 return {
                     "type": TurnEventType.TOOL_CALL_RESPONSE,
                     "payload": {
@@ -287,7 +290,10 @@ class OpenCodeRuntime(RuntimeBase):
             return {"type": TurnEventType.MESSAGE_DELTA, "payload": {"delta": delta}}
 
         if field == "tool":
-            return {"type": TurnEventType.TOOL_CALL_DELTA, "payload": {"delta": delta, "part": raw.get("part")}}
+            return {
+                "type": TurnEventType.TOOL_CALL_DELTA,
+                "payload": {"delta": delta, "part": raw.get("part")},
+            }
 
         return None
 
@@ -313,14 +319,20 @@ class OpenCodeRuntime(RuntimeBase):
             # 只有 finish == "stop" 才表示模型真正完成回复。
             # finish == "tool-calls" 表示模型决定调用工具。
             if finish == "stop":
-                return {"type": TurnEventType.MESSAGE_COMPLETED, "payload": {"info": info}}
+                return {
+                    "type": TurnEventType.MESSAGE_COMPLETED,
+                    "payload": {"info": info},
+                }
         return None
 
     @staticmethod
     def _map_session_status(raw: dict[str, Any]) -> dict[str, Any] | None:
         status = raw.get("status", {})
         if isinstance(status, dict) and status.get("type") == "busy":
-            return {"type": TurnEventType.MESSAGE_STARTED, "payload": {"status": status}}
+            return {
+                "type": TurnEventType.MESSAGE_STARTED,
+                "payload": {"status": status},
+            }
         return None
 
     @staticmethod

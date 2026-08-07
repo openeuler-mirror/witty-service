@@ -11,19 +11,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from witty_service.api.auth import require_bearer_auth
 from witty_service.api.backport_schemas import (
-    BackportConfigPayload,
     BackportAsyncRunResponse,
+    BackportConfigPayload,
     BackportConfigUpdateResponse,
     BackportRepositoryPrepareRequest,
     BackportRepositoryPrepareResponse,
     BackportRepositoryRefreshRequest,
-    BackportRuntimeStatusResponse,
     BackportRunRequest,
     BackportRunResponse,
+    BackportRuntimeStatusResponse,
 )
 from witty_service.api.services import ServiceContainer
-from witty_service.application.backport_run_store import BackportRunStore
 from witty_service.application.backport_git_client import BackportGitClient
+from witty_service.application.backport_run_store import BackportRunStore
 from witty_service.application.backport_service import BackportService
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,9 @@ def _ensure_backport_runs(request: Request) -> tuple[dict, threading.Lock]:
 def _ensure_backport_run_store(request: Request) -> BackportRunStore:
     if not hasattr(request.app.state, "backport_run_store"):
         base_dir = request.app.state.services.workspace_store.base_dir
-        request.app.state.backport_run_store = BackportRunStore(base_dir / "backport-runs")
+        request.app.state.backport_run_store = BackportRunStore(
+            base_dir / "backport-runs"
+        )
         # On the first Backport request after startup, converge stale running
         # records to interrupted exactly once.
         request.app.state.backport_run_store.list_runs(active_run_ids=set())
@@ -107,13 +109,17 @@ def _validate_run_target(run_store: BackportRunStore, task_id: str) -> None:
     current_run = int(task.get("current_run") or 0)
     run = run_store.read_run(task_id, current_run) if current_run else None
     if run and run.get("status") in {"paused", "interrupted"}:
-        target_end = run.get("target_end") if isinstance(run.get("target_end"), dict) else {}
+        target_end = (
+            run.get("target_end") if isinstance(run.get("target_end"), dict) else {}
+        )
         expected_head = str(target_end.get("head") or "")
         if expected_head and state["head"] != expected_head:
             raise RuntimeError(
                 f"目标 HEAD 不一致：预期 {expected_head}，实际 {state['head']}。"
             )
-        expected_remote = str(target_end.get("repository") or expected.get("repository") or "")
+        expected_remote = str(
+            target_end.get("repository") or expected.get("repository") or ""
+        )
         actual_remote = state["repository"]
         if expected_remote and actual_remote and actual_remote != expected_remote:
             raise RuntimeError(
@@ -124,7 +130,8 @@ def _validate_run_target(run_store: BackportRunStore, task_id: str) -> None:
             task_dir,
             {
                 "target": {
-                    "repository": state["repository"] or str(expected.get("repository") or ""),
+                    "repository": state["repository"]
+                    or str(expected.get("repository") or ""),
                     "branch": state["branch"],
                     "head": state["head"],
                 }
@@ -145,7 +152,9 @@ def update_config(
     backport_service: BackportService = Depends(get_backport_service),
 ) -> BackportConfigUpdateResponse:
     backport_service.update_config(payload.model_dump())
-    return BackportConfigUpdateResponse(ok=True, config_path=backport_service.config_path)
+    return BackportConfigUpdateResponse(
+        ok=True, config_path=backport_service.config_path
+    )
 
 
 @router.post("/runtime-status", response_model=BackportRuntimeStatusResponse)
@@ -153,7 +162,9 @@ def get_runtime_status(
     payload: BackportConfigPayload,
     backport_service: BackportService = Depends(get_backport_service),
 ) -> BackportRuntimeStatusResponse:
-    return BackportRuntimeStatusResponse(**backport_service.get_runtime_status(payload.model_dump()))
+    return BackportRuntimeStatusResponse(
+        **backport_service.get_runtime_status(payload.model_dump())
+    )
 
 
 @router.get("/browse")
@@ -211,7 +222,9 @@ def prepare_repository(
     def worker() -> None:
         def update_progress(progress: dict) -> None:
             with tasks_lock:
-                task_record["progress"] = progress.get("progress", task_record["progress"])
+                task_record["progress"] = progress.get(
+                    "progress", task_record["progress"]
+                )
                 task_record["steps"] = progress.get("steps", task_record["steps"])
                 task_record["updated_at"] = time.time()
 
@@ -238,11 +251,15 @@ def prepare_repository(
                 task_record["progress"] = 100
                 task_record["updated_at"] = time.time()
 
-    threading.Thread(target=worker, daemon=True, name=f"backport-repo-{task_id[:8]}").start()
+    threading.Thread(
+        target=worker, daemon=True, name=f"backport-repo-{task_id[:8]}"
+    ).start()
     return BackportRepositoryPrepareResponse(**task_record)
 
 
-@router.get("/repositories/prepare/{task_id}", response_model=BackportRepositoryPrepareResponse)
+@router.get(
+    "/repositories/prepare/{task_id}", response_model=BackportRepositoryPrepareResponse
+)
 def get_repository_prepare_task(
     task_id: str,
     request: Request,
@@ -251,7 +268,9 @@ def get_repository_prepare_task(
     with tasks_lock:
         task_record = tasks.get(task_id)
         if task_record is None:
-            raise HTTPException(status_code=404, detail="Backport repository prepare task not found.")
+            raise HTTPException(
+                status_code=404, detail="Backport repository prepare task not found."
+            )
         return BackportRepositoryPrepareResponse(**dict(task_record))
 
 
@@ -261,18 +280,23 @@ def create_run(
     request: Request,
 ) -> BackportAsyncRunResponse:
     if payload.action not in {"generate_report", "run_all"}:
-        raise HTTPException(status_code=400, detail="Only generate_report and run_all support async runs.")
+        raise HTTPException(
+            status_code=400,
+            detail="Only generate_report and run_all support async runs.",
+        )
 
     runs, runs_lock = _ensure_backport_runs(request)
     run_store = _ensure_backport_run_store(request)
     requested_run_id = str(
-        payload.payload.get("run_id")
-        or payload.payload.get("_archive_run_id")
-        or ""
+        payload.payload.get("run_id") or payload.payload.get("_archive_run_id") or ""
     ).strip()
-    run_id = uuid.uuid4().hex if payload.action == "generate_report" else requested_run_id
+    run_id = (
+        uuid.uuid4().hex if payload.action == "generate_report" else requested_run_id
+    )
     if not run_id:
-        raise HTTPException(status_code=400, detail="Backport Task id is required for run_all.")
+        raise HTTPException(
+            status_code=400, detail="Backport Task id is required for run_all."
+        )
     if run_store.safe_slug(run_id) != run_id:
         raise HTTPException(status_code=400, detail="Invalid Backport run id.")
     with runs_lock:
@@ -280,7 +304,9 @@ def create_run(
         if current is not None and current.get("status") == "running":
             if payload.action == "run_all":
                 return BackportAsyncRunResponse(**dict(current))
-            raise HTTPException(status_code=409, detail="Backport run is already running.")
+            raise HTTPException(
+                status_code=409, detail="Backport run is already running."
+            )
         try:
             if payload.action == "run_all":
                 _validate_run_target(run_store, run_id)
@@ -338,14 +364,16 @@ def create_run(
             result = service.run_action(action, action_payload)
             with runs_lock:
                 run_record["result"] = result
-                parsed_result = result.get("parsedResult") if isinstance(result, dict) else None
-                paused = isinstance(parsed_result, dict) and parsed_result.get("stage") == "paused"
-                operation_failed = (
+                parsed_result = (
+                    result.get("parsedResult") if isinstance(result, dict) else None
+                )
+                paused = (
                     isinstance(parsed_result, dict)
-                    and (
-                        parsed_result.get("status") == "failed"
-                        or parsed_result.get("stage") == "failed"
-                    )
+                    and parsed_result.get("stage") == "paused"
+                )
+                operation_failed = isinstance(parsed_result, dict) and (
+                    parsed_result.get("status") == "failed"
+                    or parsed_result.get("stage") == "failed"
                 )
                 failed_count = int(
                     (run_record.get("progress") or {}).get("failed_count") or 0
@@ -364,9 +392,7 @@ def create_run(
                     else "ready"
                 )
                 target_end = (
-                    _read_run_target(run_store, run_id)
-                    if action == "run_all"
-                    else None
+                    _read_run_target(run_store, run_id) if action == "run_all" else None
                 )
                 run_record["status"] = (
                     "failed" if operation_failed else "paused" if paused else "success"
@@ -401,7 +427,12 @@ def create_run(
                             ),
                             "success": max(
                                 0,
-                                int((run_record.get("progress") or {}).get("processed_count") or 0)
+                                int(
+                                    (run_record.get("progress") or {}).get(
+                                        "processed_count"
+                                    )
+                                    or 0
+                                )
                                 - failed_count,
                             ),
                             "failed": failed_count,
@@ -417,11 +448,19 @@ def create_run(
                         "target_end": target_end,
                         "summary": {
                             "processed": int(
-                                (run_record.get("progress") or {}).get("processed_count") or 0
+                                (run_record.get("progress") or {}).get(
+                                    "processed_count"
+                                )
+                                or 0
                             ),
                             "success": max(
                                 0,
-                                int((run_record.get("progress") or {}).get("processed_count") or 0)
+                                int(
+                                    (run_record.get("progress") or {}).get(
+                                        "processed_count"
+                                    )
+                                    or 0
+                                )
                                 - failed_count,
                             ),
                             "failed": failed_count,
@@ -431,7 +470,9 @@ def create_run(
                 if execution_summary is not None:
                     run_record["execution_summary"] = execution_summary
         except Exception as exc:
-            logger.exception("Backport async run failed: run_id=%s action=%s", run_id, action)
+            logger.exception(
+                "Backport async run failed: run_id=%s action=%s", run_id, action
+            )
             with runs_lock:
                 run_record["status"] = "failed"
                 run_record["error"] = str(exc)
@@ -439,7 +480,9 @@ def create_run(
                 run_store.update_manifest(
                     run_store.runs_root / run_id,
                     {
-                        "status": "generation_failed" if action == "generate_report" else "failed",
+                        "status": "generation_failed"
+                        if action == "generate_report"
+                        else "failed",
                         "error": str(exc),
                     },
                 )
@@ -486,7 +529,9 @@ def get_initial_report(task_id: str, request: Request) -> Response:
     try:
         name, content = _ensure_backport_run_store(request).read_report(task_id)
     except (FileNotFoundError, ValueError):
-        raise HTTPException(status_code=404, detail="Backport initial report not found.")
+        raise HTTPException(
+            status_code=404, detail="Backport initial report not found."
+        ) from None
     return Response(
         content=content,
         media_type="application/yaml",
@@ -513,9 +558,13 @@ def get_task_run(task_id: str, run_number: int, request: Request) -> dict:
 @router.get("/tasks/{task_id}/runs/{run_number}/report")
 def get_task_run_report(task_id: str, run_number: int, request: Request) -> Response:
     try:
-        name, content = _ensure_backport_run_store(request).read_report(task_id, run_number)
+        name, content = _ensure_backport_run_store(request).read_report(
+            task_id, run_number
+        )
     except (FileNotFoundError, ValueError):
-        raise HTTPException(status_code=404, detail="Backport run report not found.")
+        raise HTTPException(
+            status_code=404, detail="Backport run report not found."
+        ) from None
     return Response(
         content=content,
         media_type="application/yaml",
@@ -543,7 +592,9 @@ def get_task_case_artifact(
             task_id, case_id, artifact
         )
     except (FileNotFoundError, ValueError):
-        raise HTTPException(status_code=404, detail="Backport case artifact not found.")
+        raise HTTPException(
+            status_code=404, detail="Backport case artifact not found."
+        ) from None
     media_type = "application/json" if path.suffix == ".json" else "text/plain"
     return Response(
         content=content,
@@ -563,7 +614,9 @@ def get_run(
         run_record = runs.get(run_id)
         if run_record is not None:
             return BackportAsyncRunResponse(**dict(run_record))
-    run_record = _ensure_backport_run_store(request).get_async_record(run_id, active=False)
+    run_record = _ensure_backport_run_store(request).get_async_record(
+        run_id, active=False
+    )
     if run_record is None:
         raise HTTPException(status_code=404, detail="Backport run not found.")
     return BackportAsyncRunResponse(**run_record)
@@ -620,4 +673,6 @@ def run_action(
     payload: BackportRunRequest,
     backport_service: BackportService = Depends(get_backport_service),
 ) -> BackportRunResponse:
-    return BackportRunResponse(**backport_service.run_action(payload.action, payload.payload))
+    return BackportRunResponse(
+        **backport_service.run_action(payload.action, payload.payload)
+    )

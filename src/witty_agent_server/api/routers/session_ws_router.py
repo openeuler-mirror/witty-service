@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
+
 from witty_agent_server.application.services.session_state_sync_service import (
     SessionStateSyncService,
 )
@@ -59,7 +60,9 @@ def create_session_ws_router(
         await websocket.accept()
 
         try:
-            async with connection_registry.hold(agent_id=agent_id, session_id=session_id):
+            async with connection_registry.hold(
+                agent_id=agent_id, session_id=session_id
+            ):
                 outbound: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
                 loop = asyncio.get_running_loop()
                 resolved_state_sync.bind_connection(
@@ -124,7 +127,7 @@ async def _dispatch_event(
         payload = {}
 
     if event_type == "message.abort":
-        cancelled = task_pool.abort_session(agent_id=agent_id, session_id=session_id)
+        task_pool.abort_session(agent_id=agent_id, session_id=session_id)
         return
     if event_type == "question.reply":
         await _dispatch_question_event(

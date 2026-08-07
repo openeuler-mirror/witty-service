@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
-from witty_service.domain.errors import session_not_found
+
 from witty_service.domain.enums import AgentStatus
+from witty_service.domain.errors import session_not_found
 from witty_service.persistence.orm import (
     AgentORM,
-    AgentSkillORM,
     AgentRuntimeStateORM,
+    AgentSkillORM,
     McpServerORM,
     MessageEventORM,
     MessageORM,
@@ -156,7 +157,7 @@ def _format_utc_datetime(dt: datetime) -> str | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt.isoformat().replace("+00:00", "Z")
 
 
@@ -213,16 +214,18 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
                     "status": tc["status"],
                     "input": tc.get("input"),
                     "output": payload.get("content"),
-                    "error": payload.get("content") if payload.get("is_error") else None,
+                    "error": payload.get("content")
+                    if payload.get("is_error")
+                    else None,
                     "duration": payload.get("duration"),
                 }
 
         elif evt.event_type == "thinking":
-            content = payload.get("thinking", "") 
+            content = payload.get("thinking", "")
             if content:
                 thinking.append(content)
             item["content"] = content
-        
+
         elif evt.event_type in ("message.delta", "thinking.delta"):
             continue
 
@@ -266,25 +269,33 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
 
         event_items.append(item)
 
-    msg_status = msg.status.value if isinstance(msg.status, MessageStatus) else msg.status
+    msg_status = (
+        msg.status.value if isinstance(msg.status, MessageStatus) else msg.status
+    )
     if msg_status in ("interrupted", "error"):
         for tc in tool_calls:
             if tc.get("status") == "running":
                 tc["status"] = "error"
                 if "error" not in tc:
-                    tc["error"] = "已停止生成" if msg_status == "interrupted" else "发生错误"
+                    tc["error"] = (
+                        "已停止生成" if msg_status == "interrupted" else "发生错误"
+                    )
         for item in event_items:
             tc = item.get("toolCall")
             if tc and tc.get("status") == "running":
                 tc["status"] = "error"
                 if "error" not in tc:
-                    tc["error"] = "已停止生成" if msg_status == "interrupted" else "发生错误"
+                    tc["error"] = (
+                        "已停止生成" if msg_status == "interrupted" else "发生错误"
+                    )
 
-    event_items.append({
-        "type": "message.delta",
-        "content": msg.content,
-        "timestamp": _format_utc_datetime(msg.created_at),
-    })
+    event_items.append(
+        {
+            "type": "message.delta",
+            "content": msg.content,
+            "timestamp": _format_utc_datetime(msg.created_at),
+        }
+    )
 
     result: dict[str, Any] = {
         "id": msg.id,
@@ -292,7 +303,9 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
         "content": msg.content,
         "timestamp": _format_utc_datetime(msg.created_at),
         "events": event_items,
-        "status": msg.status.value if isinstance(msg.status, MessageStatus) else msg.status,
+        "status": msg.status.value
+        if isinstance(msg.status, MessageStatus)
+        else msg.status,
         "isStreaming": msg.status == MessageStatus.generating,
     }
     if tool_calls:
@@ -360,7 +373,7 @@ class SqliteRepository:
         sandbox_id: str | None = None,
         has_scheduled_tasks: bool = False,
         model_id: str | None = None,
-        mcp_server_list: list[str] = [],
+        mcp_server_list: list[str] | None = None,
         last_active_at: datetime | None = None,
     ) -> AgentRecord:
         with self._session_factory() as session:
@@ -376,7 +389,7 @@ class SqliteRepository:
                 idle_timeout_seconds=idle_timeout_seconds,
                 has_scheduled_tasks=has_scheduled_tasks,
                 model_id=model_id,
-                mcp_server_list=mcp_server_list,
+                mcp_server_list=mcp_server_list or [],
                 last_active_at=last_active_at,
             )
             session.add(row)
@@ -401,7 +414,11 @@ class SqliteRepository:
             )
             return [self._to_agent_record(row) for row in rows]
 
-    def list_agents_needing_recovery(self, sandbox_type: str | None = None, status_filter: list[AgentStatus] | None = None) -> list[AgentRecord]:
+    def list_agents_needing_recovery(
+        self,
+        sandbox_type: str | None = None,
+        status_filter: list[AgentStatus] | None = None,
+    ) -> list[AgentRecord]:
         """获取需要在服务重启时恢复的 agent"""
         with self._session_factory() as session:
             if status_filter is None:
@@ -438,7 +455,12 @@ class SqliteRepository:
             )
 
             rows = (
-                session.query(AgentORM, SessionORM, func.coalesce(msg_count_subq.c.msg_count, 0), last_status_subq)
+                session.query(
+                    AgentORM,
+                    SessionORM,
+                    func.coalesce(msg_count_subq.c.msg_count, 0),
+                    last_status_subq,
+                )
                 .outerjoin(SessionORM, SessionORM.agent_id == AgentORM.id)
                 .outerjoin(msg_count_subq, SessionORM.id == msg_count_subq.c.session_id)
                 .filter(AgentORM.status != AgentStatus.deleted.value)
@@ -469,17 +491,23 @@ class SqliteRepository:
                         "conversations": [],
                     }
                 if session_row is not None:
-                    agents_map[agent_row.id]["conversations"].append({
-                        "id": session_row.id,
-                        "agent_id": session_row.agent_id,
-                        "title": session_row.title,
-                        "pinned": session_row.pinned,
-                        "status": session_row.status.value if isinstance(session_row.status, SessionStatus) else str(session_row.status),
-                        "message_count": msg_count,
-                        "last_message_status": last_status.value if isinstance(last_status, MessageStatus) else last_status,
-                        "created_at": session_row.created_at,
-                        "updated_at": session_row.updated_at,
-                    })
+                    agents_map[agent_row.id]["conversations"].append(
+                        {
+                            "id": session_row.id,
+                            "agent_id": session_row.agent_id,
+                            "title": session_row.title,
+                            "pinned": session_row.pinned,
+                            "status": session_row.status.value
+                            if isinstance(session_row.status, SessionStatus)
+                            else str(session_row.status),
+                            "message_count": msg_count,
+                            "last_message_status": last_status.value
+                            if isinstance(last_status, MessageStatus)
+                            else last_status,
+                            "created_at": session_row.created_at,
+                            "updated_at": session_row.updated_at,
+                        }
+                    )
 
             return list(agents_map.values())
 
@@ -605,7 +633,7 @@ class SqliteRepository:
         """Upsert session from witty-agent-server"""
         with self._session_factory() as session:
             existing = session.get(SessionORM, session_id)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
             if existing is None:
                 row = SessionORM(
@@ -650,7 +678,7 @@ class SqliteRepository:
             row.runtime_type = runtime_type
             row.runtime_session_id = runtime_session_id
             row.runtime_session_key = runtime_session_key
-            row.updated_at = datetime.now(timezone.utc)
+            row.updated_at = datetime.now(UTC)
 
             session.commit()
             session.refresh(row)
@@ -714,7 +742,9 @@ class SqliteRepository:
         with self._session_factory() as session:
             rows = (
                 session.query(AgentORM, AgentRuntimeStateORM)
-                .outerjoin(AgentRuntimeStateORM, AgentRuntimeStateORM.agent_id == AgentORM.id)
+                .outerjoin(
+                    AgentRuntimeStateORM, AgentRuntimeStateORM.agent_id == AgentORM.id
+                )
                 .filter(AgentORM.status != AgentStatus.deleted.value)
                 .order_by(AgentORM.created_at.asc())
                 .all()
@@ -745,10 +775,7 @@ class SqliteRepository:
                 )
                 .all()
             )
-            by_agent_id = {
-                row.id: self._to_agent_record(row)
-                for row in rows
-            }
+            by_agent_id = {row.id: self._to_agent_record(row) for row in rows}
             return [
                 by_agent_id[agent_id]
                 for agent_id in ordered_ids
@@ -845,9 +872,7 @@ class SqliteRepository:
 
     def update_message_content(self, message_id: str, content: str) -> None:
         with self._session_factory() as session:
-            session.query(MessageORM).filter(
-                MessageORM.id == message_id
-            ).update(
+            session.query(MessageORM).filter(MessageORM.id == message_id).update(
                 {MessageORM.content: content},
                 synchronize_session=False,
             )
@@ -855,10 +880,8 @@ class SqliteRepository:
 
     def update_message_stream_at(self, message_id: str) -> None:
         with self._session_factory() as session:
-            session.query(MessageORM).filter(
-                MessageORM.id == message_id
-            ).update(
-                {MessageORM.last_stream_at: datetime.now(timezone.utc)},
+            session.query(MessageORM).filter(MessageORM.id == message_id).update(
+                {MessageORM.last_stream_at: datetime.now(UTC)},
                 synchronize_session=False,
             )
             session.commit()
@@ -879,9 +902,7 @@ class SqliteRepository:
     ) -> list[MessageORM]:
         from datetime import timedelta
 
-        threshold = datetime.now(timezone.utc) - timedelta(
-            seconds=stale_threshold_seconds
-        )
+        threshold = datetime.now(UTC) - timedelta(seconds=stale_threshold_seconds)
         with self._session_factory() as session:
             return (
                 session.query(MessageORM)
@@ -892,7 +913,9 @@ class SqliteRepository:
                 .all()
             )
 
-    def find_last_assistant_message_for_session(self, session_id: str) -> MessageORM | None:
+    def find_last_assistant_message_for_session(
+        self, session_id: str
+    ) -> MessageORM | None:
         with self._session_factory() as session:
             return (
                 session.query(MessageORM)
@@ -923,10 +946,16 @@ class SqliteRepository:
         BATCH = 500
         with self._session_factory() as session:
             while True:
-                subq = select(MessageEventORM.id).filter(
-                    MessageEventORM.message_id == message_id,
-                    MessageEventORM.event_type.in_(["message.delta", "thinking.delta"]),
-                ).limit(BATCH)
+                subq = (
+                    select(MessageEventORM.id)
+                    .filter(
+                        MessageEventORM.message_id == message_id,
+                        MessageEventORM.event_type.in_(
+                            ["message.delta", "thinking.delta"]
+                        ),
+                    )
+                    .limit(BATCH)
+                )
                 deleted = (
                     session.query(MessageEventORM)
                     .filter(MessageEventORM.id.in_(subq))
@@ -1009,7 +1038,11 @@ class SqliteRepository:
             )
             if row is None:
                 return None
-            return row.status.value if isinstance(row.status, MessageStatus) else row.status
+            return (
+                row.status.value
+                if isinstance(row.status, MessageStatus)
+                else row.status
+            )
 
     def get_first_user_message(self, session_id: str) -> str | None:
         with self._session_factory() as session:
@@ -1038,7 +1071,7 @@ class SqliteRepository:
                 row.title = title
             if pinned is not None:
                 row.pinned = pinned
-            row.updated_at = datetime.now(timezone.utc)
+            row.updated_at = datetime.now(UTC)
             session.commit()
             session.refresh(row)
             return self._to_session_record(row)
@@ -1079,17 +1112,23 @@ class SqliteRepository:
             )
             result = []
             for row, msg_count, last_status in rows:
-                result.append({
-                    "id": row.id,
-                    "agent_id": row.agent_id,
-                    "title": row.title,
-                    "pinned": row.pinned,
-                    "status": row.status.value if isinstance(row.status, SessionStatus) else row.status,
-                    "message_count": msg_count,
-                    "last_message_status": last_status.value if isinstance(last_status, MessageStatus) else last_status,
-                    "created_at": row.created_at,
-                    "updated_at": row.updated_at,
-                })
+                result.append(
+                    {
+                        "id": row.id,
+                        "agent_id": row.agent_id,
+                        "title": row.title,
+                        "pinned": row.pinned,
+                        "status": row.status.value
+                        if isinstance(row.status, SessionStatus)
+                        else row.status,
+                        "message_count": msg_count,
+                        "last_message_status": last_status.value
+                        if isinstance(last_status, MessageStatus)
+                        else last_status,
+                        "created_at": row.created_at,
+                        "updated_at": row.updated_at,
+                    }
+                )
             return result
 
     def get_messages_with_events(
@@ -1104,9 +1143,7 @@ class SqliteRepository:
                 query = query.filter(MessageORM.created_at < cursor_dt)
 
             messages = (
-                query.order_by(MessageORM.created_at.desc())
-                .limit(limit + 1)
-                .all()
+                query.order_by(MessageORM.created_at.desc()).limit(limit + 1).all()
             )
 
             has_more = len(messages) > limit
@@ -1146,7 +1183,7 @@ class SqliteRepository:
                     session.query(AgentSkillORM.skill_id)
                     .filter(
                         AgentSkillORM.agent_id == agent_id,
-                        AgentSkillORM.source_type == 'builtin',
+                        AgentSkillORM.source_type == "builtin",
                     )
                     .all()
                 )
@@ -1329,7 +1366,7 @@ class SqliteRepository:
                 row.temperature = temperature
             if is_default is not None:
                 row.is_default = is_default
-            row.updated_at = datetime.now(timezone.utc)
+            row.updated_at = datetime.now(UTC)
             session.commit()
             session.refresh(row)
             return self._to_model_record(row)
@@ -1383,7 +1420,11 @@ class SqliteRepository:
 
     def list_mcp_servers(self) -> list[McpServerRecord]:
         with self._session_factory() as session:
-            rows = session.query(McpServerORM).order_by(McpServerORM.created_at.asc()).all()
+            rows = (
+                session.query(McpServerORM)
+                .order_by(McpServerORM.created_at.asc())
+                .all()
+            )
             return [self._to_mcp_server_record(row) for row in rows]
 
     def get_mcp_server(self, server_id: str) -> McpServerRecord | None:
@@ -1416,7 +1457,7 @@ class SqliteRepository:
                 row.mcp_server_name = mcp_server_name
             if mcp_server_config is not None:
                 row.mcp_server_config = mcp_server_config
-            row.updated_at = datetime.now(timezone.utc)
+            row.updated_at = datetime.now(UTC)
             session.commit()
             session.refresh(row)
             return self._to_mcp_server_record(row)
@@ -1495,10 +1536,10 @@ class SqliteRepository:
         with self._session_factory() as session:
             row = session.get(SkillRepositoryORM, repo_id)
             if row is None:
-                raise KeyError(f'Skill repository not found: {repo_id}')
+                raise KeyError(f"Skill repository not found: {repo_id}")
             for key, value in updates.items():
                 setattr(row, key, value)
-            row.updated_at = datetime.now(timezone.utc)
+            row.updated_at = datetime.now(UTC)
             session.commit()
             session.refresh(row)
             return self._to_skill_repository_record(row)
@@ -1540,7 +1581,7 @@ class SqliteRepository:
         with self._session_factory() as session:
             repository = session.get(SkillRepositoryORM, repo_id)
             if repository is None:
-                raise KeyError(f'Skill repository not found: {repo_id}')
+                raise KeyError(f"Skill repository not found: {repo_id}")
 
             session.query(SkillORM).filter(SkillORM.repo_id == repo_id).delete(
                 synchronize_session=False
@@ -1551,7 +1592,7 @@ class SqliteRepository:
                 row = SkillORM(
                     skill_id=skill_id,
                     repo_id=repo_id,
-                    skill_name=item.skill_name or '',
+                    skill_name=item.skill_name or "",
                     relative_path=item.relative_path,
                     metadata_json=dict(item.metadata or {}),
                     skill_source=item.skill_source,
@@ -1610,7 +1651,7 @@ class SqliteRepository:
     ) -> AgentSkillRecord:
         with self._session_factory() as session:
             row = session.get(AgentSkillORM, (agent_id, skill_id))
-            timestamp = installed_at or datetime.now(timezone.utc)
+            timestamp = installed_at or datetime.now(UTC)
             if row is None:
                 row = AgentSkillORM(
                     agent_id=agent_id,
@@ -1646,7 +1687,7 @@ class SqliteRepository:
     ) -> None:
         """Reconcile runtime-visible skills with persisted install records."""
         with self._session_factory() as session:
-            timestamp = datetime.now(timezone.utc)
+            timestamp = datetime.now(UTC)
             normalized_skills: list[dict[str, Any]] = []
             seen_skills: set[tuple[str, str | None]] = set()
             for item in skills:
@@ -1698,12 +1739,12 @@ class SqliteRepository:
                     row.relative_path.strip() if row.relative_path else None,
                 )
                 for row in installed_rows
-                if row.source_type != 'builtin'
+                if row.source_type != "builtin"
             }
             obsolete_builtin_rows = [
                 row
                 for row in installed_rows
-                if row.source_type == 'builtin'
+                if row.source_type == "builtin"
                 and (
                     (row.skill_name.strip(), row.relative_path) not in incoming_keys
                     or (row.skill_name.strip(), row.relative_path) in non_builtin_keys
@@ -1713,9 +1754,9 @@ class SqliteRepository:
             for row in obsolete_builtin_rows:
                 session.delete(row)
             if obsolete_builtin_ids:
-                session.query(SkillORM).filter(SkillORM.skill_id.in_(obsolete_builtin_ids)).delete(
-                    synchronize_session=False
-                )
+                session.query(SkillORM).filter(
+                    SkillORM.skill_id.in_(obsolete_builtin_ids)
+                ).delete(synchronize_session=False)
 
             existing_keys = {
                 (
@@ -1754,7 +1795,7 @@ class SqliteRepository:
                     AgentSkillORM(
                         agent_id=agent_id,
                         skill_id=item["skill_id"],
-                        source_type='builtin',
+                        source_type="builtin",
                         repo_id=None,
                         skill_name=item["skill_name"],
                         relative_path=item["relative_path"],
@@ -1773,13 +1814,12 @@ class SqliteRepository:
             rows = (
                 session.query(AgentSkillORM)
                 .filter(AgentSkillORM.agent_id == agent_id)
-                .order_by(AgentSkillORM.installed_at.asc(), AgentSkillORM.skill_name.asc())
+                .order_by(
+                    AgentSkillORM.installed_at.asc(), AgentSkillORM.skill_name.asc()
+                )
                 .all()
             )
-            return [
-                self._to_agent_skill_record(row)
-                for row in rows
-            ]
+            return [self._to_agent_skill_record(row) for row in rows]
 
     def get_installed_agent_skill(
         self,
@@ -1796,7 +1836,7 @@ class SqliteRepository:
     def delete_installed_agent_skill(self, *, agent_id: str, skill_id: str) -> None:
         with self._session_factory() as session:
             row = session.get(AgentSkillORM, (agent_id, skill_id))
-            is_builtin_skill = row is not None and row.source_type == 'builtin'
+            is_builtin_skill = row is not None and row.source_type == "builtin"
             if row is None:
                 return
             session.delete(row)

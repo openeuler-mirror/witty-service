@@ -9,9 +9,10 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, ClassVar
 
 import yaml
 
@@ -32,7 +33,7 @@ class BackportRuntimeConfig:
 class BackportCvekitClient:
     REFRESH_META_SCHEMA_VERSION = 1
     CVEKIT_OPTION_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
-    CVEKIT_OPTION_DENYLIST = {
+    CVEKIT_OPTION_DENYLIST: ClassVar[set[str]] = {
         "action",
         "api_key",
         "apply",
@@ -69,7 +70,7 @@ class BackportCvekitClient:
         "target_path",
         "target_release",
     }
-    PATCH_KIND_TO_KEY = {
+    PATCH_KIND_TO_KEY: ClassVar[dict[str, str]] = {
         "original": "original_patch_path",
         "current": "patch_path",
         "backported": "backported_patch_path",
@@ -95,7 +96,10 @@ class BackportCvekitClient:
     def resolve_cvekit_path() -> Path:
         result = subprocess.run(
             ["which", "cvekit"],
-            capture_output=True, text=True, encoding="utf-8", check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
         )
         candidate = (result.stdout or "").strip()
         if result.returncode == 0 and candidate:
@@ -110,7 +114,9 @@ class BackportCvekitClient:
     def set_runtime_config(self, runtime_config: BackportRuntimeConfig | None) -> None:
         self._runtime_config = runtime_config
         self._run_store.set_secrets(
-            [runtime_config.api_key] if runtime_config and runtime_config.api_key else []
+            [runtime_config.api_key]
+            if runtime_config and runtime_config.api_key
+            else []
         )
 
     def set_archive_run_id(self, run_id: str | None) -> None:
@@ -187,9 +193,13 @@ class BackportCvekitClient:
                 env["LLM_MODEL_NAME"] = self._runtime_config.llm_model_name
         return env
 
-    def _run_cvekit(self, args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    def _run_cvekit(
+        self, args: list[str], cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
         if self._runtime_config is None:
-            raise RuntimeError("Backport 运行环境未配置，请在 Backport 配置区选择运行模型。")
+            raise RuntimeError(
+                "Backport 运行环境未配置，请在 Backport 配置区选择运行模型。"
+            )
         cmd_args = list(args)
         existing_options = {
             item.split("=", 1)[0]
@@ -255,7 +265,10 @@ class BackportCvekitClient:
                 cmd,
                 cwd=str(cwd),
                 env=env,
-                capture_output=True, text=True, encoding="utf-8", check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
             )
         finally:
             stop_progress.set()
@@ -391,7 +404,9 @@ class BackportCvekitClient:
         ]
 
     @staticmethod
-    def _overlay_commit(raw_row: dict[str, Any], row_overlay: dict[str, Any]) -> dict[str, Any]:
+    def _overlay_commit(
+        raw_row: dict[str, Any], row_overlay: dict[str, Any]
+    ) -> dict[str, Any]:
         merged = dict(raw_row)
         for key, value in row_overlay.items():
             if key in {"row_id", "patches"}:
@@ -465,7 +480,9 @@ class BackportCvekitClient:
         report_data["commits"] = commits
         return marked_count
 
-    def _reconcile_report(self, report_data: dict[str, Any], target_path: str) -> dict[str, Any]:
+    def _reconcile_report(
+        self, report_data: dict[str, Any], target_path: str
+    ) -> dict[str, Any]:
         commits = report_data.get("commits")
         if not isinstance(commits, list) or not commits:
             return report_data
@@ -505,12 +522,20 @@ class BackportCvekitClient:
     def _is_skipped_row(row: dict[str, Any]) -> bool:
         status = str(row.get("status") or "").strip().lower()
         merged = str(row.get("merged_in_target") or "").strip().lower()
-        return status == "skipped" or merged == "skipped" or row.get("is_merge_commit") is True
+        return (
+            status == "skipped"
+            or merged == "skipped"
+            or row.get("is_merge_commit") is True
+        )
 
     @classmethod
     def _is_blocking_conflict(cls, row: dict[str, Any]) -> bool:
         status = str(row.get("status") or "").strip().lower()
-        return row.get("has_conflict") is True and status not in {"failed", "error"} and not cls._is_skipped_row(row)
+        return (
+            row.get("has_conflict") is True
+            and status not in {"failed", "error"}
+            and not cls._is_skipped_row(row)
+        )
 
     @staticmethod
     def _is_pending_row(row: dict[str, Any]) -> bool:
@@ -524,16 +549,22 @@ class BackportCvekitClient:
         target_config_layout: str = "none",
         target_config_layout_opts: dict[str, Any] | None = None,
     ) -> None:
-        config_data = {key: value for key, value in report_data.items() if key != "commits"}
+        config_data = {
+            key: value for key, value in report_data.items() if key != "commits"
+        }
         config_data.pop("api_key", None)
         config_data.pop("target_config_layout", None)
         config_data.pop("target_config_layout_opts", None)
-        target_config_layout, target_config_layout_opts = BackportCvekitClient._normalize_layout_fields(
-            target_config_layout, target_config_layout_opts
+        target_config_layout, target_config_layout_opts = (
+            BackportCvekitClient._normalize_layout_fields(
+                target_config_layout, target_config_layout_opts
+            )
         )
         if target_config_layout and target_config_layout != "none":
             config_data["target_config_layout"] = target_config_layout
-            if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
+            if target_config_layout_opts and isinstance(
+                target_config_layout_opts, dict
+            ):
                 config_data["target_config_layout_opts"] = target_config_layout_opts
         config_data["commits"] = commits
         with path.open("w", encoding="utf-8") as handle:
@@ -571,9 +602,12 @@ class BackportCvekitClient:
 
         self._run_cvekit(
             [
-                "--action", "backport-batch",
-                "--backport-config", str(report_config_path),
-                "--debug", "--json",
+                "--action",
+                "backport-batch",
+                "--backport-config",
+                str(report_config_path),
+                "--debug",
+                "--json",
                 "--stop-at-first-conflict",
             ],
             run_dir,
@@ -587,7 +621,9 @@ class BackportCvekitClient:
         commits: list[dict[str, Any]],
         updated_rows: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        updates = {cls._build_row_id(row): row for row in updated_rows if isinstance(row, dict)}
+        updates = {
+            cls._build_row_id(row): row for row in updated_rows if isinstance(row, dict)
+        }
         return [
             updates.get(cls._build_row_id(row), row)
             for row in commits
@@ -680,7 +716,9 @@ class BackportCvekitClient:
             "project": "linux",
             "target_path": str(target_repo),
         }
-        normalized_message_source = self._normalize_commit_message_source(commit_message_source)
+        normalized_message_source = self._normalize_commit_message_source(
+            commit_message_source
+        )
         for key, value in {
             "project_url": project_url,
             "project_dir": project_dir,
@@ -700,7 +738,9 @@ class BackportCvekitClient:
         )
         if target_config_layout and target_config_layout != "none":
             base_config["target_config_layout"] = target_config_layout
-            if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
+            if target_config_layout_opts and isinstance(
+                target_config_layout_opts, dict
+            ):
                 base_config["target_config_layout_opts"] = target_config_layout_opts
         if normalized_message_source == "auto" and linux_repo_path.strip():
             base_config["linux_repo_path"] = linux_repo_path.strip()
@@ -708,7 +748,9 @@ class BackportCvekitClient:
             yaml.safe_dump(base_config, handle, allow_unicode=True, sort_keys=False)
         archived_config_path = archive_root / "input" / "config.json"
         try:
-            archived_config = json.loads(archived_config_path.read_text(encoding="utf-8"))
+            archived_config = json.loads(
+                archived_config_path.read_text(encoding="utf-8")
+            )
         except (OSError, json.JSONDecodeError):
             archived_config = {}
         if not isinstance(archived_config, dict):
@@ -727,18 +769,29 @@ class BackportCvekitClient:
         self._run_store.write_json(archived_config_path, archived_config)
 
         self._run_cvekit(
-            ["--action", "backport-batch",
-             "--backport-excel", str(excel),
-             "-o", str(config_path),
-             "--backport-config", str(base_config_path)],
+            [
+                "--action",
+                "backport-batch",
+                "--backport-excel",
+                str(excel),
+                "-o",
+                str(config_path),
+                "--backport-config",
+                str(base_config_path),
+            ],
             run_dir,
         )
 
         self._run_cvekit(
-            ["--action", "backport-batch",
-            "--backport-config", str(config_path),
-            "--debug", "--json",
-            "--stop-at-first-conflict"],
+            [
+                "--action",
+                "backport-batch",
+                "--backport-config",
+                str(config_path),
+                "--debug",
+                "--json",
+                "--stop-at-first-conflict",
+            ],
             run_dir,
         )
 
@@ -817,7 +870,11 @@ class BackportCvekitClient:
             raise RuntimeError(f"report 中没有可继续检查的 commits: {base_path}")
 
         blocking_conflict = next(
-            (row for row in commits if isinstance(row, dict) and self._is_blocking_conflict(row)),
+            (
+                row
+                for row in commits
+                if isinstance(row, dict) and self._is_blocking_conflict(row)
+            ),
             None,
         )
         if blocking_conflict is not None:
@@ -827,7 +884,10 @@ class BackportCvekitClient:
                 "status": "failed",
                 "stage": "interactive_editing",
                 "summary": "当前仍有阻塞冲突，请先检测或处理当前冲突后再继续检查。",
-                "artifacts": {"base_report_path": str(base_path), **self._run_store.artifacts(archive_run_dir)},
+                "artifacts": {
+                    "base_report_path": str(base_path),
+                    **self._run_store.artifacts(archive_run_dir),
+                },
                 "report": {
                     "report_path": str(base_path),
                     "commit_count": len(commits),
@@ -836,7 +896,11 @@ class BackportCvekitClient:
             }
 
         first_pending_index = next(
-            (idx for idx, row in enumerate(commits) if isinstance(row, dict) and self._is_pending_row(row)),
+            (
+                idx
+                for idx, row in enumerate(commits)
+                if isinstance(row, dict) and self._is_pending_row(row)
+            ),
             None,
         )
         if first_pending_index is None:
@@ -846,7 +910,10 @@ class BackportCvekitClient:
                 "status": "success",
                 "stage": "interactive_editing",
                 "summary": "当前 report 没有待检查的 pending 条目。",
-                "artifacts": {"base_report_path": str(base_path), **self._run_store.artifacts(archive_run_dir)},
+                "artifacts": {
+                    "base_report_path": str(base_path),
+                    **self._run_store.artifacts(archive_run_dir),
+                },
                 "report": {
                     "report_path": str(base_path),
                     "commit_count": len(commits),
@@ -855,7 +922,9 @@ class BackportCvekitClient:
             }
 
         archive_run_dir = self._run_store.ensure_for_report(base_path)
-        attempt_dir = self._run_store.next_attempt_dir(archive_run_dir / "reports" / "continue")
+        attempt_dir = self._run_store.next_attempt_dir(
+            archive_run_dir / "reports" / "continue"
+        )
         _, _, updated_commits = self._run_stop_at_first_conflict_report(
             report_data=report_data,
             commits=commits,
@@ -873,12 +942,14 @@ class BackportCvekitClient:
             "summary": {
                 "total": len(persisted_commits),
                 "success": sum(
-                    1 for row in persisted_commits
+                    1
+                    for row in persisted_commits
                     if str(row.get("status") or "").lower()
                     in {"success", "applied", "resolved"}
                 ),
                 "failed": sum(
-                    1 for row in persisted_commits
+                    1
+                    for row in persisted_commits
                     if str(row.get("status") or "").lower() == "failed"
                 ),
             },
@@ -887,9 +958,7 @@ class BackportCvekitClient:
             manifest_updates["status"] = "running"
         self._run_store.update_manifest(archive_run_dir, manifest_updates)
         previous_rows = {
-            self._build_row_id(row): row
-            for row in commits
-            if isinstance(row, dict)
+            self._build_row_id(row): row for row in commits if isinstance(row, dict)
         }
         changed_rows = [
             row
@@ -939,7 +1008,10 @@ class BackportCvekitClient:
             "operation": "load_report",
             "status": "success",
             "stage": "interactive_editing",
-            "artifacts": {"base_report_path": str(base_path), **self._run_store.artifacts(archive_run_dir)},
+            "artifacts": {
+                "base_report_path": str(base_path),
+                **self._run_store.artifacts(archive_run_dir),
+            },
             "report": {
                 "report_path": str(base_path),
                 "commit_count": len(commits),
@@ -991,7 +1063,9 @@ class BackportCvekitClient:
         # 每次检查结束后都把单行结果 merge 回主 report，避免整表预检查。
         row_for_check = dict(resolved_row)
         original_patch_path = str(
-            row_for_check.get("original_patch_path") or row_for_check.get("patch_path") or ""
+            row_for_check.get("original_patch_path")
+            or row_for_check.get("patch_path")
+            or ""
         ).strip()
         row_for_check["status"] = "pending"
         row_for_check["merged_in_target"] = None
@@ -1095,7 +1169,11 @@ class BackportCvekitClient:
 
         report_data, commits = self._read_report(base_path)
         first_conflict = next(
-            (item for item in commits if isinstance(item, dict) and self._is_blocking_conflict(item)),
+            (
+                item
+                for item in commits
+                if isinstance(item, dict) and self._is_blocking_conflict(item)
+            ),
             None,
         )
         if first_conflict is None:
@@ -1126,7 +1204,9 @@ class BackportCvekitClient:
 
         row_for_check = dict(resolved_row)
         original_patch_path = str(
-            row_for_check.get("original_patch_path") or row_for_check.get("patch_path") or ""
+            row_for_check.get("original_patch_path")
+            or row_for_check.get("patch_path")
+            or ""
         ).strip()
         row_for_check["status"] = "pending"
         row_for_check["merged_in_target"] = None
@@ -1241,7 +1321,10 @@ class BackportCvekitClient:
                 "status": "success",
                 "stage": "interactive_editing",
                 "summary": f"选中的 {len(resolved_commits)} 条 commit 均无需执行",
-                "artifacts": {"base_report_path": str(base_path), **self._run_store.artifacts(archive_run_dir)},
+                "artifacts": {
+                    "base_report_path": str(base_path),
+                    **self._run_store.artifacts(archive_run_dir),
+                },
                 "report": {
                     "commit_count": len(resolved_commits),
                     "commits": resolved_commits,
@@ -1261,7 +1344,9 @@ class BackportCvekitClient:
             attempt_dir = self._run_store.next_attempt_dir(case_dir)
         else:
             case_dir = None
-            attempt_dir = self._run_store.next_attempt_dir(archive_run_dir / "reports" / "execute")
+            attempt_dir = self._run_store.next_attempt_dir(
+                archive_run_dir / "reports" / "execute"
+            )
         filtered_report_path = attempt_dir / "report.report.yml"
 
         config_data = dict(orig_report)
@@ -1279,7 +1364,9 @@ class BackportCvekitClient:
             config_data["target_path"] = target_path.strip()
         if commit_message_template.strip():
             config_data["commit_message_template"] = commit_message_template
-        commit_message_source = self._normalize_commit_message_source(commit_message_source)
+        commit_message_source = self._normalize_commit_message_source(
+            commit_message_source
+        )
         if commit_message_source != "auto":
             config_data["commit_message_source"] = commit_message_source
         if commit_message_source == "auto" and linux_repo_path.strip():
@@ -1293,20 +1380,28 @@ class BackportCvekitClient:
         # 仅在 layout != "none" 时写入新字段
         if target_config_layout and target_config_layout != "none":
             config_data["target_config_layout"] = target_config_layout
-            if target_config_layout_opts and isinstance(target_config_layout_opts, dict):
+            if target_config_layout_opts and isinstance(
+                target_config_layout_opts, dict
+            ):
                 config_data["target_config_layout_opts"] = target_config_layout_opts
 
         with filtered_report_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config_data, handle, allow_unicode=True, sort_keys=False)
 
         cmd = [
-            "--action", "backport-batch",
-            "--backport-config", str(filtered_report_path),
-            "-e", "--debug", "--json",
+            "--action",
+            "backport-batch",
+            "--backport-config",
+            str(filtered_report_path),
+            "-e",
+            "--debug",
+            "--json",
         ]
         cmd.extend(self.build_cvekit_option_args(cvekit_options))
         result = self._run_cvekit(cmd, attempt_dir)
-        combined_output = "\n".join(part for part in [result.stdout, result.stderr] if part)
+        combined_output = "\n".join(
+            part for part in [result.stdout, result.stderr] if part
+        )
 
         _, commits = self._read_report(filtered_report_path)
         report_data, base_commits = self._read_report(base_path)
@@ -1315,9 +1410,8 @@ class BackportCvekitClient:
         commits = [
             item
             for item in merged_commits
-            if self._build_row_id(item) in {
-                self._build_row_id(updated) for updated in commits
-            }
+            if self._build_row_id(item)
+            in {self._build_row_id(updated) for updated in commits}
         ]
         archive_payload: dict[str, Any] | None = None
         if case_dir is not None:
@@ -1370,7 +1464,9 @@ class BackportCvekitClient:
                 "commits": commits,
             },
             "diagnostics": {
-                "likely_missing_prerequisite": self._infer_likely_missing_prerequisite(combined_output),
+                "likely_missing_prerequisite": self._infer_likely_missing_prerequisite(
+                    combined_output
+                ),
             },
             "archive": archive_payload or {},
         }
@@ -1425,7 +1521,11 @@ class BackportCvekitClient:
 
         _, base_commits = self._read_report(base_path)
         first_conflict = next(
-            (item for item in base_commits if isinstance(item, dict) and self._is_blocking_conflict(item)),
+            (
+                item
+                for item in base_commits
+                if isinstance(item, dict) and self._is_blocking_conflict(item)
+            ),
             None,
         )
         if first_conflict is None:
@@ -1537,7 +1637,8 @@ class BackportCvekitClient:
             or resolved_row.get("empty_patch") is True
             or resolved_row.get("equivalent_exists") is True
             or str(resolved_row.get("status") or "").strip().lower() == "skipped"
-            or str(resolved_row.get("merged_in_target") or "").strip().lower() == "skipped"
+            or str(resolved_row.get("merged_in_target") or "").strip().lower()
+            == "skipped"
         ):
             return {
                 "operation": "apply_row",
@@ -1569,15 +1670,26 @@ class BackportCvekitClient:
         execution_report_path = attempt_dir / "apply.report.yml"
         shutil.copy2(apply_config_path, execution_report_path)
         result = self._run_cvekit(
-            ["--action", "backport-batch",
-             "--backport-config", str(execution_report_path), "--debug", "--json",
-             "--apply", apply_value],
+            [
+                "--action",
+                "backport-batch",
+                "--backport-config",
+                str(execution_report_path),
+                "--debug",
+                "--json",
+                "--apply",
+                apply_value,
+            ],
             attempt_dir,
         )
         apply_result = self._parse_json_output(result.stdout)
 
         _, commits = self._read_report(execution_report_path)
-        affected_rows = [c for c in commits if isinstance(c, dict) and self._build_row_id(c) == target_row_id] or [resolved_row]
+        affected_rows = [
+            c
+            for c in commits
+            if isinstance(c, dict) and self._build_row_id(c) == target_row_id
+        ] or [resolved_row]
         apply_status = str(apply_result.get("status") or "").strip().lower()
         if apply_status and apply_status != "success":
             affected_rows = [
@@ -1585,8 +1697,10 @@ class BackportCvekitClient:
                     **row,
                     "status": apply_status,
                     "error": apply_result.get("error") or row.get("error"),
-                    "conflict_check_method": row.get("conflict_check_method") or "apply",
-                    "conflict_check_error": apply_result.get("error") or row.get("conflict_check_error"),
+                    "conflict_check_method": row.get("conflict_check_method")
+                    or "apply",
+                    "conflict_check_error": apply_result.get("error")
+                    or row.get("conflict_check_error"),
                 }
                 for row in affected_rows
             ]
@@ -1691,15 +1805,21 @@ class BackportCvekitClient:
             )
             apply_value = self._resolve_apply_value(resolved_row)
             cmd = [
-                "--action", "backport-batch",
-                "--backport-config", str(effective_config),
-                "--debug", "--json",
+                "--action",
+                "backport-batch",
+                "--backport-config",
+                str(effective_config),
+                "--debug",
+                "--json",
                 "--preview-commit-message",
-                "--apply", apply_value,
+                "--apply",
+                apply_value,
             ]
             if commit_message_template.strip():
                 cmd.extend(["--commit-message-template", commit_message_template])
-            commit_message_source = self._normalize_commit_message_source(commit_message_source)
+            commit_message_source = self._normalize_commit_message_source(
+                commit_message_source
+            )
             if commit_message_source != "auto":
                 cmd.extend(["--commit-message-source", commit_message_source])
             if commit_message_source == "auto" and linux_repo_path.strip():
@@ -1716,7 +1836,9 @@ class BackportCvekitClient:
             "status": "success",
             "summary": "commit message 预览已生成",
             "commit_message": {
-                "message": preview_result.get("commit_message") or preview_result.get("commit_message_preview") or "",
+                "message": preview_result.get("commit_message")
+                or preview_result.get("commit_message_preview")
+                or "",
                 "context": preview_result.get("commit_message_context") or {},
                 "source_detection": preview_result.get("source_detection") or {},
                 "warnings": preview_result.get("commit_message_warnings") or [],
@@ -1739,7 +1861,9 @@ class BackportCvekitClient:
             base_report_path=base_report_path,
             working_report_path=working_report_path,
         )
-        patch_path = str(resolved_row.get(self.PATCH_KIND_TO_KEY[patch_kind]) or "").strip()
+        patch_path = str(
+            resolved_row.get(self.PATCH_KIND_TO_KEY[patch_kind]) or ""
+        ).strip()
         if not patch_path:
             raise FileNotFoundError(f"{patch_kind} patch 不存在")
 
@@ -1780,7 +1904,9 @@ class BackportCvekitClient:
             raise ValueError(f"backport 配置不是对象: {config_path}")
         if commit_message_template.strip():
             config_data["commit_message_template"] = commit_message_template
-        commit_message_source = BackportCvekitClient._normalize_commit_message_source(commit_message_source)
+        commit_message_source = BackportCvekitClient._normalize_commit_message_source(
+            commit_message_source
+        )
         if commit_message_source != "auto":
             config_data["commit_message_source"] = commit_message_source
         if signer_name.strip():
@@ -1804,7 +1930,13 @@ class BackportCvekitClient:
 
     @staticmethod
     def _resolve_apply_value(row: dict[str, Any]) -> str:
-        for key in ("backported_patch_path", "patch_path", "original_patch_path", "commit", "input_commit"):
+        for key in (
+            "backported_patch_path",
+            "patch_path",
+            "original_patch_path",
+            "commit",
+            "input_commit",
+        ):
             val = row.get(key)
             if isinstance(val, str) and val.strip():
                 return val.strip()
@@ -1812,7 +1944,14 @@ class BackportCvekitClient:
 
     @staticmethod
     def _build_row_id(row: dict[str, Any]) -> str:
-        for key in ("row_id", "commit", "input_commit", "original_patch_path", "patch_path", "backported_patch_path"):
+        for key in (
+            "row_id",
+            "commit",
+            "input_commit",
+            "original_patch_path",
+            "patch_path",
+            "backported_patch_path",
+        ):
             val = row.get(key)
             if isinstance(val, str) and val.strip():
                 return val.strip()
@@ -1837,7 +1976,10 @@ class BackportCvekitClient:
         if isinstance(target_config_layout_opts, dict):
             try:
                 from witty_service.api.backport_schemas import TargetConfigLayoutOpts
-                opts: dict[str, Any] | None = TargetConfigLayoutOpts(**target_config_layout_opts).model_dump()
+
+                opts: dict[str, Any] | None = TargetConfigLayoutOpts(
+                    **target_config_layout_opts
+                ).model_dump()
             except Exception:
                 opts = {"default_level": "L1-RECOMMEND"}
         else:

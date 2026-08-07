@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import contextlib
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -18,6 +19,7 @@ from witty_service.sandbox.base import (
     sandbox_start_failed,
     sandbox_stop_failed,
 )
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_DOCKER_BASE_IMAGE = "ghcr.io/openwitty/witty-agent-server"
@@ -94,9 +96,7 @@ class DockerSandboxBackend(SandboxBackend):
         self.base_image = image
         self.host = host
         self.container_port = container_port
-        self.container_workspace_path = (
-            workspace_mount_path or container_workspace_path
-        )
+        self.container_workspace_path = workspace_mount_path or container_workspace_path
         self.stop_timeout = stop_timeout
         self.memory_limit = memory_limit
         self.pids_limit = pids_limit
@@ -171,12 +171,16 @@ class DockerSandboxBackend(SandboxBackend):
                 pids_limit=self.pids_limit,
                 cpu_shares=self.cpu_shares,
                 read_only=self.read_only,
-                tmpfs={
+                tmpfs={  # nosec B108 - 沙箱 tmpfs 挂载为预期行为
                     "/tmp": f"rw,noexec,nosuid,size={self.tmpfs_size}",
                     "/home/witty": f"rw,nosuid,uid=1000,gid=1000,mode=0755,size={self.tmpfs_size}",
                 },
                 ulimits=[
-                    {"name": "nofile", "soft": self.nofile_soft_limit, "hard": self.nofile_hard_limit},
+                    {
+                        "name": "nofile",
+                        "soft": self.nofile_soft_limit,
+                        "hard": self.nofile_hard_limit,
+                    },
                 ],
             )
         except Exception as exc:
@@ -217,10 +221,8 @@ class DockerSandboxBackend(SandboxBackend):
         if container.status == "running":
             return container
 
-        try:
+        with contextlib.suppress(NotFound, APIError):
             container.remove(force=True)
-        except (NotFound, APIError):
-            pass
         return None
 
     def _build_handle_from_container(
@@ -260,7 +262,14 @@ class DockerSandboxBackend(SandboxBackend):
                 _with_retry(lambda: container.reload())
                 ports = container.attrs["NetworkSettings"]["Ports"]
             return int(ports[port_key][0]["HostPort"])
-        except (KeyError, IndexError, TypeError, NotFound, APIError, ConnectionError) as exc:
+        except (
+            KeyError,
+            IndexError,
+            TypeError,
+            NotFound,
+            APIError,
+            ConnectionError,
+        ) as exc:
             raise sandbox_start_failed(
                 sandbox_type=self.sandbox_type,
                 message="Failed to extract host port from container.",
@@ -314,7 +323,9 @@ class DockerSandboxBackend(SandboxBackend):
 
         raw_status = getattr(container, "status", "unknown")
         if raw_status == "exited":
-            state = container.attrs.get("State", {}) if hasattr(container, "attrs") else {}
+            state = (
+                container.attrs.get("State", {}) if hasattr(container, "attrs") else {}
+            )
             if state.get("OOMKilled", False):
                 logger.warning(
                     "Container %s was killed by OOM killer (exit_code=%s)",
@@ -323,9 +334,7 @@ class DockerSandboxBackend(SandboxBackend):
                 )
         return _map_container_status(raw_status)
 
-    def endpoint(
-        self, handle: SandboxHandle | str, **kwargs: Any
-    ) -> AdapterEndpoint:
+    def endpoint(self, handle: SandboxHandle | str, **kwargs: Any) -> AdapterEndpoint:
         sandbox_handle = self._resolve_handle(handle)
         base_url = str(sandbox_handle.metadata["base_url"])
         return AdapterEndpoint(base_url=base_url, health_url=f"{base_url}/ping")
@@ -349,9 +358,7 @@ class DockerSandboxBackend(SandboxBackend):
                 stop_error = exc
             try:
                 _with_retry(
-                    lambda: container.remove(
-                        force=bool(kwargs.get("force", False))
-                    )
+                    lambda: container.remove(force=bool(kwargs.get("force", False)))
                 )
             except NotFound:
                 pass

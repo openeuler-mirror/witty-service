@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
-
+from typing import Any, ClassVar
 
 from witty_agent_server.application.models.agent import Agent, AgentStatus
 from witty_agent_server.application.services.agent.base import (
@@ -21,13 +20,11 @@ from witty_agent_server.application.services.agent.openclaw_lifecycle_service im
     OpenClawLifecycleError,
     OpenClawLifecycleService,
 )
-
 from witty_agent_server.infra.clients.openclaw_gateway_client import (
     OpenClawGatewayClient,
     OpenClawGatewayClientError,
 )
 from witty_agent_server.runtimes.runtime_base import RuntimeType
-
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +32,7 @@ logger = logging.getLogger(__name__)
 class OpenClawAgentService(AgentServiceBase):
     """当前项目使用的 openclaw 版本 agent service。"""
 
-    PROVIDER_TO_AUTH_CHOICE: dict[str, str] = {
+    PROVIDER_TO_AUTH_CHOICE: ClassVar[dict[str, str]] = {
         "openai": "openai-api-key",
         "anthropic": "anthropic-api-key",
         "google": "gemini-api-key",
@@ -58,7 +55,8 @@ class OpenClawAgentService(AgentServiceBase):
     ) -> None:
         super().__init__(agent=agent, runtime=runtime)
         self._lifecycle_service: OpenClawLifecycleControlPort = (
-            lifecycle_service or OpenClawLifecycleService(
+            lifecycle_service
+            or OpenClawLifecycleService(
                 profile=profile,
                 gateway_port=gateway_port,
             )
@@ -78,13 +76,21 @@ class OpenClawAgentService(AgentServiceBase):
         reload: bool = True,
     ) -> Agent:
         """启动 openclaw runtime，并绑定到 gateway 中已加载的 agent。
-        
+
         使用 onboard 命令启动，支持根据模型提供商选择不同的认证方式。
         """
         with self._lock:
             openclaw_config = config.get("openclaw") if config else None
-            profile = openclaw_config.get("profile") if isinstance(openclaw_config, dict) else None
-            gateway_port = openclaw_config.get("gateway_port") if isinstance(openclaw_config, dict) else None
+            profile = (
+                openclaw_config.get("profile")
+                if isinstance(openclaw_config, dict)
+                else None
+            )
+            gateway_port = (
+                openclaw_config.get("gateway_port")
+                if isinstance(openclaw_config, dict)
+                else None
+            )
 
             is_running = self._probe_openclaw_running()
             logger.info(
@@ -115,11 +121,17 @@ class OpenClawAgentService(AgentServiceBase):
             if is_running:
                 self._stop_openclaw()
 
-            model_provider = config.get("model", {}).get("provider", "") if config else ""
+            model_provider = (
+                config.get("model", {}).get("provider", "") if config else ""
+            )
             api_key = config.get("model", {}).get("api_key", "") if config else ""
-            custom_base_url = config.get("model", {}).get("api_base_url") if config else None
+            custom_base_url = (
+                config.get("model", {}).get("api_base_url") if config else None
+            )
             custom_model_id = config.get("model", {}).get("name") if config else None
-            custom_compatibility = config.get("model", {}).get("compatibility") if config else None
+            custom_compatibility = (
+                config.get("model", {}).get("compatibility") if config else None
+            )
 
             self._onboard_openclaw(
                 model_provider=model_provider,
@@ -146,9 +158,11 @@ class OpenClawAgentService(AgentServiceBase):
             )
             return self.agent
 
-    def _setup_mcp(self, mcp_server_name: str | None, mcp_server_config: dict[str, Any] | None) -> None:
+    def _setup_mcp(
+        self, mcp_server_name: str | None, mcp_server_config: dict[str, Any] | None
+    ) -> None:
         """设置 MCP 配置（如果在 config 中指定了）。"""
-        
+
         if mcp_server_name and mcp_server_config:
             logger.info("Setting up MCP: name=%s", mcp_server_name)
             try:
@@ -158,7 +172,7 @@ class OpenClawAgentService(AgentServiceBase):
 
     def _unset_mcp(self, mcp_server_name: str | None) -> None:
         """卸载 MCP 配置。"""
-        
+
         if mcp_server_name:
             logger.info("Unsetting MCP: name=%s", mcp_server_name)
             try:
@@ -201,7 +215,9 @@ class OpenClawAgentService(AgentServiceBase):
         custom_compatibility: str | None = None,
     ) -> None:
         """使用 onboard 命令启动 openclaw runtime。"""
-        auth_choice = self.PROVIDER_TO_AUTH_CHOICE.get(model_provider, "deepseek-api-key")
+        auth_choice = self.PROVIDER_TO_AUTH_CHOICE.get(
+            model_provider, "deepseek-api-key"
+        )
 
         self._lifecycle_service.update_config(
             profile=profile,
@@ -221,7 +237,7 @@ class OpenClawAgentService(AgentServiceBase):
             custom_model_id,
             custom_compatibility,
         )
-        
+
         try:
             self._lifecycle_service.onboard(
                 auth_choice=auth_choice,
@@ -315,7 +331,10 @@ class OpenClawAgentService(AgentServiceBase):
             except OpenClawGatewayClientError as exc:
                 last_error = exc
                 err_msg = getattr(exc, "message", "") or str(exc)
-                if "gateway starting" in err_msg.lower() or "retry shortly" in err_msg.lower():
+                if (
+                    "gateway starting" in err_msg.lower()
+                    or "retry shortly" in err_msg.lower()
+                ):
                     logger.info("Gateway still starting, retrying in 1s...")
                     time.sleep(1)
                     continue
@@ -387,7 +406,9 @@ class OpenClawAgentService(AgentServiceBase):
                 sorted(gateway_agent.keys()),
             )
             raise OpenClawAgentNotFoundError(agent_id=agent_id)
-        logger.info("gateway agent loaded: agent_id=%s runtime=%s", agent_id, self._runtime)
+        logger.info(
+            "gateway agent loaded: agent_id=%s runtime=%s", agent_id, self._runtime
+        )
 
     def _is_gateway_agent_loaded(self, gateway_agent: dict[str, Any]) -> bool:
         """优先读取 gateway 的加载态字段；缺失时回退为存在即视为已加载。"""

@@ -39,6 +39,7 @@ class TaskPool:
         self._inflight_sessions: set[tuple[str, str]] = set()
         self._lock = asyncio.Lock()
         self._cancel_events: dict[tuple[str, str], threading.Event] = {}
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     async def submit(
         self,
@@ -67,7 +68,7 @@ class TaskPool:
                 raise SessionBusyError()
             self._inflight_sessions.add(session_scope)
 
-        asyncio.create_task(
+        task = asyncio.create_task(
             self._run_turn(
                 agent_id=agent_id,
                 session_id=session_id,
@@ -75,6 +76,8 @@ class TaskPool:
                 on_event=on_event,
             )
         )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def abort_session(self, agent_id: str, session_id: str) -> bool:
         """
@@ -91,7 +94,12 @@ class TaskPool:
         return event is not None
 
     def answer_question(
-        self, *, agent_id: str, session_id: str, request_id: str, answers: list[list[str]]
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        request_id: str,
+        answers: list[list[str]],
     ) -> bool:
         """回答提问事件，使 SSE 流继续。"""
         return self._orchestrator.answer_question(
@@ -141,15 +149,18 @@ class TaskPool:
                     agent_id,
                     session_id,
                 )
-                loop.call_soon_threadsafe(queue.put_nowait, {
-                    "type": "stream.error",
-                    "agent_id": agent_id,
-                    "session_id": session_id,
-                    "payload": {
-                        "code": "PRODUCER_ERROR",
-                        "message": "Internal stream producer encountered an error",
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {
+                        "type": "stream.error",
+                        "agent_id": agent_id,
+                        "session_id": session_id,
+                        "payload": {
+                            "code": "PRODUCER_ERROR",
+                            "message": "Internal stream producer encountered an error",
+                        },
                     },
-                })
+                )
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, None)
 
@@ -166,6 +177,8 @@ class TaskPool:
                 await on_event(event)
         finally:
             async with self._lock:
-                self._inflight_sessions.discard(session_scope)  # no-op if already released above
+                self._inflight_sessions.discard(
+                    session_scope
+                )  # no-op if already released above
             self._cancel_events.pop(session_scope, None)
             await producer_future

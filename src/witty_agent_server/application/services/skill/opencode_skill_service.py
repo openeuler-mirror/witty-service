@@ -14,7 +14,6 @@ from witty_agent_server.application.services.skill.errors import (
 )
 from witty_service.config import get_settings
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -95,7 +94,7 @@ class OpenCodeSkillService(AgentSkillServiceBase):
         except ValueError:
             raise ValueError(
                 f"Path {resolved} is outside allowed skills directory {skills_dir}"
-            )
+            ) from None
 
         return resolved
 
@@ -129,12 +128,14 @@ class OpenCodeSkillService(AgentSkillServiceBase):
                 skill_md = entry / "SKILL.md"
                 metadata = self._parse_skill_md(skill_md)
                 skill_name = metadata.get("name") or entry.name
-                discovered.append({
-                    "name": skill_name,
-                    "description": metadata.get("description"),
-                    "filePath": str(skill_md) if skill_md.is_file() else None,
-                    "source": "opencode-filesystem",
-                })
+                discovered.append(
+                    {
+                        "name": skill_name,
+                        "description": metadata.get("description"),
+                        "filePath": str(skill_md) if skill_md.is_file() else None,
+                        "source": "opencode-filesystem",
+                    }
+                )
         except OSError as exc:
             logger.exception(
                 "list_skills failed to iterate skills dir, path=%s",
@@ -200,7 +201,7 @@ class OpenCodeSkillService(AgentSkillServiceBase):
         normalized_name = self._normalize_skill_name(
             skill_name=skill_name,
             error_cls=OpenCodeSkillsInstallError,
-            )
+        )
 
         src = Path(source_path).expanduser().resolve()
         try:
@@ -270,7 +271,7 @@ class OpenCodeSkillService(AgentSkillServiceBase):
         normalized_name = self._normalize_skill_name(
             skill_name=skill_name,
             error_cls=OpenCodeSkillsInstallError,
-            )
+        )
         normalized_skill_source = (skill_source or "").strip()
         if not normalized_skill_source:
             raise OpenCodeSkillsInstallError(
@@ -361,7 +362,7 @@ class OpenCodeSkillService(AgentSkillServiceBase):
         normalized_name = self._normalize_skill_name(
             skill_name=skill_name,
             error_cls=OpenCodeSkillsUninstallError,
-            )
+        )
 
         # 本地路径安装的技能走本地卸载
         if source_path and self._is_local_path(source_path):
@@ -389,9 +390,7 @@ class OpenCodeSkillService(AgentSkillServiceBase):
             ) from exc
 
         if not dst.exists():
-            logger.warning(
-                "uninstall_local_skill: skill dir not found, path=%s", dst
-            )
+            logger.warning("uninstall_local_skill: skill dir not found, path=%s", dst)
             return {
                 "runtime_type": self.runtime_type,
                 "skill_name": skill_name,
@@ -481,5 +480,6 @@ class OpenCodeSkillService(AgentSkillServiceBase):
             "uninstalled": True,
             "uninstall_channel": "wittyhub",
         }
+
 
 __all__ = ["OpenCodeSkillService"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from collections.abc import Iterator
@@ -8,7 +9,6 @@ from typing import Any
 import httpx
 
 from witty_agent_server.infra.clients.base import ClientBase
-
 
 logger = logging.getLogger(__name__)
 
@@ -140,10 +140,8 @@ class OpenCodeClient(ClientBase):
                 logger.debug("ignored error while closing httpx.Client", exc_info=True)
 
     def __del__(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.close()
-        except Exception:
-            pass
 
     def list_agents(self) -> dict[str, Any]:
         response = self.http_client().get("/agent")
@@ -154,10 +152,14 @@ class OpenCodeClient(ClientBase):
             raise OpenCodeClientError(
                 status=response.status_code,
                 message="opencode list_agents failed: invalid JSON response",
-            )
+            ) from None
         if not isinstance(agents, list):
             agents = []
-        default_id = agents[0].get("id", "main") if agents and isinstance(agents[0], dict) else "main"
+        default_id = (
+            agents[0].get("id", "main")
+            if agents and isinstance(agents[0], dict)
+            else "main"
+        )
         return {
             "defaultId": default_id,
             "agents": agents,
@@ -173,20 +175,16 @@ class OpenCodeClient(ClientBase):
             raise OpenCodeClientError(
                 status=response.status_code,
                 message="opencode list_sessions failed: invalid JSON response",
-            )
+            ) from None
         sessions = body if isinstance(body, list) else []
         return {"sessions": sessions}
 
     def get_agent(self, *, agent_id: str) -> dict[str, Any] | None:
-        raise NotImplementedError(
-            "use lifecycle.probe_running() for readiness"
-        )
+        raise NotImplementedError("use lifecycle.probe_running() for readiness")
 
     def get_skills_status(self, *, agent_id: str | None = None) -> dict[str, Any]:
         """opencode skill 系统 endpoint 待后续实现"""
-        raise NotImplementedError(
-            "OpenCode skills status endpoint not yet wired; "
-        )
+        raise NotImplementedError("OpenCode skills status endpoint not yet wired; ")
 
     def post_mcp_add(self, name: str, config: dict[str, Any]) -> dict[str, Any]:
         """POST /mcp — 动态添加 MCP server。"""
@@ -210,7 +208,7 @@ class OpenCodeClient(ClientBase):
             raise OpenCodeClientError(
                 status=response.status_code,
                 message="opencode create_session failed: invalid JSON response",
-            )
+            ) from None
         session_id = body.get("id") if isinstance(body, dict) else None
         if isinstance(session_id, str) and session_id:
             self._session_map[session_key] = session_id
@@ -248,83 +246,85 @@ class OpenCodeClient(ClientBase):
 
         # 1. 先连接 SSE 事件流（使用独立 stream_client），
         #    确保在 prompt_async 之前 SSE 监听器已就位。
-        with self.stream_client() as sse_client:
-            with sse_client.stream("GET", _SSE_EVENT_PATH) as sse_response:
-                self._raise_for_status(sse_response, action="sse_stream")
+        with (
+            self.stream_client() as sse_client,
+            sse_client.stream("GET", _SSE_EVENT_PATH) as sse_response,
+        ):
+            self._raise_for_status(sse_response, action="sse_stream")
 
-                # 2. SSE 连接已建立后再发送异步 prompt。
-                #    http_client 是独立的连接，不干扰当前 SSE 流。
-                resp = self.http_client().post(
-                    f"/session/{session_id}/prompt_async",
-                    json={
-                        "noReply": False,
-                        "parts": [{"type": "text", "text": message}],
-                    },
-                )
-                self._raise_for_status(resp, action="prompt_async")
+            # 2. SSE 连接已建立后再发送异步 prompt。
+            #    http_client 是独立的连接，不干扰当前 SSE 流。
+            resp = self.http_client().post(
+                f"/session/{session_id}/prompt_async",
+                json={
+                    "noReply": False,
+                    "parts": [{"type": "text", "text": message}],
+                },
+            )
+            self._raise_for_status(resp, action="prompt_async")
 
-                # 3. 遍历 SSE 事件（含发送 prompt 前已到达的缓冲事件）
-                # ------------------------------------------------------------------
-                # turn_active 守卫：OpenCode SSE 重连时可能回放历史终止事件，
-                # 并可能生成空的 "ghost" 助手消息，其 message.updated 携带 finish=stop。
-                # 若把这些事件向上层 yield，调用方会误判本轮已空完成；
-                #
-                # 解决方式：只有当本轮至少收到一条有效助手活动后，才向上层
-                # 透出 terminal 事件，并将 terminal 事件视为真实终止。
-                # ------------------------------------------------------------------
-                turn_active = False
-                user_message_ids: set[str] = set()
+            # 3. 遍历 SSE 事件（含发送 prompt 前已到达的缓冲事件）
+            # ------------------------------------------------------------------
+            # turn_active 守卫：OpenCode SSE 重连时可能回放历史终止事件，
+            # 并可能生成空的 "ghost" 助手消息，其 message.updated 携带 finish=stop。
+            # 若把这些事件向上层 yield，调用方会误判本轮已空完成；
+            #
+            # 解决方式：只有当本轮至少收到一条有效助手活动后，才向上层
+            # 透出 terminal 事件，并将 terminal 事件视为真实终止。
+            # ------------------------------------------------------------------
+            turn_active = False
+            user_message_ids: set[str] = set()
 
-                for raw_event in self._iter_sse_events(sse_response):
-                    normalized = _normalize_event(raw_event)
-                    event_type = normalized.get("type", "")
+            for raw_event in self._iter_sse_events(sse_response):
+                normalized = _normalize_event(raw_event)
+                event_type = normalized.get("type", "")
 
-                    # 跳过 server 内部事件
-                    if event_type in _INTERNAL_EVENT_TYPES:
-                        continue
+                # 跳过 server 内部事件
+                if event_type in _INTERNAL_EVENT_TYPES:
+                    continue
 
-                    # 过滤：只处理匹配 sessionID 的事件。
-                    evt_session = normalized.get("sessionID", "")
-                    if evt_session and evt_session != session_id:
-                        continue
+                # 过滤：只处理匹配 sessionID 的事件。
+                evt_session = normalized.get("sessionID", "")
+                if evt_session and evt_session != session_id:
+                    continue
 
-                    # OpenCode 事件中 messageID 可能位于多个位置：
-                    evt_message = normalized.get("messageID", "")
-                    if not evt_message:
-                        part = normalized.get("part")
-                        if isinstance(part, dict):
-                            evt_message = part.get("messageID", "")
-                    if not evt_message:
-                        info = normalized.get("info")
-                        if isinstance(info, dict):
-                            evt_message = info.get("id", "")
-
+                # OpenCode 事件中 messageID 可能位于多个位置：
+                evt_message = normalized.get("messageID", "")
+                if not evt_message:
+                    part = normalized.get("part")
+                    if isinstance(part, dict):
+                        evt_message = part.get("messageID", "")
+                if not evt_message:
                     info = normalized.get("info")
-                    if isinstance(info, dict) and info.get("role") == "user":
-                        if isinstance(evt_message, str) and evt_message:
-                            user_message_ids.add(evt_message)
-                        continue
-                    if evt_message and evt_message in user_message_ids:
-                        continue
+                    if isinstance(info, dict):
+                        evt_message = info.get("id", "")
 
-                    if not turn_active and _is_turn_activity(normalized):
-                        turn_active = True
+                info = normalized.get("info")
+                if isinstance(info, dict) and info.get("role") == "user":
+                    if isinstance(evt_message, str) and evt_message:
+                        user_message_ids.add(evt_message)
+                    continue
+                if evt_message and evt_message in user_message_ids:
+                    continue
 
-                    # 未激活当前轮前的 terminal 事件来自历史回放或 ghost 消息，
-                    # 不能向 runtime 透出，否则上层会误判为空完成。
-                    if _is_terminal_event(normalized) and not turn_active:
-                        continue
+                if not turn_active and _is_turn_activity(normalized):
+                    turn_active = True
 
-                    if event_type == "session.error":
-                        yield normalized
-                        return
+                # 未激活当前轮前的 terminal 事件来自历史回放或 ghost 消息，
+                # 不能向 runtime 透出，否则上层会误判为空完成。
+                if _is_terminal_event(normalized) and not turn_active:
+                    continue
 
-                    if _is_terminal_event(normalized):
-                        yield normalized
-                        return
-
-                    # 产出原始归一化事件（映射由 Runtime 层负责）
+                if event_type == "session.error":
                     yield normalized
+                    return
+
+                if _is_terminal_event(normalized):
+                    yield normalized
+                    return
+
+                # 产出原始归一化事件（映射由 Runtime 层负责）
+                yield normalized
 
     @staticmethod
     def _iter_sse_events(response: httpx.Response) -> Iterator[dict[str, Any]]:
@@ -339,7 +339,7 @@ class OpenCodeClient(ClientBase):
                 try:
                     yield json.loads(data_str)
                 except json.JSONDecodeError:
-                    logger.debug("skipped unparseable SSE data line")
+                    logger.debug("skipped unparsable SSE data line")
                     continue
 
     def _resolve_session_id_or_lookup(self, session_key: str) -> str:

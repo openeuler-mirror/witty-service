@@ -7,6 +7,10 @@ from typing import Any, cast
 from witty_agent_server.application.models.agent import AgentStatus
 from witty_agent_server.application.models.runtime_events import build_outbound_event
 from witty_agent_server.application.services.agent import AgentService
+from witty_agent_server.application.services.session import (
+    SessionService,
+    SessionServiceError,
+)
 from witty_agent_server.application.services.session_identity_store import (
     RuntimeSessionIdentity,
     SessionIdentityStore,
@@ -15,8 +19,6 @@ from witty_agent_server.application.services.session_state_sync_service import (
     SessionState,
     SessionStateSyncService,
 )
-from witty_agent_server.application.services.session import SessionService
-from witty_agent_server.application.services.session import SessionServiceError
 from witty_agent_server.runtimes.runtime_base import (
     RuntimeBase,
     RuntimeType,
@@ -142,44 +144,51 @@ class SessionWSOrchestrator:
             )
 
     def abort_turn(self, *, agent_id: str, session_id: str) -> None:
-         session = self._require_session(agent_id=agent_id, session_id=session_id)
-         runtime_type = cast(RuntimeType, session.get("runtime_type"))
-         runtime = self._require_runtime(runtime_type)
-         if runtime is not None and supports_runtime_lifecycle(runtime):
-             runtime_session_key = session.get("runtime_session_key")
-             if isinstance(runtime_session_key, str) and runtime_session_key:
-                 logger.info(
-                     "abort runtime turn: agent_id=%s session_id=%s runtime_type=%s session_key=%s",
-                     agent_id,
-                     session_id,
-                     runtime_type,
-                     runtime_session_key,
-                 )
-                 try:
-                     runtime.abort_session(session_key=runtime_session_key)
-                 except Exception:
-                     logger.exception(
-                         "abort runtime turn failed: agent_id=%s session_id=%s",
-                         agent_id,
-                         session_id,
-                     )
-         # 中断会话后上报状态为 idle。
-         self._state_sync_service.emit_state_changed(
-             agent_id=agent_id,
-             session_id=session_id,
-             runtime_type=runtime_type,
-             state="idle",
-             reason="message.abort",
+        session = self._require_session(agent_id=agent_id, session_id=session_id)
+        runtime_type = cast(RuntimeType, session.get("runtime_type"))
+        runtime = self._require_runtime(runtime_type)
+        if runtime is not None and supports_runtime_lifecycle(runtime):
+            runtime_session_key = session.get("runtime_session_key")
+            if isinstance(runtime_session_key, str) and runtime_session_key:
+                logger.info(
+                    "abort runtime turn: agent_id=%s session_id=%s runtime_type=%s session_key=%s",
+                    agent_id,
+                    session_id,
+                    runtime_type,
+                    runtime_session_key,
+                )
+                try:
+                    runtime.abort_session(session_key=runtime_session_key)
+                except Exception:
+                    logger.exception(
+                        "abort runtime turn failed: agent_id=%s session_id=%s",
+                        agent_id,
+                        session_id,
+                    )
+        # 中断会话后上报状态为 idle。
+        self._state_sync_service.emit_state_changed(
+            agent_id=agent_id,
+            session_id=session_id,
+            runtime_type=runtime_type,
+            state="idle",
+            reason="message.abort",
         )
 
     def answer_question(
-        self, *, agent_id: str, session_id: str, request_id: str, answers: list[list[str]]
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        request_id: str,
+        answers: list[list[str]],
     ) -> bool:
         """回答 AI 提问，使暂停的 SSE 流继续产出事件。
 
         由 WS 路由在收到 ``question.reply`` 消息时调用。
         """
-        runtime = self._get_runtime_for_session(agent_id=agent_id, session_id=session_id)
+        runtime = self._get_runtime_for_session(
+            agent_id=agent_id, session_id=session_id
+        )
         try:
             result = runtime.answer_question(request_id=request_id, answers=answers)
         except NotImplementedError:
@@ -187,7 +196,7 @@ class SessionWSOrchestrator:
                 code="RUNTIME_NOT_SUPPORTED",
                 message=f"current runtime does not support question answering, runtime_type={runtime.runtime_type}",
                 status_code=400,
-            )
+            ) from None
         except Exception:
             logger.exception(
                 "answer question upstream error: agent_id=%s session_id=%s request_id=%s",
@@ -199,7 +208,7 @@ class SessionWSOrchestrator:
                 code="RUNTIME_UPSTREAM_ERROR",
                 message="failed to send answer to runtime",
                 status_code=502,
-            )
+            ) from None
         return result
 
     def reject_question(
@@ -209,7 +218,9 @@ class SessionWSOrchestrator:
 
         由 WS 路由在收到 ``question.reject`` 消息时调用。
         """
-        runtime = self._get_runtime_for_session(agent_id=agent_id, session_id=session_id)
+        runtime = self._get_runtime_for_session(
+            agent_id=agent_id, session_id=session_id
+        )
         try:
             result = runtime.reject_question(request_id=request_id)
         except NotImplementedError:
@@ -217,7 +228,7 @@ class SessionWSOrchestrator:
                 code="RUNTIME_NOT_SUPPORTED",
                 message=f"current runtime does not support question rejection, runtime_type={runtime.runtime_type}",
                 status_code=400,
-            )
+            ) from None
         except Exception:
             logger.exception(
                 "reject question upstream error: agent_id=%s session_id=%s request_id=%s",
@@ -229,7 +240,7 @@ class SessionWSOrchestrator:
                 code="RUNTIME_UPSTREAM_ERROR",
                 message="failed to send rejection to runtime",
                 status_code=502,
-            )
+            ) from None
         return result
 
     def _get_runtime_for_session(
@@ -384,7 +395,9 @@ class SessionWSOrchestrator:
                 status_code=500,
             )
 
-        resolved = self._identity_store.resolve(agent_id=agent_id, session_id=session_id)
+        resolved = self._identity_store.resolve(
+            agent_id=agent_id, session_id=session_id
+        )
         if resolved is not None and resolved.runtime_session_key == runtime_session_key:
             return resolved
 
@@ -441,7 +454,9 @@ class SessionWSOrchestrator:
     def _is_supported_runtime(self, runtime_type: object) -> bool:
         """判断 runtime_type 是否在 settings.runtime.supported 中。"""
         settings = get_settings()
-        return isinstance(runtime_type, str) and runtime_type in settings.runtime.supported
+        return (
+            isinstance(runtime_type, str) and runtime_type in settings.runtime.supported
+        )
 
     def _require_running_agent(self) -> None:
         if self._agent_service.agent.status != AgentStatus.RUNNING:

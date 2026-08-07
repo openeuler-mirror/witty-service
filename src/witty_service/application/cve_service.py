@@ -12,14 +12,13 @@ import httpx
 from witty_service.api.services import ServiceContainer
 from witty_service.domain.errors import DomainError
 
-
 CVE_CLONE_DIR = "~/Image"
 CVE_ISSUE_URL = "https://gitcode.com/src-openeuler/kernel/issues"
 
 
 def _default_config() -> dict[str, str]:
     return {
-        "gitcode_token": "",
+        "gitcode_token": "",  # nosec B105 - 默认占位，实际值来自配置
         "signer_name": "",
         "signer_email": "",
         "clone_dir": CVE_CLONE_DIR,
@@ -93,7 +92,9 @@ class CveService:
             encoding="utf-8",
         )
 
-    def get_issues(self, issue_url: str, limit: int = 20, *, token: str = "") -> list[dict[str, Any]]:
+    def get_issues(
+        self, issue_url: str, limit: int = 20, *, token: str = ""
+    ) -> list[dict[str, Any]]:
         org_name, repo_name = self._parse_issue_url(issue_url)
         safe_limit = max(1, min(limit or 20, 100))
         items = self._fetch_issues_from_api(
@@ -142,17 +143,23 @@ class CveService:
                 str(issue.get("body", "")),
                 str(issue.get("html_url", "")),
             ]
-            haystacks.extend(str(label.get("name", "")) for label in issue.get("labels", []))
+            haystacks.extend(
+                str(label.get("name", "")) for label in issue.get("labels", [])
+            )
             if any(needle in value.lower() for value in haystacks if value):
                 filtered.append(issue)
             if len(filtered) >= safe_limit:
                 break
         return filtered
 
-    def get_workbench(self, cve_id: str, branches: str, clone_dir: str = "") -> dict[str, Any]:
+    def get_workbench(
+        self, cve_id: str, branches: str, clone_dir: str = ""
+    ) -> dict[str, Any]:
         branch_list = [item.strip() for item in branches.split(",") if item.strip()]
         sorted_branches = ",".join(sorted(branch_list))
-        cache_key = hashlib.md5("|".join([cve_id.strip(), sorted_branches]).encode()).hexdigest()
+        cache_key = hashlib.md5(
+            "|".join([cve_id.strip(), sorted_branches]).encode(), usedforsecurity=False
+        ).hexdigest()
 
         home = Path.home()
         cache_path = home / ".cve_analyzer_cache" / "branches_analysis_cache.json"
@@ -183,17 +190,30 @@ class CveService:
                 (
                     row
                     for row in cache_items
-                    if str(row.get("Target branch") or row.get("目标分支") or "").strip() == branch_name
+                    if str(
+                        row.get("Target branch") or row.get("目标分支") or ""
+                    ).strip()
+                    == branch_name
                 ),
                 {},
             )
 
-            status = str(item.get("Adaptation status") or item.get("适配状态") or item.get("Whether affected") or item.get("是否受影响") or "")
+            status = str(
+                item.get("Adaptation status")
+                or item.get("适配状态")
+                or item.get("Whether affected")
+                or item.get("是否受影响")
+                or ""
+            )
             conflict_point = str(item.get("Conflict point") or item.get("冲突点") or "")
-            suggested_file = str(item.get("Suggested adjustment files") or item.get("建议调整文件") or "")
-            conflict_status = str(item.get("Whether conflicts exist") or item.get("是否存在冲突") or "")
-
-            patch_path = suggested_file if suggested_file and suggested_file not in {"N/A", "None"} else conflict_point
+            suggested_file = str(
+                item.get("Suggested adjustment files") or item.get("建议调整文件") or ""
+            )
+            patch_path = (
+                suggested_file
+                if suggested_file and suggested_file not in {"N/A", "None"}
+                else conflict_point
+            )
             patch_file_name = Path(patch_path).name if patch_path else ""
             patch_exists = bool(patch_path and Path(patch_path).exists())
 
@@ -221,11 +241,19 @@ class CveService:
                     else:
                         parts = stem.rsplit("_", 1)
                         if len(parts) == 2 and clone_dir.strip():
-                            clone_candidate = _clone_dir_path(clone_dir) / f"commit_patch_{parts[1]}"
+                            clone_candidate = (
+                                _clone_dir_path(clone_dir) / f"commit_patch_{parts[1]}"
+                            )
                             if clone_candidate.exists():
                                 original_path = str(clone_candidate)
-                original_status = "已获取" if original_path and Path(original_path).exists() else "missing"
-            elif patch_file_name.startswith("commit_patch_") or conflict_value.startswith("commit"):
+                original_status = (
+                    "已获取"
+                    if original_path and Path(original_path).exists()
+                    else "missing"
+                )
+            elif patch_file_name.startswith(
+                "commit_patch_"
+            ) or conflict_value.startswith("commit"):
                 original_path = patch_path
                 original_status = "已获取" if patch_exists else "missing"
                 backport_status = "无需回移植"
@@ -261,9 +289,15 @@ class CveService:
                     "viewable": log_exists,
                 },
             ]
-            branches_response.append({"name": branch_name, "status": status, "artifacts": artifacts})
+            branches_response.append(
+                {"name": branch_name, "status": status, "artifacts": artifacts}
+            )
 
-        return {"cve_id": cve_id.strip(), "cache_key": cache_key, "branches": branches_response}
+        return {
+            "cve_id": cve_id.strip(),
+            "cache_key": cache_key,
+            "branches": branches_response,
+        }
 
     def get_pr_readiness(
         self,
@@ -273,7 +307,10 @@ class CveService:
         issue_number: str = "",
     ) -> dict[str, Any]:
         config = self.get_config()
-        repo_dir = Path(clone_dir.strip() or config.get("clone_dir", "")).expanduser() / "kernel"
+        repo_dir = (
+            Path(clone_dir.strip() or config.get("clone_dir", "")).expanduser()
+            / "kernel"
+        )
         branch_list = [item.strip() for item in branches.split(",") if item.strip()]
         fix_branch_suffixes = [
             item
@@ -443,13 +480,21 @@ class CveService:
                 errors.append({"base": base, "error": "payload is not a list"})
                 continue
 
-            return [self._normalize_issue(issue, org_name, repo_name) for issue in payload]
+            return [
+                self._normalize_issue(issue, org_name, repo_name) for issue in payload
+            ]
 
-        if errors and all(self._is_invalid_gitcode_token_error(error) for error in errors):
+        if errors and all(
+            self._is_invalid_gitcode_token_error(error) for error in errors
+        ):
             raise DomainError(
                 code="CVE_GITCODE_TOKEN_INVALID",
                 message="GitCode token is invalid.",
-                details={"org_name": org_name, "repo_name": repo_name, "errors": errors},
+                details={
+                    "org_name": org_name,
+                    "repo_name": repo_name,
+                    "errors": errors,
+                },
             )
 
         raise DomainError(
@@ -475,9 +520,14 @@ class CveService:
             url += f"&search={query}"
         return url
 
-    def _normalize_issue(self, issue: dict[str, Any], org_name: str, repo_name: str) -> dict[str, Any]:
+    def _normalize_issue(
+        self, issue: dict[str, Any], org_name: str, repo_name: str
+    ) -> dict[str, Any]:
         number = int(issue.get("number") or issue.get("iid") or 0)
-        html_url = issue.get("html_url") or f"https://gitcode.com/{org_name}/{repo_name}/issues/{number}"
+        html_url = (
+            issue.get("html_url")
+            or f"https://gitcode.com/{org_name}/{repo_name}/issues/{number}"
+        )
 
         labels: list[dict[str, str]] = []
         raw_labels = issue.get("labels") or []

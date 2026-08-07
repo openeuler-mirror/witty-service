@@ -66,7 +66,7 @@ class OpencodeConfig(RuntimeConfig):
             "opencode": {
                 "serve_port": gateway_port,
                 "username": "opencode",
-                "password": "",
+                "password": "",  # nosec B105 - 默认空密码占位，由部署配置注入
                 "timeout": 30.0,
                 "profile": profile,
             },

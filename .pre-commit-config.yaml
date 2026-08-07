@@ -1,0 +1,81 @@
+# pre-commit 配置（按 openlibing 静态代码分析参考意见落地）
+#
+# 首次使用：
+#   uv tool install pre-commit
+#   pre-commit install --hook-type pre-commit --hook-type commit-msg
+# 或沿用仓库习惯：
+#   cp .githooks/pre-commit .git/hooks/pre-commit
+#   pre-commit install --hook-type commit-msg   # 启用 gitlint 提交信息校验（commit-msg 阶段）
+#
+# 国内网络说明：hook 仓库统一使用 GitCode 镜像，参考
+# https://gitcode.com/openlibing/docs/blob/main/static-code-analysis/solutions/pre-commit-solution.md
+minimum_pre_commit_version: "4.0"
+
+repos:
+  # ===================== 通用基础钩子（所有语言） =====================
+  - repo: https://gitcode.com/gh_mirrors/pr/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace # 移除行尾空白字符
+      - id: end-of-file-fixer # 确保文件以换行符结尾
+      - id: check-yaml # 校验 YAML 文件语法
+        args: ["--allow-multiple-documents"]
+      - id: check-json # 校验 JSON 文件语法
+      - id: check-toml # 校验 TOML 文件语法
+      - id: check-merge-conflict # 检查未解决的合并冲突标记
+      - id: check-added-large-files # 拦截超大文件提交（默认 500KB）
+      - id: detect-private-key # 检测私钥文件
+      - id: debug-statements # 拦截调试语句（breakpoint/pdb）
+
+  # ===================== 密钥检测 =====================
+  # Gitleaks 为参考文档推荐项，但其 Go 构建环境需要访问 go.dev/GitHub；
+  # 网络受限环境下先由 detect-private-key 做基础密钥检查，网络就绪后取消下面注释启用。
+  # - repo: https://gitcode.com/GitHub_Trending/gi/gitleaks
+  #   rev: v8.30.1
+  #   hooks:
+  #     - id: gitleaks
+
+  # ===================== 拼写检查 =====================
+  - repo: https://gitcode.com/gh_mirrors/co/codespell
+    rev: v2.4.2
+    hooks:
+      - id: codespell
+
+  # ===================== Python lint + 格式化（Ruff 替代 Black + Flake8） =====================
+  - repo: https://gitcode.com/gh_mirrors/ru/ruff-pre-commit
+    rev: v0.15.17
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # ===================== Python 安全扫描 =====================
+  - repo: https://gitcode.com/gh_mirrors/ba/bandit
+    rev: 1.9.4
+    hooks:
+      - id: bandit
+        args: ["-c", "pyproject.toml"]
+        additional_dependencies: ["bandit[toml]"]
+
+  # ===================== Shell 静态检查（本机安装 shellcheck 时生效） =====================
+  - repo: local
+    hooks:
+      - id: shellcheck
+        name: shellcheck
+        entry: bash -lc 'if command -v shellcheck >/dev/null 2>&1; then shellcheck --severity=warning "$@"; else echo "shellcheck 未安装，跳过"; fi' --
+        language: system
+        types: [shell]
+
+  # ===================== Markdown 检查 =====================
+  - repo: https://gitcode.com/gh_mirrors/ma/markdownlint-cli
+    rev: v0.45.0
+    hooks:
+      - id: markdownlint
+        args: ["--fix"]
+
+  # ===================== 提交信息检查（与社区门禁 gitlint 参数对齐，保障 semantic-release 解析） =====================
+  - repo: https://gitcode.com/gh_mirrors/gi/gitlint
+    rev: v0.19.1
+    hooks:
+      - id: gitlint
+        stages: [commit-msg]
