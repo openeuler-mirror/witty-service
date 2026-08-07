@@ -1,24 +1,26 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
+from witty_service.adapter.websocket_client_pool import (
+    WebSocketClientPool,
+)
+from witty_service.adapter.websocket_protocol import InboundEvent, OutboundMessage
 from witty_service.application.agent_manager import (
     SKILL_INSTALL_TIMEOUT_SECONDS,
     AgentCreateRequest,
     AgentManager,
 )
 from witty_service.application.session_manager import SessionManager
-from witty_service.adapter.websocket_client_pool import AdaptorEndpoint, WebSocketClientPool
-from witty_service.adapter.websocket_protocol import InboundEvent, OutboundMessage
-from witty_service.adapter.websocket_client import WebSocketClient
 from witty_service.domain.enums import AgentStatus
 from witty_service.domain.errors import DomainError
 from witty_service.sandbox.base import SandboxHandle
@@ -78,6 +80,7 @@ class FakeRepository:
     ) -> Any:
         now = datetime.now(UTC)
         from witty_service.persistence.repositories import AgentRecord
+
         agent = AgentRecord(
             id=agent_id,
             name=name,
@@ -112,6 +115,7 @@ class FakeRepository:
     ) -> Any:
         current = self.agents[agent_id]
         from witty_service.persistence.repositories import AgentRecord
+
         updated = AgentRecord(
             id=current.id,
             name=current.name,
@@ -182,6 +186,7 @@ class FakeRepository:
         self.session_counter += 1
         now = datetime.now(UTC)
         from witty_service.persistence.repositories import SessionRecord
+
         session = SessionRecord(
             id=f"session-{self.session_counter}",
             agent_id=agent_id,
@@ -219,10 +224,14 @@ class FakeRepository:
                 or (existing.remote_runtime_agent_id if existing is not None else None)
             ),
             status=status,
-            created_at=created_at or (existing.created_at if existing is not None else now),
+            created_at=created_at
+            or (existing.created_at if existing is not None else now),
             updated_at=now,
-            runtime_type=runtime_type or (existing.runtime_type if existing is not None else None),
-            runtime_session_id=existing.runtime_session_id if existing is not None else None,
+            runtime_type=runtime_type
+            or (existing.runtime_type if existing is not None else None),
+            runtime_session_id=existing.runtime_session_id
+            if existing is not None
+            else None,
             runtime_session_key=(
                 runtime_session_key
                 or (existing.runtime_session_key if existing is not None else None)
@@ -275,6 +284,7 @@ class FakeRepository:
         self.sessions[session_id] = updated
         return updated
 
+
 class FakeWorkspaceStore:
     def init_workspace(self, agent_id: str) -> Path:
         return Path("/tmp") / agent_id / "workspace"
@@ -287,8 +297,16 @@ class FakeSandboxBackend:
     def __init__(self) -> None:
         self.handles: dict[str, Any] = {}
 
-    def start(self, *, agent_id: str, workspace_path: str, env: dict[str, Any] | None = None, **_: Any) -> Any:
+    def start(
+        self,
+        *,
+        agent_id: str,
+        workspace_path: str,
+        env: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> Any:
         from witty_service.sandbox.base import SandboxHandle
+
         handle = SandboxHandle(
             sandbox_id=f"sandbox-{agent_id}",
             agent_id=agent_id,
@@ -303,15 +321,22 @@ class FakeSandboxBackend:
 
     def endpoint(self, handle: Any, **_: Any) -> Any:
         from witty_service.sandbox.base import AdapterEndpoint
-        return AdapterEndpoint(base_url=f"http://adapter/{handle.sandbox_id}", health_url=None)
+
+        return AdapterEndpoint(
+            base_url=f"http://adapter/{handle.sandbox_id}", health_url=None
+        )
 
     def health_check(self, handle: Any) -> bool:
         return True
 
-    def start_agent_on_adapter(self, handle: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    def start_agent_on_adapter(
+        self, handle: Any, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         return {"id": f"runtime-{handle.sandbox_id}"}
 
-    def create_session_on_adapter(self, handle: Any, runtime_agent_id: str) -> dict[str, Any]:
+    def create_session_on_adapter(
+        self, handle: Any, runtime_agent_id: str
+    ) -> dict[str, Any]:
         return {"id": f"session-{handle.sandbox_id}"}
 
     def cleanup(self, handle: Any, **_: Any) -> None:
@@ -351,6 +376,7 @@ class MockWebSocketClient:
         async def gen():
             for event in self._events:
                 yield event
+
         return gen()
 
     async def close(self) -> None:
@@ -392,7 +418,9 @@ def _make_ws_manager(
     )
 
 
-def _create_agent_with_sandbox(manager: AgentManager, request: AgentCreateRequest) -> tuple[Any, Any]:
+def _create_agent_with_sandbox(
+    manager: AgentManager, request: AgentCreateRequest
+) -> tuple[Any, Any]:
     """Helper to create an agent and set up sandbox state"""
     result = manager.create_agent(request)
     agent = result.agent
@@ -439,27 +467,29 @@ def test_send_message_uses_websocket_and_syncs_runtime_session_identity():
         agent, session = _bootstrap_running_agent_and_session(repository)
 
         mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
-        mock_ws_client.set_events([
-            InboundEvent(
-                type="session.runtime.changed",
-                session_id=session.id,
-                runtime_type="openclaw",
-                event_id="evt-1",
-                ts_ms=1000,
-                payload={
-                    "runtime_session_id": "runtime-session-1",
-                    "runtime_session_key": "agent:1:session:key-1",
-                },
-            ),
-            InboundEvent(
-                type="message.completed",
-                session_id=session.id,
-                runtime_type="openclaw",
-                event_id="evt-2",
-                ts_ms=2000,
-                payload={},
-            ),
-        ])
+        mock_ws_client.set_events(
+            [
+                InboundEvent(
+                    type="session.runtime.changed",
+                    session_id=session.id,
+                    runtime_type="openclaw",
+                    event_id="evt-1",
+                    ts_ms=1000,
+                    payload={
+                        "runtime_session_id": "runtime-session-1",
+                        "runtime_session_key": "agent:1:session:key-1",
+                    },
+                ),
+                InboundEvent(
+                    type="message.completed",
+                    session_id=session.id,
+                    runtime_type="openclaw",
+                    event_id="evt-2",
+                    ts_ms=2000,
+                    payload={},
+                ),
+            ]
+        )
 
         with patch.object(
             ws_client_pool,
@@ -487,27 +517,29 @@ def test_send_message_runtime_identity_sync_swallows_domain_error(caplog):
         agent, session = _bootstrap_running_agent_and_session(repository)
 
         mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
-        mock_ws_client.set_events([
-            InboundEvent(
-                type="session.runtime.changed",
-                session_id=session.id,
-                runtime_type="openclaw",
-                event_id="evt-1",
-                ts_ms=1000,
-                payload={
-                    "runtime_session_id": "runtime-session-1",
-                    "runtime_session_key": "agent:1:session:key-1",
-                },
-            ),
-            InboundEvent(
-                type="message.completed",
-                session_id=session.id,
-                runtime_type="openclaw",
-                event_id="evt-2",
-                ts_ms=2000,
-                payload={},
-            ),
-        ])
+        mock_ws_client.set_events(
+            [
+                InboundEvent(
+                    type="session.runtime.changed",
+                    session_id=session.id,
+                    runtime_type="openclaw",
+                    event_id="evt-1",
+                    ts_ms=1000,
+                    payload={
+                        "runtime_session_id": "runtime-session-1",
+                        "runtime_session_key": "agent:1:session:key-1",
+                    },
+                ),
+                InboundEvent(
+                    type="message.completed",
+                    session_id=session.id,
+                    runtime_type="openclaw",
+                    event_id="evt-2",
+                    ts_ms=2000,
+                    payload={},
+                ),
+            ]
+        )
 
         domain_error = DomainError(
             code="SESSION_NOT_FOUND",
@@ -515,17 +547,20 @@ def test_send_message_runtime_identity_sync_swallows_domain_error(caplog):
             details={"session_id": session.id},
         )
 
-        with patch.object(
-            ws_client_pool,
-            "get_client",
-            return_value=mock_ws_client,
-        ), patch.object(
-            manager._session_manager,
-            "update_session_runtime_identity",
-            side_effect=domain_error,
+        with (
+            patch.object(
+                ws_client_pool,
+                "get_client",
+                return_value=mock_ws_client,
+            ),
+            patch.object(
+                manager._session_manager,
+                "update_session_runtime_identity",
+                side_effect=domain_error,
+            ),
+            caplog.at_level("ERROR"),
         ):
-            with caplog.at_level("ERROR"):
-                events = await manager.send_message(agent.id, session.id, "hello from user")
+            events = await manager.send_message(agent.id, session.id, "hello from user")
 
         assert [event["type"] for event in events["events"]] == ["message.completed"]
         assert "failed to sync runtime session identity" in caplog.text
@@ -540,64 +575,73 @@ def test_send_message_runtime_identity_sync_does_not_swallow_programming_error()
         agent, session = _bootstrap_running_agent_and_session(repository)
 
         mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
-        mock_ws_client.set_events([
-            InboundEvent(
-                type="session.runtime.changed",
-                session_id=session.id,
-                runtime_type="openclaw",
-                event_id="evt-1",
-                ts_ms=1000,
-                payload={
-                    "runtime_session_id": "runtime-session-1",
-                    "runtime_session_key": "agent:1:session:key-1",
-                },
-            ),
-        ])
+        mock_ws_client.set_events(
+            [
+                InboundEvent(
+                    type="session.runtime.changed",
+                    session_id=session.id,
+                    runtime_type="openclaw",
+                    event_id="evt-1",
+                    ts_ms=1000,
+                    payload={
+                        "runtime_session_id": "runtime-session-1",
+                        "runtime_session_key": "agent:1:session:key-1",
+                    },
+                ),
+            ]
+        )
 
-        with patch.object(
-            ws_client_pool,
-            "get_client",
-            return_value=mock_ws_client,
-        ), patch.object(
-            manager._session_manager,
-            "update_session_runtime_identity",
-            side_effect=TypeError("boom"),
+        with (
+            patch.object(
+                ws_client_pool,
+                "get_client",
+                return_value=mock_ws_client,
+            ),
+            patch.object(
+                manager._session_manager,
+                "update_session_runtime_identity",
+                side_effect=TypeError("boom"),
+            ),
+            pytest.raises(TypeError, match="boom"),
         ):
-            with pytest.raises(TypeError, match="boom"):
-                await manager.send_message(agent.id, session.id, "hello from user")
+            await manager.send_message(agent.id, session.id, "hello from user")
 
     asyncio.run(run())
 
 
-@pytest.mark.skip(reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过")
+@pytest.mark.skip(
+    reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过"
+)
 def test_send_message_via_websocket_client():
     """Test that send_message uses WebSocket client to send and receive messages"""
 
     async def run() -> None:
-        manager, request, repository, _, sandbox_backend, ws_client_pool = _make_ws_manager()
+        manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
 
         agent, session = _create_agent_with_sandbox(manager, request)
 
         # Create mock WS client
         mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
-        mock_ws_client.set_events([
-            InboundEvent(
-                type="message.delta",
-                session_id=session.id,
-                runtime_type="local_process",
-                event_id="evt-1",
-                ts_ms=1000,
-                payload={"delta": "hello"},
-            ),
-            InboundEvent(
-                type="message.completed",
-                session_id=session.id,
-                runtime_type="local_process",
-                event_id="evt-2",
-                ts_ms=2000,
-                payload={},
-            ),
-        ])
+        mock_ws_client.set_events(
+            [
+                InboundEvent(
+                    type="message.delta",
+                    session_id=session.id,
+                    runtime_type="local_process",
+                    event_id="evt-1",
+                    ts_ms=1000,
+                    payload={"delta": "hello"},
+                ),
+                InboundEvent(
+                    type="message.completed",
+                    session_id=session.id,
+                    runtime_type="local_process",
+                    event_id="evt-2",
+                    ts_ms=2000,
+                    payload={},
+                ),
+            ]
+        )
 
         # Patch get_client to return our mock
         with patch.object(
@@ -633,26 +677,30 @@ def test_send_message_via_websocket_client():
     asyncio.run(run())
 
 
-@pytest.mark.skip(reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过")
+@pytest.mark.skip(
+    reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过"
+)
 def test_send_message_connects_when_not_connected():
     """Test that send_message connects WebSocket if not connected"""
 
     async def run() -> None:
-        manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
+        manager, request, _, _, _, ws_client_pool = _make_ws_manager()
 
         agent, session = _create_agent_with_sandbox(manager, request)
 
         mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
-        mock_ws_client.set_events([
-            InboundEvent(
-                type="message.completed",
-                session_id=session.id,
-                runtime_type="local_process",
-                event_id="evt-1",
-                ts_ms=1000,
-                payload={},
-            ),
-        ])
+        mock_ws_client.set_events(
+            [
+                InboundEvent(
+                    type="message.completed",
+                    session_id=session.id,
+                    runtime_type="local_process",
+                    event_id="evt-1",
+                    ts_ms=1000,
+                    payload={},
+                ),
+            ]
+        )
 
         with patch.object(
             ws_client_pool,
@@ -667,12 +715,14 @@ def test_send_message_connects_when_not_connected():
     asyncio.run(run())
 
 
-@pytest.mark.skip(reason="pause_agent now uses httpx.Client directly, test needs rework for new session proxy architecture")
+@pytest.mark.skip(
+    reason="pause_agent now uses httpx.Client directly, test needs rework for new session proxy architecture"
+)
 def test_send_message_auto_resumes_paused_agent():
     """Test that send_message resumes paused agent before sending via WS"""
 
     async def run() -> None:
-        manager, request, repository, _, sandbox_backend, ws_client_pool = _make_ws_manager()
+        manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
 
         agent, session = _create_agent_with_sandbox(manager, request)
 
@@ -682,18 +732,22 @@ def test_send_message_auto_resumes_paused_agent():
         mock_adaptor_client.close = AsyncMock()
 
         mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
-        mock_ws_client.set_events([
-            InboundEvent(
-                type="message.completed",
-                session_id=session.id,
-                runtime_type="local_process",
-                event_id="evt-1",
-                ts_ms=1000,
-                payload={},
-            ),
-        ])
+        mock_ws_client.set_events(
+            [
+                InboundEvent(
+                    type="message.completed",
+                    session_id=session.id,
+                    runtime_type="local_process",
+                    event_id="evt-1",
+                    ts_ms=1000,
+                    payload={},
+                ),
+            ]
+        )
 
-        with patch.object(manager, '_get_adaptor_http_client', return_value=mock_adaptor_client):
+        with patch.object(
+            manager, "_get_adaptor_http_client", return_value=mock_adaptor_client
+        ):
             manager.pause_agent(agent.id)
 
             with patch.object(
@@ -712,7 +766,9 @@ def test_send_message_auto_resumes_paused_agent():
     asyncio.run(run())
 
 
-@pytest.mark.skip(reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过")
+@pytest.mark.skip(
+    reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过"
+)
 def test_send_message_rejects_non_running_agent():
     """Test that send_message raises error for non-running/non-paused agent"""
 
@@ -732,46 +788,55 @@ def test_send_message_rejects_non_running_agent():
     asyncio.run(run())
 
 
-@pytest.mark.skip(reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过")
+@pytest.mark.skip(
+    reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过"
+)
 def test_send_message_stream_via_websocket_client():
     async def run() -> None:
         manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
         agent, session = _create_agent_with_sandbox(manager, request)
 
         mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
-        mock_ws_client.set_events([
-            InboundEvent(
-                type="message.delta",
-                session_id=session.id,
-                runtime_type="local_process",
-                event_id="evt-1",
-                ts_ms=1000,
-                payload={"delta": "hello"},
-            ),
-            InboundEvent(
-                type="message.completed",
-                session_id=session.id,
-                runtime_type="local_process",
-                event_id="evt-2",
-                ts_ms=2000,
-                payload={},
-            ),
-            InboundEvent(
-                type="message.delta",
-                session_id=session.id,
-                runtime_type="local_process",
-                event_id="evt-3",
-                ts_ms=3000,
-                payload={"delta": "ignored"},
-            ),
-        ])
+        mock_ws_client.set_events(
+            [
+                InboundEvent(
+                    type="message.delta",
+                    session_id=session.id,
+                    runtime_type="local_process",
+                    event_id="evt-1",
+                    ts_ms=1000,
+                    payload={"delta": "hello"},
+                ),
+                InboundEvent(
+                    type="message.completed",
+                    session_id=session.id,
+                    runtime_type="local_process",
+                    event_id="evt-2",
+                    ts_ms=2000,
+                    payload={},
+                ),
+                InboundEvent(
+                    type="message.delta",
+                    session_id=session.id,
+                    runtime_type="local_process",
+                    event_id="evt-3",
+                    ts_ms=3000,
+                    payload={"delta": "ignored"},
+                ),
+            ]
+        )
 
         with patch.object(
             ws_client_pool,
             "get_client",
             return_value=mock_ws_client,
         ):
-            events = [event async for event in manager.send_message_stream(agent.id, session.id, "hello")]
+            events = [
+                event
+                async for event in manager.send_message_stream(
+                    agent.id, session.id, "hello"
+                )
+            ]
 
         assert repository.messages == [
             {
@@ -784,36 +849,48 @@ def test_send_message_stream_via_websocket_client():
         assert mock_ws_client.send_calls == [
             {"type": "message.create", "payload": {"message": "hello"}}
         ]
-        assert [event["event"]["type"] for event in events] == ["message.delta", "message.completed"]
+        assert [event["event"]["type"] for event in events] == [
+            "message.delta",
+            "message.completed",
+        ]
         assert events[0]["sandbox_type"] == "local_process"
 
     asyncio.run(run())
 
 
-@pytest.mark.skip(reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过")
+@pytest.mark.skip(
+    reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过"
+)
 def test_send_message_stream_connects_when_not_connected():
     async def run() -> None:
-        manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
+        manager, request, _, _, _, ws_client_pool = _make_ws_manager()
         agent, session = _create_agent_with_sandbox(manager, request)
 
         mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
-        mock_ws_client.set_events([
-            InboundEvent(
-                type="message.completed",
-                session_id=session.id,
-                runtime_type="local_process",
-                event_id="evt-1",
-                ts_ms=1000,
-                payload={},
-            ),
-        ])
+        mock_ws_client.set_events(
+            [
+                InboundEvent(
+                    type="message.completed",
+                    session_id=session.id,
+                    runtime_type="local_process",
+                    event_id="evt-1",
+                    ts_ms=1000,
+                    payload={},
+                ),
+            ]
+        )
 
         with patch.object(
             ws_client_pool,
             "get_client",
             return_value=mock_ws_client,
         ):
-            events = [event async for event in manager.send_message_stream(agent.id, session.id, "hello")]
+            events = [
+                event
+                async for event in manager.send_message_stream(
+                    agent.id, session.id, "hello"
+                )
+            ]
 
         assert mock_ws_client.connect_calls == [session.id]
         assert [event["event"]["type"] for event in events] == ["message.completed"]
@@ -821,17 +898,23 @@ def test_send_message_stream_connects_when_not_connected():
     asyncio.run(run())
 
 
-@pytest.mark.skip(reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过")
+@pytest.mark.skip(
+    reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过"
+)
 def test_get_adaptor_endpoint_converts_http_to_ws():
     """Test that _get_adaptor_endpoint converts http/https to ws/wss"""
-    manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
+    manager, request, repository, _, _, _ = _make_ws_manager()
 
     agent, session = _create_agent_with_sandbox(manager, request)
 
     # Set adapter_base_url to https
     repository.save_sandbox_state(
         agent.id,
-        sandbox_payload_json={"sandbox_id": "sandbox-test", "agent_id": agent.id, "workspace_path": "/tmp"},
+        sandbox_payload_json={
+            "sandbox_id": "sandbox-test",
+            "agent_id": agent.id,
+            "workspace_path": "/tmp",
+        },
         adapter_base_url="https://adapter.example.com",
     )
 
@@ -842,16 +925,22 @@ def test_get_adaptor_endpoint_converts_http_to_ws():
     assert endpoint.sandbox_type == "local_process"
 
 
-@pytest.mark.skip(reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过")
+@pytest.mark.skip(
+    reason="sandbox health check 30 次循环导致单用例约 30 秒,源代码未修复前暂跳过"
+)
 def test_get_adaptor_endpoint_converts_http_without_scheme():
     """Test that _get_adaptor_endpoint handles http:// URLs"""
-    manager, request, repository, _, _, ws_client_pool = _make_ws_manager()
+    manager, request, repository, _, _, _ = _make_ws_manager()
 
     agent, session = _create_agent_with_sandbox(manager, request)
 
     repository.save_sandbox_state(
         agent.id,
-        sandbox_payload_json={"sandbox_id": "sandbox-test", "agent_id": agent.id, "workspace_path": "/tmp"},
+        sandbox_payload_json={
+            "sandbox_id": "sandbox-test",
+            "agent_id": agent.id,
+            "workspace_path": "/tmp",
+        },
         adapter_base_url="http://adapter.local",
     )
 
@@ -888,15 +977,17 @@ async def test_uninstall_agent_skill_surfaces_runtime_reason() -> None:
     )
     adaptor_client.close = AsyncMock()
 
-    with patch.object(manager, "_get_adaptor_http_client", return_value=adaptor_client):
-        with pytest.raises(DomainError) as exc_info:
-            await manager.uninstall_agent_skill(
-                "agent-1",
-                "healthcheck",
-                source_type="builtin",
-                source_path="/opt/openclaw/skills/healthcheck",
-                runtime_source="openclaw-bundled",
-            )
+    with (
+        patch.object(manager, "_get_adaptor_http_client", return_value=adaptor_client),
+        pytest.raises(DomainError) as exc_info,
+    ):
+        await manager.uninstall_agent_skill(
+            "agent-1",
+            "healthcheck",
+            source_type="builtin",
+            source_path="/opt/openclaw/skills/healthcheck",
+            runtime_source="openclaw-bundled",
+        )
 
     assert exc_info.value.code == "AGENT_SKILL_UNINSTALL_FAILED"
     assert exc_info.value.details == {
@@ -938,13 +1029,15 @@ async def test_install_agent_skill_surfaces_runtime_reason() -> None:
     )
     adaptor_client.close = AsyncMock()
 
-    with patch.object(manager, "_get_adaptor_http_client", return_value=adaptor_client):
-        with pytest.raises(DomainError) as exc_info:
-            await manager.install_agent_skill(
-                "agent-1",
-                "weather",
-                source_path="/tmp/weather",
-            )
+    with (
+        patch.object(manager, "_get_adaptor_http_client", return_value=adaptor_client),
+        pytest.raises(DomainError) as exc_info,
+    ):
+        await manager.install_agent_skill(
+            "agent-1",
+            "weather",
+            source_path="/tmp/weather",
+        )
 
     assert exc_info.value.code == "AGENT_SKILL_INSTALL_FAILED"
     assert exc_info.value.details == {

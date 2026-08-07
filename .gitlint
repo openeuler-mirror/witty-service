@@ -1,0 +1,20 @@
+# 与 openEuler 社区门禁 gitlint 参数对齐（标题正则与长度）
+# 参考：https://gitee.com/openeuler/openeuler-jenkins/blob/master/src/conf/.gitlint
+# 同时保障 release.yml 中 semantic-release 的 conventional commits 解析
+[general]
+ignore=B6
+
+[title-max-length]
+line-length=72
+
+[title-min-length]
+min-length=5
+
+[title-match-regex]
+regex=^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([a-z0-9_-]+\))?: .+$
+
+[body-max-line-length]
+line-length=80
+
+[body-min-length]
+min-length=5

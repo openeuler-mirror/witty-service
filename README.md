@@ -96,7 +96,7 @@ Witty-Service 是一个面向 AI Agent 场景的后端服务，核心职责是�
 │  │ Adapter Layer  │  │Persistence Layer│  │  Storage Layer   │       │
 │  │ WebSocket客户端│  │ SQLAlchemy ORM  │  │  WorkspaceStore  │       │
 │  │ HTTP 客户端    │  │ SQLite+Alembic  │  │  RuntimeBackup   │       │
-│  │ 连接池/协议     │  │ Repository      │  │                  │       │ 
+│  │ 连接池/协议     │  │ Repository      │  │                  │       │
 │  └──┬─────────────┘  └─────────────────┘  └──────────────────┘       │
 │     │                                                                │
 │  ┌──▼─────────────────────────────────────────────────────────────┐  │
@@ -333,7 +333,6 @@ witty-service --host 0.0.0.0 --port 8000
 
 ## 部署流程
 
-
 ### 测试环境
 
 适用于集成测试和功能验证：
@@ -511,11 +510,18 @@ witty-service/
 
 ### 开发规范
 
-- **代码风格** — 遵循 Black 格式化规范（line-length=88），提交前运行 `black .` 检查
+- **代码风格** — 使用 Ruff（lint + format，line-length=88）替代 Black/Flake8，配置见 `pyproject.toml` 的 `[tool.ruff]`
 - **类型检查** — 使用 mypy 进行静态类型检查，配置为 strict 模式
-- **提交规范** — 使用语义化提交信息（如 `feat:`、`fix:`、`docs:`、`refactor:`）
+- **提交规范** — 使用语义化提交信息（如 `feat:`、`fix:`、`docs:`、`refactor:`），pre-commit 的 gitlint 钩子会校验格式
 - **测试覆盖** — 新增功能需编写对应的单元测试，确保测试通过
 - **数据库迁移** — 涉及模型变更时，需生成对应的 Alembic 迁移脚本
+
+### 代码检查（pre-commit）
+
+1. 安装 pre-commit：`uv tool install pre-commit`
+2. 安装 git 钩子：`pre-commit install --hook-type pre-commit --hook-type commit-msg`（或沿用仓库习惯 `cp .githooks/pre-commit .git/hooks/pre-commit` 后，再执行 `pre-commit install --hook-type commit-msg` 启用 gitlint 提交信息校验）
+3. 提交时自动检查暂存文件；**全量检查需先收口存量**：`uv run ruff check --fix . && uv run ruff format .`，再执行 `pre-commit run --all-files`
+4. 检查项：Ruff（lint/format）、Bandit（安全）、Codespell（拼写）、pre-commit-hooks（基础格式与密钥）、markdownlint、ShellCheck（本机安装时生效）、gitlint（提交信息）；Gitleaks（密钥深扫）在网络就绪后启用
 
 ---
 

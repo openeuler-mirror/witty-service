@@ -1,9 +1,9 @@
-from collections.abc import Callable, Sequence
 import json
 import logging
 import subprocess
 import threading
 import time
+from collections.abc import Callable, Sequence
 from subprocess import CompletedProcess, Popen, run
 
 from witty_agent_server.application.services.agent._process_utils import (
@@ -13,7 +13,6 @@ from witty_agent_server.application.services.agent._process_utils import (
     port_is_listening,
     start_stderr_drainer,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -195,15 +194,16 @@ class OpenClawLifecycleService:
         """停止 openclaw gateway 并执行完整卸载"""
         if not self._profile:
             return
-        
+
         # 构建卸载命令
-        command = self._build_base_command() + [
+        command = [
+            *self._build_base_command(),
             "uninstall",
             "--yes",
             "--non-interactive",
-            "--all"
+            "--all",
         ]
-        
+
         result = self._run_command(command)
         if result.returncode != 0:
             raise OpenClawLifecycleError(
@@ -214,7 +214,7 @@ class OpenClawLifecycleService:
                 stderr=result.stderr or "",
                 message="openclaw uninstall failed",
             )
-        
+
         self._stop_gateway_process()
 
     def start(self) -> None:
@@ -235,7 +235,8 @@ class OpenClawLifecycleService:
 
         self._stop_gateway_process()
 
-        command = self._build_base_command() + [
+        command = [
+            *self._build_base_command(),
             "gateway",
             "run",
             "--port",
@@ -272,7 +273,9 @@ class OpenClawLifecycleService:
                     message="gateway process exited prematurely",
                 )
             if port_is_listening(self._gateway_port):
-                logger.info("Gateway started successfully on port %s", self._gateway_port)
+                logger.info(
+                    "Gateway started successfully on port %s", self._gateway_port
+                )
                 return
             time.sleep(1)
 
@@ -321,7 +324,7 @@ class OpenClawLifecycleService:
             )
 
         config_str = json.dumps(config, ensure_ascii=False)
-        command = self._build_base_command() + ["mcp", "set", name, config_str]
+        command = [*self._build_base_command(), "mcp", "set", name, config_str]
         result = self._run_command(command)
         if result.returncode != 0:
             raise OpenClawMcpSetError(
@@ -342,7 +345,7 @@ class OpenClawLifecycleService:
                 message="profile is required for mcp unset",
             )
 
-        command = self._build_base_command() + ["mcp", "unset", name]
+        command = [*self._build_base_command(), "mcp", "unset", name]
         result = self._run_command(command)
         if result.returncode != 0:
             raise OpenClawMcpUnsetError(
@@ -376,7 +379,8 @@ class OpenClawLifecycleService:
                 message="profile is required for onboard",
             )
 
-        command = self._build_base_command() + [
+        command = [
+            *self._build_base_command(),
             "onboard",
             "--non-interactive",
             "--accept-risk",
@@ -397,7 +401,7 @@ class OpenClawLifecycleService:
             command.append("--skip-hooks")
         if skip_health:
             command.append("--skip-health")
-        
+
         # 当使用 custom-api-key 认证时，添加自定义参数
         if auth_choice == "custom-api-key":
             if custom_base_url:
@@ -441,7 +445,7 @@ class OpenClawLifecycleService:
         self,
         action: str,
     ) -> CompletedProcess[str]:
-        command = self._build_base_command() + ["gateway", action]
+        command = [*self._build_base_command(), "gateway", action]
         return self._run_command(command)
 
     def _run_command(self, command: list[str]) -> CompletedProcess[str]:
@@ -511,9 +515,7 @@ class OpenClawLifecycleService:
         output = self._combined_output(result).lower()
         if "not running" in output or "stopped" in output or "inactive" in output:
             return False
-        if "running" in output or "active" in output or "started" in output:
-            return True
-        return False
+        return "running" in output or "active" in output or "started" in output
 
     def _combined_output(self, result: CompletedProcess[str]) -> str:
         stdout = result.stdout or ""

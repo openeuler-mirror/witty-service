@@ -83,7 +83,8 @@ class RuntimeBase(ABC):
                 ):
                     continue
                 if self._should_skip_duplicate_usage(
-                    event=event, last_usage_payload=last_usage,
+                    event=event,
+                    last_usage_payload=last_usage,
                 ):
                     continue
                 if event.get("type") == TurnEventType.SESSION_USAGE:
@@ -91,8 +92,7 @@ class RuntimeBase(ABC):
                     if isinstance(payload, dict):
                         last_usage = dict(payload)
 
-                for evt in self._on_mapped_event(event):
-                    yield evt
+                yield from self._on_mapped_event(event)
 
     @abstractmethod
     def _map_events(self, raw: dict[str, Any]) -> Iterator[RuntimeTurnEvent]:
@@ -113,9 +113,7 @@ class RuntimeBase(ABC):
         """每条原始事件映射前的预处理钩子（可选覆盖）。"""
         del raw
 
-    def _on_mapped_event(
-        self, event: RuntimeTurnEvent
-    ) -> Iterator[RuntimeTurnEvent]:
+    def _on_mapped_event(self, event: RuntimeTurnEvent) -> Iterator[RuntimeTurnEvent]:
         """每条已去重统一事件的后处理钩子（可选覆盖）。
 
         默认直接透传。子类可覆盖以实现文本累积、缺失 delta 补齐等。
@@ -188,9 +186,7 @@ class RuntimeBase(ABC):
                 text_parts.append(delta)
         return RuntimeResult(text="".join(text_parts))
 
-    def stream_message(
-        self, session_id: str, message: str
-    ) -> Iterator[RuntimeChunk]:
+    def stream_message(self, session_id: str, message: str) -> Iterator[RuntimeChunk]:
         """流式发送消息并输出统一分片事件。
 
         默认实现：复用 ``run_turn()``，只放行 ``message.delta`` 事件，
@@ -202,7 +198,10 @@ class RuntimeBase(ABC):
                 delta = event.get("payload", {}).get("delta")
                 if isinstance(delta, str) and delta:
                     yield RuntimeChunk(type="delta", delta=delta)
-            elif event_type in (TurnEventType.MESSAGE_COMPLETED, TurnEventType.TURN_COMPLETED):
+            elif event_type in (
+                TurnEventType.MESSAGE_COMPLETED,
+                TurnEventType.TURN_COMPLETED,
+            ):
                 yield RuntimeChunk(type="done")
                 return
 
@@ -238,9 +237,7 @@ class RuntimeBase(ABC):
         payload = event.get("payload")
         if not isinstance(payload, dict):
             return False
-        if last_usage_payload is not None and dict(last_usage_payload) == payload:
-            return True
-        return False
+        return last_usage_payload is not None and dict(last_usage_payload) == payload
 
     def _ensure_client(self) -> ClientBase:
         if self._client is None:

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Protocol
 
 import httpx
 
 from witty_service.adapter.http_client import AdaptorHttpClient
-from witty_service.domain.errors import DomainError, SESSION_NOT_FOUND, session_not_found
+from witty_service.domain.errors import (
+    SESSION_NOT_FOUND as SESSION_NOT_FOUND,
+)
+from witty_service.domain.errors import (
+    DomainError,
+    session_not_found,
+)
 from witty_service.persistence.repositories import AgentRecord, SessionRecord
 
 AGENT_NOT_FOUND = "AGENT_NOT_FOUND"
@@ -157,14 +163,18 @@ class SessionManager:
             adaptor_client=adaptor_client,
             runtime_agent_id=runtime_agent_id,
         )
-        result = await adaptor_client.post(f"/agents/{resolved_runtime_agent_id}/sessions", json={})
+        result = await adaptor_client.post(
+            f"/agents/{resolved_runtime_agent_id}/sessions", json={}
+        )
         session = self._repository.upsert_session(
             session_id=result["id"],
             agent_id=agent_id,
             status=result.get("status", "idle"),
             context_initialized=result.get("context_initialized", True),
             runtime_type=result.get("runtime_type"),
-            created_at=datetime.fromisoformat(result["created_at"]) if "created_at" in result else None,
+            created_at=datetime.fromisoformat(result["created_at"])
+            if "created_at" in result
+            else None,
             remote_runtime_agent_id=resolved_runtime_agent_id,
         )
         return session
@@ -180,7 +190,9 @@ class SessionManager:
             adaptor_client=adaptor_client,
             runtime_agent_id=runtime_agent_id,
         )
-        result = await adaptor_client.get(f"/agents/{resolved_runtime_agent_id}/sessions")
+        result = await adaptor_client.get(
+            f"/agents/{resolved_runtime_agent_id}/sessions"
+        )
         sessions = []
         for item in result.get("sessions", []):
             session = self._repository.upsert_session(
@@ -189,7 +201,9 @@ class SessionManager:
                 status=item.get("status", "idle"),
                 context_initialized=item.get("context_initialized", True),
                 runtime_type=item.get("runtime_type"),
-                created_at=datetime.fromisoformat(item["created_at"]) if "created_at" in item else None,
+                created_at=datetime.fromisoformat(item["created_at"])
+                if "created_at" in item
+                else None,
                 remote_runtime_agent_id=resolved_runtime_agent_id,
             )
             sessions.append(session)
@@ -219,7 +233,9 @@ class SessionManager:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 self._repository.delete_session(session_id)
-                raise session_not_found(session_id=session_id, agent_id=agent_id) from exc
+                raise session_not_found(
+                    session_id=session_id, agent_id=agent_id
+                ) from exc
             raise
         return self._repository.upsert_session(
             session_id=result["id"],
@@ -227,7 +243,9 @@ class SessionManager:
             status=result.get("status", "idle"),
             context_initialized=result.get("context_initialized", True),
             runtime_type=result.get("runtime_type"),
-            created_at=datetime.fromisoformat(result["created_at"]) if "created_at" in result else None,
+            created_at=datetime.fromisoformat(result["created_at"])
+            if "created_at" in result
+            else None,
             remote_runtime_agent_id=resolved_runtime_agent_id,
         )
 
@@ -249,8 +267,8 @@ class SessionManager:
                 runtime_agent_id=runtime_agent_id,
             )
         await adaptor_client.post(
-                f"/agents/{resolved_runtime_agent_id}/sessions/{session_id}/abort",
-                json={},
+            f"/agents/{resolved_runtime_agent_id}/sessions/{session_id}/abort",
+            json={},
         )
 
     async def delete_session_remote(

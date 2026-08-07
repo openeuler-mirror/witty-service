@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-from abc import ABC
 from datetime import datetime
 from typing import Any, Protocol
 from uuid import uuid4
 
 from pydantic import ValidationError
+
 from witty_agent_server.application.models.errors import ValidationResult
 from witty_agent_server.application.models.events import (
     EventPagination,
@@ -22,8 +22,10 @@ from witty_agent_server.application.services.session.errors import (
     SessionNotFoundServiceError,
     SessionServiceError,
 )
-from witty_agent_server.runtimes.runtime_base import RuntimeBase, supports_runtime_lifecycle
-
+from witty_agent_server.runtimes.runtime_base import (
+    RuntimeBase,
+    supports_runtime_lifecycle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +46,7 @@ class RuntimeRegistryPort(Protocol):
     def get(self, runtime_type: str) -> RuntimeBase | None: ...
 
 
-class SessionServiceBase(ABC):
+class SessionServiceBase:
     """Session 服务基础能力，统一 owner 校验和事件管理。"""
 
     def __init__(
@@ -75,7 +77,9 @@ class SessionServiceBase(ABC):
             return None
         return self.runtime_registry.get(runtime_type)
 
-    def create_session(self, *, agent_id: str, config: dict[str, Any]) -> dict[str, Any]:
+    def create_session(
+        self, *, agent_id: str, config: dict[str, Any]
+    ) -> dict[str, Any]:
         """创建归属于 agent_id 的 session（通用实现）。"""
         validation = self.validate_create_session(config)
         if not validation.ok:

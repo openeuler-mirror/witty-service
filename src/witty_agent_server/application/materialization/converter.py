@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
 from witty_agent_server.application.materialization.core.io_utils import (
     copy_tree,
     dump_json_atomic,
@@ -24,7 +25,6 @@ from witty_agent_server.application.materialization.core.io_utils import (
 from witty_agent_server.application.materialization.core.shell_utils import (
     run_cmd,
 )
-
 
 _RESOURCE_ROOT = Path(__file__).resolve().parent / "templates"
 logger = logging.getLogger(__name__)
@@ -362,7 +362,7 @@ def _verify_openclaw_recognition(spec: dict[str, Any], output_path: str) -> None
                 elif isinstance(item, str):
                     listed_names.add(item)
         elif isinstance(listed, dict):
-            listed_names = {str(k) for k in listed.keys()}
+            listed_names = {str(k) for k in listed}
         missing_mcp = sorted(set(expected_mcp) - listed_names)
         if missing_mcp:
             raise RuntimeError(f"openclaw mcp 未识别到: {', '.join(missing_mcp)}")
@@ -534,8 +534,9 @@ def _install_or_materialize_skill(
             try:
                 run_cmd(force_cmd, check=True)
             except RuntimeError as exc:
-                raise RuntimeError(f"clawhub install {name} skill faild") from exc
+                raise RuntimeError(f"clawhub install {name} skill failed") from exc
         return
+
 
 def _skills_phase(
     spec: dict[str, Any],
@@ -826,6 +827,7 @@ def convert_openclaw(options: ConvertOptions) -> ConvertReport:
         return report
     except Exception as exc:
         import traceback
+
         logger.error("convert_openclaw failed with error: %s", exc)
         logger.debug("Traceback:\n%s", traceback.format_exc())
         # 失败回滚：恢复旧文件；若原本不存在则删除新文件

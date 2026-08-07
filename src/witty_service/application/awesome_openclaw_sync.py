@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import NAMESPACE_URL, uuid5
@@ -38,9 +38,8 @@ class ParsedSkill:
 
 def is_awesome_openclaw_repository(repository: SkillRepositoryRecord) -> bool:
     normalized_url = _normalize_repo_url(repository.url)
-    if normalized_url == AWESOME_REPO_URL:
-        return True
-    return False
+    return normalized_url == AWESOME_REPO_URL
+
 
 def sync_awesome_openclaw_skills(
     *,
@@ -48,7 +47,10 @@ def sync_awesome_openclaw_skills(
     repo_id: str | None = None,
 ) -> SkillRepositoryRecord:
     target_repo = _resolve_or_create_repository(repository=repository, repo_id=repo_id)
-    if target_repo.skill_discover_status == AWESOME_DISCOVER_STATUS_DONE and repo_id is None:
+    if (
+        target_repo.skill_discover_status == AWESOME_DISCOVER_STATUS_DONE
+        and repo_id is None
+    ):
         return target_repo
 
     repository.update_skill_repository(
@@ -137,7 +139,7 @@ def _build_skill_records(repo_id: str, checkout_dir: Path) -> list[SkillRecord]:
     if not categories_dir.exists():
         raise FileNotFoundError(f"Missing categories directory: {categories_dir}")
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     records: list[SkillRecord] = []
     for category_file in sorted(categories_dir.glob("*.md")):
         category_name = category_file.stem

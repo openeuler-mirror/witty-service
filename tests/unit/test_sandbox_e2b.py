@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from witty_service.domain.errors import DomainError
 from witty_service.sandbox.base import SandboxBackend
 from witty_service.sandbox.e2b import E2BSandboxBackend
-from witty_service.sandbox.factory import create_sandbox_backend, register_sandbox_backend
+from witty_service.sandbox.factory import (
+    create_sandbox_backend,
+    register_sandbox_backend,
+)
 
 
 @pytest.mark.parametrize(
@@ -64,7 +69,14 @@ def test_sandbox_factory_uses_registered_backend():
     class DummySandboxBackend(SandboxBackend):
         sandbox_type = "dummy"
 
-        def start(self, *, agent_id: str, workspace_path: str, env: dict[str, Any] | None = None, **kwargs: Any):
+        def start(
+            self,
+            *,
+            agent_id: str,
+            workspace_path: str,
+            env: dict[str, Any] | None = None,
+            **kwargs: Any,
+        ):
             raise AssertionError("not called")
 
         def stop(self, handle, **kwargs):

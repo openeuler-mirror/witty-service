@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from witty_agent_server.application.services.skill.errors import (
     AgentSkillServiceError,
@@ -19,7 +19,7 @@ from witty_service.config import get_settings
 
 class AgentSkillServiceBase(ABC):
     runtime_type: str
-    _ALLOWED_SOURCE_BASES: list[Path] = []
+    _ALLOWED_SOURCE_BASES: ClassVar[list[Path]] = []
 
     def __init__(
         self,
@@ -73,11 +73,15 @@ class AgentSkillServiceBase(ABC):
     def _is_local_path(path: str) -> bool:
         path = path.strip()
         return (
-            path.startswith("/") 
-            or path.startswith("~") 
+            path.startswith("/")
+            or path.startswith("~")
             or path.startswith(".")
             or "\\" in path
-            or ("/" in path and not path.startswith("http://") and not path.startswith("https://"))
+            or (
+                "/" in path
+                and not path.startswith("http://")
+                and not path.startswith("https://")
+            )
         )
 
     @staticmethod
@@ -181,7 +185,7 @@ class AgentSkillServiceBase(ABC):
                 runtime_type=self.runtime_type,
                 skill_name=skill_name,
                 reason="npx command not found",
-            )
+            ) from None
         except subprocess.CalledProcessError as exc:
             stderr = (exc.stderr or "").strip()
             stdout = (exc.stdout or "").strip()

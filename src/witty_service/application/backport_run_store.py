@@ -6,9 +6,9 @@ import shutil
 import tempfile
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import yaml
 
@@ -16,9 +16,13 @@ import yaml
 class BackportRunStore:
     """Store the small, user-facing Task/Run/Case Backport archive."""
 
-    TERMINAL_STATUSES = {"completed", "completed_with_failures", "failed"}
-    _locks_guard = threading.Lock()
-    _locks: dict[str, threading.RLock] = {}
+    TERMINAL_STATUSES: ClassVar[set[str]] = {
+        "completed",
+        "completed_with_failures",
+        "failed",
+    }
+    _locks_guard: ClassVar[threading.Lock] = threading.Lock()
+    _locks: ClassVar[dict[str, threading.RLock]] = {}
 
     def __init__(self, runs_root: str | Path) -> None:
         self.runs_root = Path(runs_root).expanduser().resolve()
@@ -28,7 +32,9 @@ class BackportRunStore:
 
     @staticmethod
     def now_iso() -> str:
-        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        return (
+            datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        )
 
     @staticmethod
     def safe_slug(value: str, *, fallback: str = "item", max_length: int = 96) -> str:
@@ -100,7 +106,9 @@ class BackportRunStore:
         return task_dir
 
     def _new_work_dir(self, prefix: str) -> Path:
-        holder = tempfile.TemporaryDirectory(prefix=f"witty-backport-{self.safe_slug(prefix)}-")
+        holder = tempfile.TemporaryDirectory(
+            prefix=f"witty-backport-{self.safe_slug(prefix)}-"
+        )
         self._work_dirs.append(holder)
         return Path(holder.name)
 
@@ -112,7 +120,9 @@ class BackportRunStore:
                 self._work_dirs.remove(holder)
                 return
 
-    def _read_json(self, path: Path, default: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _read_json(
+        self, path: Path, default: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -126,7 +136,9 @@ class BackportRunStore:
         temp_path.replace(path)
 
     def write_json(self, path: Path, data: dict[str, Any]) -> None:
-        self.write_text(path, json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        self.write_text(
+            path, json.dumps(data, ensure_ascii=False, indent=2, default=str)
+        )
 
     @staticmethod
     def _summary_text(value: Any, *, limit: int = 2000) -> str:
@@ -144,7 +156,9 @@ class BackportRunStore:
 
     @classmethod
     def _summary_case(cls, row: dict[str, Any], index: int) -> dict[str, Any]:
-        commit = str(row.get("commit") or row.get("input_commit") or row.get("row_id") or "")
+        commit = str(
+            row.get("commit") or row.get("input_commit") or row.get("row_id") or ""
+        )
         row_number = int(row.get("row_number") or index)
         title = cls._summary_text(
             row.get("commit_title") or row.get("title") or row.get("subject") or ""
@@ -182,13 +196,14 @@ class BackportRunStore:
         if row.get("equivalent_exists") is True:
             detection.update({"state": "completed", "result": "equivalent_exists"})
         elif str(row.get("applied_commit") or "").strip():
-            applied_patch_kind = str(row.get("applied_patch_kind") or "").strip().lower()
+            applied_patch_kind = (
+                str(row.get("applied_patch_kind") or "").strip().lower()
+            )
             has_backported_patch = bool(
                 str(row.get("backported_patch_path") or "").strip()
             )
-            used_resolved_patch = (
-                applied_patch_kind not in {"", "original"}
-                or (has_backported_patch and applied_patch_kind != "original")
+            used_resolved_patch = applied_patch_kind not in {"", "original"} or (
+                has_backported_patch and applied_patch_kind != "original"
             )
             detection.update(
                 {
@@ -234,10 +249,9 @@ class BackportRunStore:
             handling["engine"] = cls._summary_text(row.get("backport_engine"), limit=80)
             report = row.get("backport_explanation")
             if not report and isinstance(row.get("conflict_summary"), dict):
-                report = (
-                    row["conflict_summary"].get("reason")
-                    or row["conflict_summary"].get("error")
-                )
+                report = row["conflict_summary"].get("reason") or row[
+                    "conflict_summary"
+                ].get("error")
             if report:
                 handling["report"] = cls._summary_text(report)
             if phase_state == "running":
@@ -332,15 +346,14 @@ class BackportRunStore:
     @staticmethod
     def _summary_counts(cases: list[dict[str, Any]]) -> dict[str, int]:
         applied_cases = [
-            case for case in cases
-            if case["final"].get("result") == "applied"
+            case for case in cases if case["final"].get("result") == "applied"
         ]
         conflict_resolved = sum(
-            case["detection"].get("result") == "conflict"
-            for case in applied_cases
+            case["detection"].get("result") == "conflict" for case in applied_cases
         )
         failed_cases = [
-            case for case in cases
+            case
+            for case in cases
             if case["final"].get("result") != "applied"
             and any(
                 stage.get("state") == "failed"
@@ -352,7 +365,8 @@ class BackportRunStore:
             )
         ]
         equivalent_cases = [
-            case for case in cases
+            case
+            for case in cases
             if case["final"].get("result") != "applied"
             and case not in failed_cases
             and (
@@ -397,9 +411,7 @@ class BackportRunStore:
             "ready_to_apply": "等待应用",
             "failed": "失败",
         }
-        cases = [
-            case for case in run.get("cases") or [] if isinstance(case, dict)
-        ]
+        cases = [case for case in run.get("cases") or [] if isinstance(case, dict)]
         counts = cls._summary_counts(cases)
         target = (
             run.get("target_end")
@@ -440,9 +452,7 @@ class BackportRunStore:
             final_label = final_labels.get(final.get("result"))
             if not final_label:
                 final_label = (
-                    "应用中"
-                    if final.get("state") == "running"
-                    else "尚未完成"
+                    "应用中" if final.get("state") == "running" else "尚未完成"
                 )
             applied_commit = cls._summary_text(
                 final.get("applied_commit"),
@@ -465,9 +475,7 @@ class BackportRunStore:
         summary_name = str(run.get("summary_report") or "")
         if not summary_name:
             return None
-        cases = [
-            case for case in run.get("cases") or [] if isinstance(case, dict)
-        ]
+        cases = [case for case in run.get("cases") or [] if isinstance(case, dict)]
         return {
             "path": str(task_dir / "runs" / summary_name),
             "status": str(run.get("status") or ""),
@@ -497,7 +505,7 @@ class BackportRunStore:
     ) -> Path:
         excel = Path(excel_path).expanduser()
         repo_name = Path(target_repository.rstrip("/")).name.removesuffix(".git")
-        date = datetime.now(timezone.utc).strftime("%Y%m%d")
+        date = datetime.now(UTC).strftime("%Y%m%d")
         prefix = (
             f"{date}-"
             f"{self.safe_slug(excel.stem, fallback='excel', max_length=40)}-"
@@ -517,7 +525,9 @@ class BackportRunStore:
         (task_dir / "cases").mkdir()
         shutil.copy2(excel, task_dir / "input" / "source.xlsx")
         if config is not None:
-            self.write_json(task_dir / "input" / "config.json", self._sanitize_config(config))
+            self.write_json(
+                task_dir / "input" / "config.json", self._sanitize_config(config)
+            )
         now = self.now_iso()
         self.write_json(
             task_dir / "task.json",
@@ -543,9 +553,18 @@ class BackportRunStore:
     @staticmethod
     def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
         denied = {
-            "api_key", "apikey", "token", "password", "secret",
-            "local_branches", "remote_branches", "warnings", "capabilities",
-            "cache_dir", "current_excel_path", "current_report_path",
+            "api_key",
+            "apikey",
+            "token",
+            "password",
+            "secret",
+            "local_branches",
+            "remote_branches",
+            "warnings",
+            "capabilities",
+            "cache_dir",
+            "current_excel_path",
+            "current_report_path",
             "current_filtered_report_path",
         }
 
@@ -576,7 +595,9 @@ class BackportRunStore:
         default = {"task_id": task_dir.name}
         return self._read_json(task_dir / "task.json", default)
 
-    def update_manifest(self, task_dir: Path, updates: dict[str, Any]) -> dict[str, Any]:
+    def update_manifest(
+        self, task_dir: Path, updates: dict[str, Any]
+    ) -> dict[str, Any]:
         task_root = self._task_root_for(task_dir) or task_dir.resolve()
         with self._lock_for(task_root):
             manifest = self.read_manifest(task_root)
@@ -594,13 +615,17 @@ class BackportRunStore:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         if action == "generate_report":
-            config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+            config = (
+                payload.get("config") if isinstance(payload.get("config"), dict) else {}
+            )
             target_state = (
                 config.get("target_repo_state")
                 if isinstance(config.get("target_repo_state"), dict)
                 else {}
             )
-            excel_path = str(payload.get("excel_path") or payload.get("excelPath") or "")
+            excel_path = str(
+                payload.get("excel_path") or payload.get("excelPath") or ""
+            )
             target_repository = str(
                 config.get("target_repo_input")
                 or config.get("target_path")
@@ -617,9 +642,7 @@ class BackportRunStore:
                     or ""
                 ),
                 target_head=str(
-                    target_state.get("head")
-                    or target_state.get("target_head")
-                    or ""
+                    target_state.get("head") or target_state.get("target_head") or ""
                 ),
                 config=config,
             )
@@ -646,8 +669,12 @@ class BackportRunStore:
                 raise RuntimeError("Backport task already has an active run.")
             number = current
             current_data["status"] = "running"
-            current_data["resume_count"] = int(current_data.get("resume_count") or 0) + 1
-            current_data.setdefault("events", []).append({"type": "resumed", "at": self.now_iso()})
+            current_data["resume_count"] = (
+                int(current_data.get("resume_count") or 0) + 1
+            )
+            current_data.setdefault("events", []).append(
+                {"type": "resumed", "at": self.now_iso()}
+            )
             current_data.pop("finished_at", None)
         else:
             if task.get("status") in {"generating", "generation_failed"}:
@@ -673,7 +700,9 @@ class BackportRunStore:
                 "report": f"{number:03d}-report.yml",
                 "summary_report": f"{number:03d}-summary.md",
             }
-            source = task_dir / str(task.get("current_report") or "input/initial-report.yml")
+            source = task_dir / str(
+                task.get("current_report") or "input/initial-report.yml"
+            )
             report = task_dir / "runs" / f"{number:03d}-report.yml"
             if not source.is_file():
                 raise RuntimeError("Backport task has no initial report.")
@@ -747,11 +776,14 @@ class BackportRunStore:
             status = str(updates.get("status") or "")
             if status == "success":
                 status = "completed"
-            run.update({
-                key: value
-                for key, value in updates.items()
-                if key not in {"result", "progress", "paused_at"} and value is not None
-            })
+            run.update(
+                {
+                    key: value
+                    for key, value in updates.items()
+                    if key not in {"result", "progress", "paused_at"}
+                    and value is not None
+                }
+            )
             if status:
                 run["status"] = status
             if status == "paused":
@@ -787,9 +819,17 @@ class BackportRunStore:
                 phase = str(progress.get("phase") or "")
                 phase_state = str(progress.get("phase_state") or "")
                 updated = progress.get("updated_commits")
-                row = updated[0] if isinstance(updated, list) and updated and isinstance(updated[0], dict) else {}
+                row = (
+                    updated[0]
+                    if isinstance(updated, list)
+                    and updated
+                    and isinstance(updated[0], dict)
+                    else {}
+                )
                 commit = str(row.get("commit") or row.get("input_commit") or row_id)
-                row_number = int(row.get("row_number") or progress.get("current_index") or 0)
+                row_number = int(
+                    row.get("row_number") or progress.get("current_index") or 0
+                )
                 cases = run.setdefault("cases", [])
                 summary = next(
                     (
@@ -841,15 +881,29 @@ class BackportRunStore:
         run = self.read_run(task_id, number) if number else None
         if run and run.get("status") == "running" and not active:
             events = run.setdefault("events", [])
-            if not any(item.get("type") == "interrupted" for item in events if isinstance(item, dict)):
-                events.append({"type": "interrupted", "at": self.now_iso(), "id": "service-restart"})
+            if not any(
+                item.get("type") == "interrupted"
+                for item in events
+                if isinstance(item, dict)
+            ):
+                events.append(
+                    {
+                        "type": "interrupted",
+                        "at": self.now_iso(),
+                        "id": "service-restart",
+                    }
+                )
             run["status"] = "interrupted"
             self.write_json(task_dir / "runs" / f"{number:03d}.json", run)
             self._write_run_summary(task_dir, run)
             task = self.update_manifest(task_dir, {"status": "interrupted"})
-        return self.as_async_record(task, run, action="run_all" if run else "generate_report")
+        return self.as_async_record(
+            task, run, action="run_all" if run else "generate_report"
+        )
 
-    def list_runs(self, *, active_run_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    def list_runs(
+        self, *, active_run_ids: set[str] | None = None
+    ) -> list[dict[str, Any]]:
         active = active_run_ids or set()
         if not self.runs_root.is_dir():
             return []
@@ -857,12 +911,16 @@ class BackportRunStore:
         for task_dir in self.runs_root.iterdir():
             if not task_dir.is_dir() or not (task_dir / "task.json").is_file():
                 continue
-            record = self.get_async_record(task_dir.name, active=task_dir.name in active)
+            record = self.get_async_record(
+                task_dir.name, active=task_dir.name in active
+            )
             if record is None:
                 continue
             task = self.read_manifest(task_dir)
             target = task.get("target") if isinstance(task.get("target"), dict) else {}
-            summary = task.get("summary") if isinstance(task.get("summary"), dict) else {}
+            summary = (
+                task.get("summary") if isinstance(task.get("summary"), dict) else {}
+            )
             record.update(
                 {
                     "display_name": str(task.get("name") or task_dir.name),
@@ -870,7 +928,9 @@ class BackportRunStore:
                     "updated_at": str(task.get("updated_at") or ""),
                     "current_report_path": str(
                         task_dir / str(task.get("current_report") or "")
-                    ) if task.get("current_report") else "",
+                    )
+                    if task.get("current_report")
+                    else "",
                     "excel_path": str(task_dir / "input" / "source.xlsx"),
                     "commit_count": int(summary.get("total") or 0),
                     "current_excel_version": 1,
@@ -881,7 +941,9 @@ class BackportRunStore:
                 }
             )
             items.append(record)
-        return sorted(items, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        return sorted(
+            items, key=lambda item: str(item.get("updated_at") or ""), reverse=True
+        )
 
     def list_executions(self, task_id: str) -> list[dict[str, Any]]:
         task_dir = self._task_dir(task_id)
@@ -894,8 +956,12 @@ class BackportRunStore:
                     "status": str(run.get("status") or "interrupted"),
                     "action": "run_all",
                     "created_at": str(run.get("started_at") or ""),
-                    "updated_at": str(run.get("finished_at") or run.get("started_at") or ""),
-                    "report_path": str(task_dir / "runs" / str(run.get("report") or "")),
+                    "updated_at": str(
+                        run.get("finished_at") or run.get("started_at") or ""
+                    ),
+                    "report_path": str(
+                        task_dir / "runs" / str(run.get("report") or "")
+                    ),
                     "execution_summary": self._execution_summary(task_dir, run),
                     "target": run.get("target_end") or run.get("target_start") or {},
                     "excel_version": 1,
@@ -933,7 +999,9 @@ class BackportRunStore:
         path = case_dir / "case.json"
         return self._read_json(path) if path.is_file() else None
 
-    def read_report(self, task_id: str, run_number: int | None = None) -> tuple[str, str]:
+    def read_report(
+        self, task_id: str, run_number: int | None = None
+    ) -> tuple[str, str]:
         task_dir = self._task_dir(task_id)
         if run_number is None:
             path = task_dir / "input" / "initial-report.yml"
@@ -941,7 +1009,11 @@ class BackportRunStore:
             if run_number < 1:
                 raise ValueError("Invalid run number.")
             path = task_dir / "runs" / f"{run_number:03d}-report.yml"
-        if not path.is_file() or path.is_symlink() or self._task_root_for(path) != task_dir:
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or self._task_root_for(path) != task_dir
+        ):
             raise FileNotFoundError("Backport report not found.")
         return path.name, path.read_text(encoding="utf-8")
 
@@ -953,7 +1025,9 @@ class BackportRunStore:
         run = self.read_run(task_dir.name, int(match.group(1)))
         return bool(run and run.get("status") in self.TERMINAL_STATUSES)
 
-    def create_run_dir(self, *, operation: str, request: dict[str, Any] | None = None) -> Path:
+    def create_run_dir(
+        self, *, operation: str, request: dict[str, Any] | None = None
+    ) -> Path:
         if operation == "generate_report":
             if self._run_id:
                 task_dir = self._task_dir(self._run_id)
@@ -998,7 +1072,9 @@ class BackportRunStore:
             )
             if not (case_dir / candidate).exists():
                 return candidate
-        raise RuntimeError(f"Backport case artifact attempts exhausted: {requested_name}")
+        raise RuntimeError(
+            f"Backport case artifact attempts exhausted: {requested_name}"
+        )
 
     def case_dir(
         self,
@@ -1017,7 +1093,9 @@ class BackportRunStore:
             or row.get("upstream_commit")
             or row_id
         )
-        commit_slug = re.sub(r"[^0-9a-f]", "", commit.lower())[:12] or self.safe_slug(commit)[:12]
+        commit_slug = (
+            re.sub(r"[^0-9a-f]", "", commit.lower())[:12] or self.safe_slug(commit)[:12]
+        )
         for existing in (task_root / "cases").glob("*/case.json"):
             existing_case = self._read_json(existing)
             existing_commit = str(existing_case.get("commit") or "")
@@ -1027,10 +1105,7 @@ class BackportRunStore:
             ):
                 return existing.parent
         title = str(
-            row.get("commit_title")
-            or row.get("title")
-            or row.get("subject")
-            or ""
+            row.get("commit_title") or row.get("title") or row.get("subject") or ""
         )
         title_slug = self.safe_slug(title, fallback="commit", max_length=48)
         case_id = f"{number:03d}-{commit_slug}-{title_slug}"
@@ -1123,18 +1198,16 @@ class BackportRunStore:
                     for key in (case.get("interactions") or {})
                     if str(key).isdigit()
                 ]
-                archive_number = max(
-                    [int(case.get("last_interaction") or 0), *existing_numbers]
-                ) + 1
+                archive_number = (
+                    max([int(case.get("last_interaction") or 0), *existing_numbers]) + 1
+                )
                 archive_collection = "interactions"
                 last_archive_field = "last_interaction"
 
             archive_key = f"{archive_number:03d}"
             artifact_prefix = f"{archive_scope}-{archive_key}"
             row = sanitized_rows[0] if sanitized_rows else rows[0]
-            status = str(
-                row.get("status") or result.get("status") or "failed"
-            ).lower()
+            status = str(row.get("status") or result.get("status") or "failed").lower()
             artifacts: dict[str, str] = {}
 
             original_source = next(
@@ -1147,7 +1220,10 @@ class BackportRunStore:
                 ),
                 None,
             )
-            if original_source is not None and not (case_dir / "original.patch").is_file():
+            if (
+                original_source is not None
+                and not (case_dir / "original.patch").is_file()
+            ):
                 shutil.copy2(original_source, case_dir / "original.patch")
             if (case_dir / "original.patch").is_file():
                 artifacts["original_patch"] = "original.patch"
@@ -1182,9 +1258,7 @@ class BackportRunStore:
                 "batch_logfile"
             )
             log_source = (
-                Path(str(log_source_value)).expanduser()
-                if log_source_value
-                else None
+                Path(str(log_source_value)).expanduser() if log_source_value else None
             )
             if log_source is not None and not log_source.is_file():
                 archived_source = attempt_dir / log_source.name
@@ -1199,9 +1273,9 @@ class BackportRunStore:
                     if operation == "apply_row":
                         name = f"{artifact_prefix}-apply.log"
                     else:
-                        engine = str(
-                            rows[0].get("backport_engine") or ""
-                        ).strip().lower()
+                        engine = (
+                            str(rows[0].get("backport_engine") or "").strip().lower()
+                        )
                         invoked_value = rows[0].get("backport_engine_invoked")
                         used_engine = (
                             bool(rows[0].get("logfile"))
@@ -1222,9 +1296,7 @@ class BackportRunStore:
 
             engine_log_value = rows[0].get("logfile")
             engine_log = (
-                Path(str(engine_log_value)).expanduser()
-                if engine_log_value
-                else None
+                Path(str(engine_log_value)).expanduser() if engine_log_value else None
             )
             if engine_log is not None and not engine_log.is_file():
                 archived_engine_log = attempt_dir / engine_log.name
@@ -1322,10 +1394,18 @@ class BackportRunStore:
 
     def list_case_attempts(self, task_id: str, row_key: str) -> list[dict[str, Any]]:
         task_dir = self._task_dir(task_id)
-        matches = [
-            path for path in (task_dir / "cases").iterdir()
-            if path.is_dir() and (path.name == row_key or path.name.startswith(f"{int(row_key):03d}-"))
-        ] if (task_dir / "cases").is_dir() else []
+        matches = (
+            [
+                path
+                for path in (task_dir / "cases").iterdir()
+                if path.is_dir()
+                and (
+                    path.name == row_key or path.name.startswith(f"{int(row_key):03d}-")
+                )
+            ]
+            if (task_dir / "cases").is_dir()
+            else []
+        )
         items: list[dict[str, Any]] = []
         for case_dir in matches:
             case = self._read_json(case_dir / "case.json")
@@ -1333,7 +1413,11 @@ class BackportRunStore:
                 for archive_key, data in (case.get(collection) or {}).items():
                     if not isinstance(data, dict) or not str(archive_key).isdigit():
                         continue
-                    artifacts = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
+                    artifacts = (
+                        data.get("artifacts")
+                        if isinstance(data.get("artifacts"), dict)
+                        else {}
+                    )
                     log_name = (
                         artifacts.get("engine_log")
                         or artifacts.get("apply_log")
@@ -1382,7 +1466,9 @@ class BackportRunStore:
             reverse=True,
         )
 
-    def read_artifact(self, task_id: str, case_id: str, artifact: str) -> tuple[Path, bytes]:
+    def read_artifact(
+        self, task_id: str, case_id: str, artifact: str
+    ) -> tuple[Path, bytes]:
         task_dir = self._task_dir(task_id)
         case_dir = (task_dir / "cases" / self.safe_slug(case_id)).resolve()
         if case_dir.parent != (task_dir / "cases").resolve() or case_dir.is_symlink():
@@ -1411,7 +1497,8 @@ class BackportRunStore:
             "reports_dir": str(task_root / "runs"),
             "cases_dir": str(task_root / "cases"),
             "report_path": str(task_root / str(task.get("current_report") or ""))
-            if task.get("current_report") else "",
+            if task.get("current_report")
+            else "",
         }
 
     def append_run_log(self, task_dir: Path, message: str) -> None:

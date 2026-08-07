@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class AgentStatus(str, Enum):
+class AgentStatus(StrEnum):
     creating = "creating"
     running = "running"
     paused = "paused"
@@ -13,8 +13,16 @@ class AgentStatus(str, Enum):
 
 def can_transition(from_status: AgentStatus, to_status: AgentStatus) -> bool:
     valid_transitions = {
-        AgentStatus.creating: {AgentStatus.running, AgentStatus.deleted, AgentStatus.error},
-        AgentStatus.running: {AgentStatus.paused, AgentStatus.deleted, AgentStatus.error},
+        AgentStatus.creating: {
+            AgentStatus.running,
+            AgentStatus.deleted,
+            AgentStatus.error,
+        },
+        AgentStatus.running: {
+            AgentStatus.paused,
+            AgentStatus.deleted,
+            AgentStatus.error,
+        },
         AgentStatus.paused: {AgentStatus.running, AgentStatus.deleted},
         AgentStatus.deleted: set(),  # 无法从 deleted 转换到其他状态
         AgentStatus.error: {AgentStatus.running, AgentStatus.deleted},

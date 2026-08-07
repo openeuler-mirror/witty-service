@@ -3,13 +3,16 @@ from __future__ import annotations
 import io
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
 from witty_agent_server.application.models.agent import AgentStatus
+from witty_agent_server.application.services.agent._process_utils import (
+    start_stderr_drainer,
+)
 from witty_agent_server.application.services.agent.opencode_agent_service import (
     OpenCodeAgentService,
 )
@@ -18,11 +21,7 @@ from witty_agent_server.application.services.agent.opencode_lifecycle_service im
     OpenCodeLifecycleService,
     OpenCodeServeStartError,
 )
-from witty_agent_server.application.services.agent._process_utils import (
-    start_stderr_drainer,
-)
 from witty_agent_server.infra.clients.opencode_client import OpenCodeClient
-
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -43,9 +42,7 @@ def _lifecycle_with_http_handler(
     而是把带 MockTransport 的 httpx.Client 塞进 `client._http_client`，让
     `probe_running`/`stop` 复用同一份 client。
     """
-    client = OpenCodeClient(
-        serve_port=serve_port, username=username, password=password
-    )
+    client = OpenCodeClient(serve_port=serve_port, username=username, password=password)
     client._http_client = httpx.Client(
         base_url=client.server_url,
         auth=(username, password),
@@ -138,7 +135,9 @@ def test_probe_running_non_json_response_returns_false() -> None:
     assert svc.probe_running() is False
 
 
-def test_stop_posts_dispose_then_terminates_process(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stop_posts_dispose_then_terminates_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/instance/dispose"
         return httpx.Response(204)
@@ -146,28 +145,36 @@ def test_stop_posts_dispose_then_terminates_process(monkeypatch: pytest.MonkeyPa
     svc = _lifecycle_with_http_handler(handler)
 
     terminate_calls: list[bool] = []
-    monkeypatch.setattr(svc, "_stop_serve_process", lambda: terminate_calls.append(True))
+    monkeypatch.setattr(
+        svc, "_stop_serve_process", lambda: terminate_calls.append(True)
+    )
 
     svc.stop()
 
     assert terminate_calls == [True]
 
 
-def test_stop_falls_back_to_terminate_on_dispose_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stop_falls_back_to_terminate_on_dispose_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("nope")
 
     svc = _lifecycle_with_http_handler(handler)
 
     terminate_calls: list[bool] = []
-    monkeypatch.setattr(svc, "_stop_serve_process", lambda: terminate_calls.append(True))
+    monkeypatch.setattr(
+        svc, "_stop_serve_process", lambda: terminate_calls.append(True)
+    )
 
     svc.stop()
 
     assert terminate_calls == [True]
 
 
-def test_start_server_raises_when_executable_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_start_server_raises_when_executable_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     svc = OpenCodeLifecycleService(client=OpenCodeClient())
 
     def fake_popen(*_args: Any, **_kwargs: Any) -> None:
@@ -256,11 +263,22 @@ def test_stderr_drainer_consumes_stderr_to_logger(
     monkeypatch.setattr("time.sleep", lambda _s: None)
 
     call_count = {"n": 0}
-    monkeypatch.setattr("time.time", lambda: (call_count.__setitem__("n", call_count["n"] + 1) or float(call_count["n"] * 100.0)))
+    monkeypatch.setattr(
+        "time.time",
+        lambda: (
+            call_count.__setitem__("n", call_count["n"] + 1)
+            or float(call_count["n"] * 100.0)
+        ),
+    )
 
-    with caplog.at_level(logging.WARNING, logger="witty_agent_server.application.services.agent.opencode_lifecycle_service"):
-        with pytest.raises(OpenCodeLifecycleError):
-            svc.start_server()
+    with (
+        caplog.at_level(
+            logging.WARNING,
+            logger="witty_agent_server.application.services.agent.opencode_lifecycle_service",
+        ),
+        pytest.raises(OpenCodeLifecycleError),
+    ):
+        svc.start_server()
 
     # drainer 把两行 stderr 写 logger.warning
     warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
@@ -302,7 +320,7 @@ def test_stop_serve_process_joins_drainer(monkeypatch: pytest.MonkeyPatch) -> No
             self._alive = False
 
     fake = AliveThread()
-    svc._stderr_drainer = fake  
+    svc._stderr_drainer = fake
     svc._serve_process = proc
 
     svc._stop_serve_process()
@@ -322,13 +340,13 @@ def test_stop_serve_process_kills_on_timeout_expired(
         def wait(self, timeout: float | None = None) -> int:
             raise subprocess.TimeoutExpired(cmd=["x"], timeout=timeout or 0)
 
-        kill_calls: list[bool] = []
+        kill_calls: ClassVar[list[bool]] = []
 
         def kill(self) -> None:
             self.kill_calls.append(True)
             self.returncode = -9
             # 之后再 wait 要正常返回，否则 kill wait 也会 TimeoutExpired 进入 except
-            _HangProcess.wait = lambda self, timeout=None: -9  
+            _HangProcess.wait = lambda self, timeout=None: -9
 
     import subprocess
 
@@ -365,9 +383,9 @@ def test_stop_raises_when_process_survives_dispose_and_kill() -> None:
 
     proc = _StubProcess()
     # 模拟 terminate/kill 都失败：poll() 永远返回 None
-    proc.poll = lambda: None  
-    proc.terminate = lambda: None  
-    proc.kill = lambda: None  
+    proc.poll = lambda: None
+    proc.terminate = lambda: None
+    proc.kill = lambda: None
     svc._serve_process = proc
 
     with pytest.raises(OpenCodeLifecycleError) as exc:
@@ -395,7 +413,7 @@ def test_stop_does_not_raise_when_process_terminated_cleanly() -> None:
 
     proc = _StubProcess()
     # _StubProcess.poll 硬编码 None；此处覆盖为模拟 terminate 后进程已退出
-    proc.poll = lambda: 0  
+    proc.poll = lambda: 0
     svc._serve_process = proc
 
     svc.stop()  # 不应抛
@@ -449,9 +467,12 @@ def test_agent_service_stop_calls_lifecycle_stop() -> None:
 def test_agent_service_stop_marks_failed_when_lifecycle_error() -> None:
     """lifecycle.stop() 抛 OpenCodeLifecycleError 时，agent 状态应置为 FAILED
     而非 STOPPED——进程还活着，状态必须反映实际。"""
+
     class BadLifecycle(FakeLifecycleService):
         def __init__(self) -> None:
-            super().__init__(probe_returns=[True])  # probe True → start reuses, sets RUNNING
+            super().__init__(
+                probe_returns=[True]
+            )  # probe True → start reuses, sets RUNNING
 
         def stop(self) -> None:
             raise OpenCodeLifecycleError(action="stop", message="boom")
@@ -486,7 +507,7 @@ def test_agent_service_stop_propagates_unexpected_error() -> None:
 def test_agent_service_list_agents_delegates_to_client() -> None:
     """agent_service.list_agents 应直接委托 client 真打 /agent，不再硬编码 main。"""
     client = OpenCodeClient()
-    client.list_agents = lambda: {  
+    client.list_agents = lambda: {
         "defaultId": "real-default",
         "agents": [{"id": "real-default", "default": True, "loaded": True}],
     }
@@ -567,7 +588,9 @@ def test_agent_service_start_applies_opencode_config_to_lifecycle_and_client(
     assert received["profile"] == "agent-cfg-inst"
 
 
-def test_agent_service_start_without_opencode_config_does_not_call_update_config() -> None:
+def test_agent_service_start_without_opencode_config_does_not_call_update_config() -> (
+    None
+):
     lifecycle_calls: list[bool] = []
     client_calls: list[bool] = []
 
@@ -647,7 +670,8 @@ def test_agent_service_start_server_error_after_stop_marks_failed() -> None:
 
 
 def test_setup_xdg_env_sets_all_xdg_variables(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """_setup_xdg_env 应设置全部 4 个 XDG 环境变量到正确路径。"""
     mock_settings = MagicMock()
@@ -665,12 +689,15 @@ def test_setup_xdg_env_sets_all_xdg_variables(
     inst_root = tmp_path / "opencode-instances" / "agent-001"
     assert env["XDG_DATA_HOME"] == str(inst_root / "data")
     assert env["XDG_STATE_HOME"] == str(inst_root / "state")
-    assert env["XDG_CONFIG_HOME"] == str(tmp_path / "agent-workspaces" / "agent-001" / "workspace")
+    assert env["XDG_CONFIG_HOME"] == str(
+        tmp_path / "agent-workspaces" / "agent-001" / "workspace"
+    )
     assert env["XDG_CACHE_HOME"] == str(inst_root / "cache")
 
 
 def test_setup_xdg_env_creates_directories(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """_setup_xdg_env 应创建 data/state/config/cache 目录。"""
     mock_settings = MagicMock()

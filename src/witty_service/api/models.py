@@ -3,12 +3,18 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request, Response, status
 
 from witty_service.api.auth import require_bearer_auth
-from witty_service.api.schemas import CreateModelRequest, ModelResponse, UpdateModelRequest
+from witty_service.api.schemas import (
+    CreateModelRequest,
+    ModelResponse,
+    UpdateModelRequest,
+)
 from witty_service.api.services import ServiceContainer
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import ModelRecord
 
-router = APIRouter(prefix="/models", tags=["models"], dependencies=[Depends(require_bearer_auth)])
+router = APIRouter(
+    prefix="/models", tags=["models"], dependencies=[Depends(require_bearer_auth)]
+)
 
 MODEL_NOT_FOUND = "MODEL_NOT_FOUND"
 
@@ -36,9 +42,6 @@ def create_model(
     payload: CreateModelRequest,
     services: ServiceContainer = Depends(get_services),
 ) -> ModelResponse:
-    import logging
-    logger = logging.getLogger(__name__)
-    
     api_base_url = payload.api_base_url
     if api_base_url is None:
         api_base_url = DEFAULT_API_BASE_URLS.get(payload.provider)
@@ -58,7 +61,9 @@ def create_model(
 
 
 @router.get("", response_model=list[ModelResponse])
-def list_models(services: ServiceContainer = Depends(get_services)) -> list[ModelResponse]:
+def list_models(
+    services: ServiceContainer = Depends(get_services),
+) -> list[ModelResponse]:
     models = services.repository.list_models()
     return [_to_model_response(model) for model in models]
 

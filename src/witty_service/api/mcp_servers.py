@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, Request, Response, status
 
 from witty_service.api.auth import require_bearer_auth
@@ -12,7 +14,11 @@ from witty_service.api.services import ServiceContainer
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import McpServerRecord
 
-router = APIRouter(prefix="/mcp-servers", tags=["mcp-servers"], dependencies=[Depends(require_bearer_auth)])
+router = APIRouter(
+    prefix="/mcp-servers",
+    tags=["mcp-servers"],
+    dependencies=[Depends(require_bearer_auth)],
+)
 
 MCP_SERVER_NOT_FOUND = "MCP_SERVER_NOT_FOUND"
 MCP_SERVER_CONFIG_INVALID = "MCP_SERVER_CONFIG_INVALID"
@@ -45,7 +51,9 @@ def create_mcp_server(
 
 
 @router.get("", response_model=list[McpServerResponse])
-def list_mcp_servers(services: ServiceContainer = Depends(get_services)) -> list[McpServerResponse]:
+def list_mcp_servers(
+    services: ServiceContainer = Depends(get_services),
+) -> list[McpServerResponse]:
     servers = services.repository.list_mcp_servers()
     return [_to_mcp_server_response(server) for server in servers]
 
@@ -79,11 +87,11 @@ def update_mcp_server(
             message="MCP Server was not found.",
             details={"server_id": server_id},
         )
-    
+
     mcp_server_name = payload.mcp_server_name
     if mcp_server_name is None and payload.mcp_server_config is not None:
         mcp_server_name = _extract_server_name(payload.mcp_server_config)
-    
+
     updated_server = services.repository.update_mcp_server(
         server_id=server_id,
         mcp_server_name=mcp_server_name,

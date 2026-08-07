@@ -1,26 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import hashlib
 import os
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlparse
 
 from witty_service.api.backport_schemas import TargetConfigLayoutOpts
 from witty_service.api.services import ServiceContainer
+from witty_service.application.backport_conflict_reporter_manager import (
+    ConflictReporterManager,
+)
 from witty_service.application.backport_cvekit_client import (
     BackportCvekitClient,
     BackportRuntimeConfig,
 )
 from witty_service.application.backport_git_client import BackportGitClient
-from witty_service.application.backport_conflict_reporter_manager import ConflictReporterManager
 from witty_service.domain.errors import DomainError
-
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +87,9 @@ class BackportService:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         pause_checker: Callable[[], bool] | None = None,
     ) -> None:
-        self._config_path = services.workspace_store.base_dir / "config" / "backport.json"
+        self._config_path = (
+            services.workspace_store.base_dir / "config" / "backport.json"
+        )
         self._repository = services.repository
         self._git_client = BackportGitClient()
         self._cvekit_client = BackportCvekitClient(
@@ -171,7 +175,9 @@ class BackportService:
 
     def get_config(self) -> dict[str, Any]:
         if not self._config_path.exists():
-            logger.info("Backport config not found, using defaults: path=%s", self._config_path)
+            logger.info(
+                "Backport config not found, using defaults: path=%s", self._config_path
+            )
             return _default_config()
 
         try:
@@ -274,10 +280,17 @@ class BackportService:
 
         entries = [
             {"name": item.name, "path": str(item), "is_dir": item.is_dir()}
-            for item in sorted(current_path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
+            for item in sorted(
+                current_path.iterdir(),
+                key=lambda item: (not item.is_dir(), item.name.lower()),
+            )
         ]
         parent_path = str(current_path.parent) if current_path != root else None
-        return {"current_path": str(current_path), "parent_path": parent_path, "entries": entries}
+        return {
+            "current_path": str(current_path),
+            "parent_path": parent_path,
+            "entries": entries,
+        }
 
     def prepare_repository(
         self,
@@ -297,10 +310,16 @@ class BackportService:
         def mark(title: str, status: str = "success", detail: str = "") -> None:
             steps.append({"title": title, "status": status, "detail": detail})
             if progress_callback is not None:
-                progress_callback({"progress": min(95, len(steps) * 18), "steps": steps})
+                progress_callback(
+                    {"progress": min(95, len(steps) * 18), "steps": steps}
+                )
 
         input_type = self._detect_repository_input_type(repository_input)
-        mark("已识别仓库地址", "success", "远程 Git 仓库" if input_type == "remote" else "服务器本地路径")
+        mark(
+            "已识别仓库地址",
+            "success",
+            "远程 Git 仓库" if input_type == "remote" else "服务器本地路径",
+        )
 
         if input_type == "remote":
             cache_dir = self._repository_cache_dir()
@@ -309,16 +328,22 @@ class BackportService:
             local_path = repos_dir / self._repository_cache_name(repository_input)
             if local_path.exists():
                 mark("已找到本地缓存")
-                self._run_repository_command(["git", "-C", str(local_path), "fetch", "--all", "--prune"])
+                self._run_repository_command(
+                    ["git", "-C", str(local_path), "fetch", "--all", "--prune"]
+                )
                 mark("已同步远程分支")
             else:
                 mark("开始克隆远程仓库", "running", str(local_path))
-                self._run_repository_command(["git", "clone", repository_input, str(local_path)])
+                self._run_repository_command(
+                    ["git", "clone", repository_input, str(local_path)]
+                )
                 mark("仓库已克隆")
             source_url = repository_input
         else:
             local_path = Path(repository_input).expanduser().resolve()
-            source_url = BackportGitClient.remote_url(local_path) if local_path.exists() else ""
+            source_url = (
+                BackportGitClient.remote_url(local_path) if local_path.exists() else ""
+            )
             mark("已解析本地路径", "success", str(local_path))
 
         BackportGitClient.ensure_git_repo(local_path)
@@ -347,7 +372,9 @@ class BackportService:
         normalized_role = self._normalize_repository_role(role)
         repo_path = Path(local_path).expanduser().resolve()
         BackportGitClient.ensure_git_repo(repo_path)
-        resolved_source_url = BackportGitClient.remote_url(repo_path) or source_url.strip()
+        resolved_source_url = (
+            BackportGitClient.remote_url(repo_path) or source_url.strip()
+        )
         repo_info = self._build_repository_info(
             role=normalized_role,
             repository_input=resolved_source_url or str(repo_path),
@@ -372,8 +399,14 @@ class BackportService:
             return {"repositories": []}
         return {"repositories": repositories[:20]}
 
-    def get_runtime_status(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        config = self._extract_config({"config": payload}) if isinstance(payload, dict) else self.get_config()
+    def get_runtime_status(
+        self, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        config = (
+            self._extract_config({"config": payload})
+            if isinstance(payload, dict)
+            else self.get_config()
+        )
         errors: list[str] = []
         status: dict[str, Any] = {
             "ok": False,
@@ -388,18 +421,24 @@ class BackportService:
 
         try:
             model = self._resolve_backport_model(config)
-            provider = self._resolve_cvekit_llm_provider(model.provider, model.compatibility)
+            provider = self._resolve_cvekit_llm_provider(
+                model.provider, model.compatibility
+            )
             status["model_configured"] = True
             status["model_name"] = model.name
             status["model_provider"] = provider
-            status["api_key_available"] = bool(model.api_key.strip()) or provider == "local"
+            status["api_key_available"] = (
+                bool(model.api_key.strip()) or provider == "local"
+            )
             if not model.name.strip():
                 errors.append("Backport 运行模型缺少模型 ID。")
             if not status["api_key_available"]:
                 errors.append("Backport 运行模型缺少 API Key。")
-            if provider not in {"openai", "deepseek", "siliconflow", "minimax", "local"} and not (
-                model.api_base_url or ""
-            ).strip():
+            if (
+                provider
+                not in {"openai", "deepseek", "siliconflow", "minimax", "local"}
+                and not (model.api_base_url or "").strip()
+            ):
                 errors.append("Backport 运行模型缺少 API Base URL。")
         except RuntimeError as error:
             errors.append(str(error))
@@ -419,7 +458,9 @@ class BackportService:
         )
         return status
 
-    def run_action(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def run_action(
+        self, action: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         normalized_action = action.strip()
         handlers = self._build_handlers()
         handler = handlers.get(normalized_action)
@@ -438,7 +479,9 @@ class BackportService:
         )
         conflict_reporter_started = False
         runtime_configured = False
-        archive_run_id = self._get_string(normalized_payload, "_archive_run_id", "archive_run_id")
+        archive_run_id = self._get_string(
+            normalized_payload, "_archive_run_id", "archive_run_id"
+        )
         if archive_run_id:
             self._cvekit_client.set_archive_run_id(archive_run_id)
         try:
@@ -457,7 +500,8 @@ class BackportService:
             if normalized_action in {"run_all", "execute_selected", "try_resolve"}:
                 cvekit_options = (
                     action_config.get("cvekit_options")
-                    if action_config and isinstance(action_config.get("cvekit_options"), dict)
+                    if action_config
+                    and isinstance(action_config.get("cvekit_options"), dict)
                     else {}
                 )
                 conflict_reporter_url = self._conflict_reporter_manager.start(
@@ -466,7 +510,9 @@ class BackportService:
                 self._cvekit_client.set_conflict_reporter_url(conflict_reporter_url)
                 conflict_reporter_started = True
             parsed_result = handler(normalized_payload)
-            self._persist_runtime_state(normalized_action, normalized_payload, parsed_result)
+            self._persist_runtime_state(
+                normalized_action, normalized_payload, parsed_result
+            )
             elapsed = time.monotonic() - started_at
             status = parsed_result.get("status")
             logger.info(
@@ -530,7 +576,13 @@ class BackportService:
     def _run_all(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
         current_report_path = (
-            self._get_string(payload, "base_report_path", "baseReportPath", "working_report_path", "workingReportPath")
+            self._get_string(
+                payload,
+                "base_report_path",
+                "baseReportPath",
+                "working_report_path",
+                "workingReportPath",
+            )
             or config["current_report_path"]
         )
 
@@ -627,15 +679,26 @@ class BackportService:
             row_status = str(row.get("status") or "").strip().lower()
             has_apply_candidate = any(
                 str(row.get(key) or "").strip()
-                for key in ("backported_patch_path", "patch_path", "original_patch_path")
+                for key in (
+                    "backported_patch_path",
+                    "patch_path",
+                    "original_patch_path",
+                )
             )
             was_unchecked = row_status == "pending" or row.get("has_conflict") is None
             base_progress = {
                 "current_index": index + 1,
                 "total": len(current_commits),
-                "current_commit": str(row.get("commit") or row.get("input_commit") or ""),
+                "current_commit": str(
+                    row.get("commit") or row.get("input_commit") or ""
+                ),
                 "current_title": self._describe_commit_row(row),
-                "current_row_id": str(row.get("row_id") or row.get("commit") or row.get("input_commit") or ""),
+                "current_row_id": str(
+                    row.get("row_id")
+                    or row.get("commit")
+                    or row.get("input_commit")
+                    or ""
+                ),
                 "failed_count": failed_count,
                 "processed_count": processed_count,
             }
@@ -653,7 +716,11 @@ class BackportService:
                     updated_commits=[row],
                     failed_count=failed_count,
                     processed_count=processed_count,
-                    **{key: value for key, value in base_progress.items() if key not in {"failed_count", "processed_count"}},
+                    **{
+                        key: value
+                        for key, value in base_progress.items()
+                        if key not in {"failed_count", "processed_count"}
+                    },
                 )
                 index += 1
                 continue
@@ -692,7 +759,11 @@ class BackportService:
                         updated_commits=updated_rows or [row],
                         failed_count=failed_count,
                         processed_count=processed_count,
-                        **{key: value for key, value in base_progress.items() if key not in {"failed_count", "processed_count"}},
+                        **{
+                            key: value
+                            for key, value in base_progress.items()
+                            if key not in {"failed_count", "processed_count"}
+                        },
                     )
                     index += 1
                     continue
@@ -726,7 +797,10 @@ class BackportService:
                     }
                 )
                 resolved_rows = self._resolve_result_commits(resolved)
-                unresolved = resolved.get("status") == "failed" or self._find_blocking_conflict(resolved_rows) is not None
+                unresolved = (
+                    resolved.get("status") == "failed"
+                    or self._find_blocking_conflict(resolved_rows) is not None
+                )
                 if unresolved:
                     failed_count += 1
                     failed_rows = [
@@ -743,7 +817,9 @@ class BackportService:
                         }
                         for item in (resolved_rows or [row])
                     ]
-                    merged = self._cvekit_client.merge_rows_into_report(current_report_path, failed_rows)
+                    merged = self._cvekit_client.merge_rows_into_report(
+                        current_report_path, failed_rows
+                    )
                     updated_rows = self._resolve_result_commits(merged)
                     processed_count += 1
                     self._emit_run_all_progress(
@@ -755,7 +831,11 @@ class BackportService:
                         updated_commits=updated_rows,
                         failed_count=failed_count,
                         processed_count=processed_count,
-                        **{key: value for key, value in base_progress.items() if key not in {"failed_count", "processed_count"}},
+                        **{
+                            key: value
+                            for key, value in base_progress.items()
+                            if key not in {"failed_count", "processed_count"}
+                        },
                     )
                     index += 1
                     continue
@@ -786,7 +866,11 @@ class BackportService:
                         updated_commits=[row],
                         failed_count=failed_count,
                         processed_count=processed_count,
-                        **{key: value for key, value in base_progress.items() if key not in {"failed_count", "processed_count"}},
+                        **{
+                            key: value
+                            for key, value in base_progress.items()
+                            if key not in {"failed_count", "processed_count"}
+                        },
                     )
                     index += 1
                     continue
@@ -840,7 +924,11 @@ class BackportService:
                         updated_commits=updated_rows or [row],
                         failed_count=failed_count,
                         processed_count=processed_count,
-                        **{key: value for key, value in base_progress.items() if key not in {"failed_count", "processed_count"}},
+                        **{
+                            key: value
+                            for key, value in base_progress.items()
+                            if key not in {"failed_count", "processed_count"}
+                        },
                     )
                     index += 1
                     continue
@@ -860,14 +948,21 @@ class BackportService:
             processed_count += 1
             self._emit_run_all_progress(
                 phase="failed" if applied.get("status") == "failed" else "applying",
-                phase_state="failed" if applied.get("status") == "failed" else "completed",
-                message=applied.get("summary") or f"第 {index + 1} 条 commit 应用完成。",
+                phase_state="failed"
+                if applied.get("status") == "failed"
+                else "completed",
+                message=applied.get("summary")
+                or f"第 {index + 1} 条 commit 应用完成。",
                 current_report_path=current_report_path,
                 commits=current_commits,
                 updated_commits=applied_rows,
                 failed_count=failed_count,
                 processed_count=processed_count,
-                **{key: value for key, value in base_progress.items() if key not in {"failed_count", "processed_count"}},
+                **{
+                    key: value
+                    for key, value in base_progress.items()
+                    if key not in {"failed_count", "processed_count"}
+                },
             )
             index += 1
 
@@ -884,7 +979,10 @@ class BackportService:
                 "status": "failed",
                 "stage": "failed",
                 "summary": f"一键运行超过最大步数 {max_steps}，仍未完成。",
-                "artifacts": {"base_report_path": current_report_path, **archive_artifacts},
+                "artifacts": {
+                    "base_report_path": current_report_path,
+                    **archive_artifacts,
+                },
                 "report": {
                     "report_path": current_report_path,
                     "commit_count": len(final_commits),
@@ -932,7 +1030,9 @@ class BackportService:
 
     def _run_generate_report(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
-        excel_path = self._require_string(payload, "generate_report", "excel_path", "excelPath")
+        excel_path = self._require_string(
+            payload, "generate_report", "excel_path", "excelPath"
+        )
         logger.info(
             "Backport generate_report inputs: excel=%s project_dir=%s source_branch=%s target_path=%s target_release=%s patch_dataset_dir=%s",
             excel_path,
@@ -960,7 +1060,12 @@ class BackportService:
                 target_config_layout=config["target_config_layout"],
                 target_config_layout_opts=config["target_config_layout_opts"],
             )
-        except (RuntimeError, FileNotFoundError, NotADirectoryError, ValueError) as error:
+        except (
+            RuntimeError,
+            FileNotFoundError,
+            NotADirectoryError,
+            ValueError,
+        ) as error:
             logger.exception("generate_report failed")
             return {
                 "operation": "generate_report",
@@ -971,12 +1076,18 @@ class BackportService:
 
     def _run_load_report(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
-        base_report_path = self._get_string(payload, "base_report_path", "baseReportPath") or config["current_report_path"]
+        base_report_path = (
+            self._get_string(payload, "base_report_path", "baseReportPath")
+            or config["current_report_path"]
+        )
         if not base_report_path:
             raise DomainError(
                 code="BACKPORT_ARGUMENT_REQUIRED",
                 message="Missing required argument for load_report.",
-                details={"action": "load_report", "keys": ["base_report_path", "baseReportPath"]},
+                details={
+                    "action": "load_report",
+                    "keys": ["base_report_path", "baseReportPath"],
+                },
             )
         try:
             return self._cvekit_client.load_report(base_report_path=base_report_path)
@@ -991,12 +1102,18 @@ class BackportService:
 
     def _run_continue_report(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
-        base_report_path = self._get_string(payload, "base_report_path", "baseReportPath") or config["current_report_path"]
+        base_report_path = (
+            self._get_string(payload, "base_report_path", "baseReportPath")
+            or config["current_report_path"]
+        )
         if not base_report_path:
             raise DomainError(
                 code="BACKPORT_ARGUMENT_REQUIRED",
                 message="Missing required argument for continue_report.",
-                details={"action": "continue_report", "keys": ["base_report_path", "baseReportPath"]},
+                details={
+                    "action": "continue_report",
+                    "keys": ["base_report_path", "baseReportPath"],
+                },
             )
         try:
             return self._cvekit_client.continue_report(
@@ -1015,14 +1132,22 @@ class BackportService:
 
     def _run_recheck_conflict(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
-        base_report_path = self._get_string(payload, "base_report_path", "baseReportPath") or config["current_report_path"]
-        working_report_path = self._get_string(payload, "working_report_path", "workingReportPath")
+        base_report_path = (
+            self._get_string(payload, "base_report_path", "baseReportPath")
+            or config["current_report_path"]
+        )
+        working_report_path = self._get_string(
+            payload, "working_report_path", "workingReportPath"
+        )
         row = payload.get("row")
         if not base_report_path:
             raise DomainError(
                 code="BACKPORT_ARGUMENT_REQUIRED",
                 message="Missing required argument for recheck_conflict.",
-                details={"action": "recheck_conflict", "keys": ["base_report_path", "baseReportPath"]},
+                details={
+                    "action": "recheck_conflict",
+                    "keys": ["base_report_path", "baseReportPath"],
+                },
             )
         if not isinstance(row, dict):
             raise DomainError(
@@ -1050,7 +1175,9 @@ class BackportService:
     def _run_load_git_log(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
         try:
-            target_path = self._resolve_target_path(payload, config, operation="load_git_log")
+            target_path = self._resolve_target_path(
+                payload, config, operation="load_git_log"
+            )
             entries = self._git_client.load_git_log(target_path, limit=100)
             return {
                 "operation": "load_git_log",
@@ -1070,7 +1197,9 @@ class BackportService:
     def _run_load_git_show(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
         try:
-            target_path = self._resolve_target_path(payload, config, operation="load_git_show")
+            target_path = self._resolve_target_path(
+                payload, config, operation="load_git_show"
+            )
             revision = self._require_string(payload, "load_git_show", "revision")
             show_content = self._git_client.load_git_show(target_path, revision)
             return {
@@ -1081,7 +1210,12 @@ class BackportService:
                     "show_content": show_content,
                 },
             }
-        except (DomainError, RuntimeError, FileNotFoundError, NotADirectoryError) as error:
+        except (
+            DomainError,
+            RuntimeError,
+            FileNotFoundError,
+            NotADirectoryError,
+        ) as error:
             logger.exception("load_git_show failed")
             return {
                 "operation": "load_git_show",
@@ -1092,7 +1226,9 @@ class BackportService:
 
     def _run_execute_selected(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
-        base_report_path = self._require_string(payload, "execute_selected", "base_report_path", "baseReportPath")
+        base_report_path = self._require_string(
+            payload, "execute_selected", "base_report_path", "baseReportPath"
+        )
         working_report_path = self._get_string(
             payload,
             "working_report_path",
@@ -1111,7 +1247,9 @@ class BackportService:
             return self._cvekit_client.execute_selected(
                 base_report_path=base_report_path,
                 selected_commits=selected_commits,
-                target_path=self._resolve_target_path(payload, config, operation="execute_selected"),
+                target_path=self._resolve_target_path(
+                    payload, config, operation="execute_selected"
+                ),
                 patch_dataset_dir=config["patch_dataset_dir"],
                 signer_name=config["signer_name"],
                 signer_email=config["signer_email"],
@@ -1134,7 +1272,9 @@ class BackportService:
 
     def _run_apply_row(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
-        base_report_path = self._require_string(payload, "apply_row", "base_report_path", "baseReportPath")
+        base_report_path = self._require_string(
+            payload, "apply_row", "base_report_path", "baseReportPath"
+        )
         working_report_path = self._get_string(
             payload,
             "working_report_path",
@@ -1177,7 +1317,9 @@ class BackportService:
 
     def _run_check_row(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
-        base_report_path = self._require_string(payload, "check_row", "base_report_path", "baseReportPath")
+        base_report_path = self._require_string(
+            payload, "check_row", "base_report_path", "baseReportPath"
+        )
         working_report_path = self._get_string(
             payload,
             "working_report_path",
@@ -1207,7 +1349,9 @@ class BackportService:
             failed_row["error"] = str(error)
             failed_row["conflict_check_error"] = str(error)
             try:
-                merged = self._cvekit_client.merge_rows_into_report(base_report_path, [failed_row])
+                merged = self._cvekit_client.merge_rows_into_report(
+                    base_report_path, [failed_row]
+                )
                 return {
                     **merged,
                     "operation": "check_row",
@@ -1227,7 +1371,9 @@ class BackportService:
 
     def _run_try_resolve(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
-        base_report_path = self._require_string(payload, "try_resolve", "base_report_path", "baseReportPath")
+        base_report_path = self._require_string(
+            payload, "try_resolve", "base_report_path", "baseReportPath"
+        )
         working_report_path = self._get_string(
             payload,
             "working_report_path",
@@ -1246,7 +1392,9 @@ class BackportService:
             return self._cvekit_client.try_resolve(
                 base_report_path=base_report_path,
                 row=row,
-                target_path=self._resolve_target_path(payload, config, operation="try_resolve"),
+                target_path=self._resolve_target_path(
+                    payload, config, operation="try_resolve"
+                ),
                 patch_dataset_dir=config["patch_dataset_dir"],
                 signer_name=config["signer_name"],
                 signer_email=config["signer_email"],
@@ -1293,12 +1441,15 @@ class BackportService:
                 message="row must be a non-empty object.",
                 details={"action": "preview_commit_message"},
             )
-        template_override = self._get_string(payload, "commit_message_template", "commitMessageTemplate")
+        template_override = self._get_string(
+            payload, "commit_message_template", "commitMessageTemplate"
+        )
         try:
             return self._cvekit_client.preview_commit_message(
                 base_report_path=base_report_path,
                 row=row,
-                commit_message_template=template_override or config["commit_message_template"],
+                commit_message_template=template_override
+                or config["commit_message_template"],
                 commit_message_source=config["commit_message_source"],
                 linux_repo_path=config["linux_repo_path"],
                 working_report_path=working_report_path,
@@ -1317,8 +1468,12 @@ class BackportService:
     def _run_check_manual_patch(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
         try:
-            target_path = self._resolve_target_path(payload, config, operation="check_manual_patch")
-            patch_text = self._require_string(payload, "check_manual_patch", "patch_text", "patchText")
+            target_path = self._resolve_target_path(
+                payload, config, operation="check_manual_patch"
+            )
+            patch_text = self._require_string(
+                payload, "check_manual_patch", "patch_text", "patchText"
+            )
             result = self._git_client.check_manual_patch(target_path, patch_text)
             ok = result["returncode"] == "0"
             return {
@@ -1328,7 +1483,13 @@ class BackportService:
                 "manual_patch": result,
                 "diagnostics": {"error_text": result["stderr"]} if not ok else {},
             }
-        except (DomainError, RuntimeError, FileNotFoundError, NotADirectoryError, ValueError) as error:
+        except (
+            DomainError,
+            RuntimeError,
+            FileNotFoundError,
+            NotADirectoryError,
+            ValueError,
+        ) as error:
             logger.exception("check_manual_patch failed")
             return {
                 "operation": "check_manual_patch",
@@ -1340,8 +1501,12 @@ class BackportService:
     def _run_apply_manual_patch(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
         try:
-            target_path = self._resolve_target_path(payload, config, operation="apply_manual_patch")
-            patch_text = self._require_string(payload, "apply_manual_patch", "patch_text", "patchText")
+            target_path = self._resolve_target_path(
+                payload, config, operation="apply_manual_patch"
+            )
+            patch_text = self._require_string(
+                payload, "apply_manual_patch", "patch_text", "patchText"
+            )
             result = self._git_client.apply_manual_patch(target_path, patch_text)
             ok = result["returncode"] == "0"
             return {
@@ -1351,7 +1516,13 @@ class BackportService:
                 "manual_patch": result,
                 "diagnostics": {"error_text": result["stderr"]} if not ok else {},
             }
-        except (DomainError, RuntimeError, FileNotFoundError, NotADirectoryError, ValueError) as error:
+        except (
+            DomainError,
+            RuntimeError,
+            FileNotFoundError,
+            NotADirectoryError,
+            ValueError,
+        ) as error:
             logger.exception("apply_manual_patch failed")
             return {
                 "operation": "apply_manual_patch",
@@ -1361,7 +1532,9 @@ class BackportService:
             }
 
     def _run_load_patch_preview(self, payload: dict[str, Any]) -> dict[str, Any]:
-        base_report_path = self._require_string(payload, "load_patch_preview", "base_report_path", "baseReportPath")
+        base_report_path = self._require_string(
+            payload, "load_patch_preview", "base_report_path", "baseReportPath"
+        )
         working_report_path = self._get_string(
             payload,
             "working_report_path",
@@ -1369,7 +1542,9 @@ class BackportService:
             "current_filtered_report_path",
             "currentFilteredReportPath",
         )
-        patch_kind = self._require_string(payload, "load_patch_preview", "patch_kind", "patchKind")
+        patch_kind = self._require_string(
+            payload, "load_patch_preview", "patch_kind", "patchKind"
+        )
         row = payload.get("row")
         if not isinstance(row, dict) or not row:
             raise DomainError(
@@ -1396,7 +1571,9 @@ class BackportService:
     # ── 辅助方法 ──────────────────────────────────────────────
 
     @staticmethod
-    def _normalize_layout_fields(config: dict[str, Any], source: dict[str, Any]) -> None:
+    def _normalize_layout_fields(
+        config: dict[str, Any], source: dict[str, Any]
+    ) -> None:
         """校验并合并 source 中的 layout 字段到 config。
 
         layout/opts 成对处理：
@@ -1417,7 +1594,7 @@ class BackportService:
                     validated_opts = TargetConfigLayoutOpts(**raw_opts).model_dump()
                     opts_valid = True
                 except Exception:
-                    pass
+                    pass  # nosec B110 - 无效配置按未提供处理
 
         # Step 1: 处理 layout
         if layout_in_source:
@@ -1475,18 +1652,29 @@ class BackportService:
         self._normalize_layout_fields(normalized, raw_config)
         return normalized
 
-    def _resolve_cvekit_runtime_config(self, config: dict[str, Any]) -> BackportRuntimeConfig:
+    def _resolve_cvekit_runtime_config(
+        self, config: dict[str, Any]
+    ) -> BackportRuntimeConfig:
         model = self._resolve_backport_model(config)
-        provider = self._resolve_cvekit_llm_provider(model.provider, model.compatibility)
+        provider = self._resolve_cvekit_llm_provider(
+            model.provider, model.compatibility
+        )
         base_url = (model.api_base_url or "").strip()
         model_name = model.name.strip()
         api_key = model.api_key.strip()
 
         if not model_name:
-            raise RuntimeError("Backport 运行模型缺少模型 ID，请在 Backport 配置区选择有效模型。")
+            raise RuntimeError(
+                "Backport 运行模型缺少模型 ID，请在 Backport 配置区选择有效模型。"
+            )
         if not api_key and provider != "local":
-            raise RuntimeError("Backport 运行模型缺少 API Key，请在模型设置页补全密钥。")
-        if provider not in {"openai", "deepseek", "siliconflow", "minimax", "local"} and not base_url:
+            raise RuntimeError(
+                "Backport 运行模型缺少 API Key，请在模型设置页补全密钥。"
+            )
+        if (
+            provider not in {"openai", "deepseek", "siliconflow", "minimax", "local"}
+            and not base_url
+        ):
             raise RuntimeError(
                 "Backport 运行模型缺少 API Base URL，无法作为 cvekit 自定义模型启动。"
             )
@@ -1557,7 +1745,9 @@ class BackportService:
 
         config = self._extract_config(payload)
         if action in {"generate_report", "run_all"}:
-            config["current_excel_path"] = self._get_string(payload, "excel_path", "excelPath")
+            config["current_excel_path"] = self._get_string(
+                payload, "excel_path", "excelPath"
+            )
             if action == "generate_report":
                 config["current_filtered_report_path"] = ""
 
@@ -1566,7 +1756,17 @@ class BackportService:
             or self._get_string(artifacts, "report_path")
             or self._get_string(report, "report_path")
         )
-        if action in {"generate_report", "continue_report", "recheck_conflict", "try_resolve", "run_all"} and report_path:
+        if (
+            action
+            in {
+                "generate_report",
+                "continue_report",
+                "recheck_conflict",
+                "try_resolve",
+                "run_all",
+            }
+            and report_path
+        ):
             config["current_report_path"] = report_path
 
         filtered_report_path = self._get_string(artifacts, "filtered_report_path")
@@ -1643,7 +1843,9 @@ class BackportService:
             current_report_path=current_report_path,
             commits=current_commits,
             updated_commits=[],
-            current_index=min(processed_count + 1, len(current_commits)) if current_commits else 0,
+            current_index=min(processed_count + 1, len(current_commits))
+            if current_commits
+            else 0,
             total=len(current_commits),
             failed_count=failed_count,
             processed_count=processed_count,
@@ -1672,7 +1874,11 @@ class BackportService:
     def _is_skipped_commit(item: dict[str, Any]) -> bool:
         status = str(item.get("status") or "").strip().lower()
         merged = str(item.get("merged_in_target") or "").strip().lower()
-        return status == "skipped" or merged == "skipped" or item.get("is_merge_commit") is True
+        return (
+            status == "skipped"
+            or merged == "skipped"
+            or item.get("is_merge_commit") is True
+        )
 
     @classmethod
     def _is_terminal_nonblocking_row(cls, row: dict[str, Any]) -> bool:
@@ -1688,14 +1894,17 @@ class BackportService:
         )
 
     @classmethod
-    def _find_blocking_conflict(cls, commits: list[dict[str, Any]]) -> dict[str, Any] | None:
+    def _find_blocking_conflict(
+        cls, commits: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
         return next(
             (
                 item
                 for item in commits
                 if isinstance(item, dict)
                 and item.get("has_conflict") is True
-                and str(item.get("status") or "").strip().lower() not in {"failed", "error"}
+                and str(item.get("status") or "").strip().lower()
+                not in {"failed", "error"}
                 and not cls._is_skipped_commit(item)
             ),
             None,
@@ -1729,7 +1938,11 @@ class BackportService:
         if not isinstance(report, dict):
             return []
         commits = report.get("commits")
-        return [item for item in commits if isinstance(item, dict)] if isinstance(commits, list) else []
+        return (
+            [item for item in commits if isinstance(item, dict)]
+            if isinstance(commits, list)
+            else []
+        )
 
     @staticmethod
     def _describe_commit_row(row: dict[str, Any]) -> str:
@@ -1739,7 +1952,9 @@ class BackportService:
                 return value.strip()
         return "<unknown>"
 
-    def _require_string(self, payload: dict[str, Any], operation: str, *keys: str) -> str:
+    def _require_string(
+        self, payload: dict[str, Any], operation: str, *keys: str
+    ) -> str:
         value = self._get_string(payload, *keys)
         if value:
             return value
@@ -1790,7 +2005,9 @@ class BackportService:
             raw_name = Path(clean_input).name
         name = raw_name.removesuffix(".git") or "repository"
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "repository"
-        digest = hashlib.sha1(clean_input.encode("utf-8")).hexdigest()[:12]
+        digest = hashlib.sha1(
+            clean_input.encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:12]
         return f"{safe_name}-{digest}"
 
     @staticmethod
@@ -1824,7 +2041,9 @@ class BackportService:
         return git_dir if git_dir.is_absolute() else (repo / git_dir).resolve()
 
     def _repository_cache_dir(self) -> Path:
-        raw_dir = os.environ.get(BACKPORT_REPOSITORY_CACHE_ENV, BACKPORT_REPOSITORY_CACHE_DIR)
+        raw_dir = os.environ.get(
+            BACKPORT_REPOSITORY_CACHE_ENV, BACKPORT_REPOSITORY_CACHE_DIR
+        )
         return Path(raw_dir).expanduser().resolve()
 
     def _repository_index_path(self) -> Path:
@@ -1852,23 +2071,37 @@ class BackportService:
             else ["status", "--porcelain=v1", "-uno"]
         )
         status_result = BackportGitClient._run_git(local_path, status_args)
-        status_clean = status_result.returncode == 0 and status_result.stdout.strip() == ""
+        status_clean = (
+            status_result.returncode == 0 and status_result.stdout.strip() == ""
+        )
         git_dir = self._git_dir(local_path)
         in_progress = False
         if git_dir is not None:
             in_progress = any(
                 (git_dir / item).exists()
-                for item in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD", "rebase-merge", "rebase-apply")
+                for item in (
+                    "MERGE_HEAD",
+                    "CHERRY_PICK_HEAD",
+                    "REBASE_HEAD",
+                    "rebase-merge",
+                    "rebase-apply",
+                )
             )
         display_source = source_url or repository_input
         display_name = self._repository_display_name(display_source, local_path)
         writable = os.access(local_path, os.W_OK)
         warnings: list[str] = []
         if selected_branch and selected_branch not in available_branches:
-            fallback_branch = current_branch or default_branch or (local_branches[0] if local_branches else "")
+            fallback_branch = (
+                current_branch
+                or default_branch
+                or (local_branches[0] if local_branches else "")
+            )
             if fallback_branch:
                 resolved_branch = fallback_branch
-            warnings.append(f"分支 {selected_branch} 不存在，已回退到 {resolved_branch or '默认 HEAD'}。")
+            warnings.append(
+                f"分支 {selected_branch} 不存在，已回退到 {resolved_branch or '默认 HEAD'}。"
+            )
         if role == "target" and not status_clean:
             warnings.append("目标仓库存在未提交修改，建议清理后再执行回移植。")
         if role == "target" and in_progress:
@@ -1893,7 +2126,8 @@ class BackportService:
             "operation_in_progress": in_progress,
             "writable": writable,
             "can_read": True,
-            "can_write": role != "target" or (writable and status_clean and not in_progress),
+            "can_write": role != "target"
+            or (writable and status_clean and not in_progress),
             "warnings": warnings,
             "cache_dir": str(self._repository_cache_dir()),
             "updated_at": time.time(),
@@ -1920,7 +2154,9 @@ class BackportService:
                 payload = json.loads(index_path.read_text(encoding="utf-8"))
                 raw_repositories = payload.get("repositories")
                 if isinstance(raw_repositories, list):
-                    repositories = [item for item in raw_repositories if isinstance(item, dict)]
+                    repositories = [
+                        item for item in raw_repositories if isinstance(item, dict)
+                    ]
             except json.JSONDecodeError:
                 repositories = []
         repo_key = repo_info.get("source_url") or repo_info.get("local_path")
@@ -1932,7 +2168,9 @@ class BackportService:
         ]
         next_repositories.insert(0, repo_info)
         index_path.write_text(
-            json.dumps({"repositories": next_repositories[:30]}, ensure_ascii=False, indent=2),
+            json.dumps(
+                {"repositories": next_repositories[:30]}, ensure_ascii=False, indent=2
+            ),
             encoding="utf-8",
         )
 
@@ -1943,7 +2181,10 @@ class BackportService:
         *,
         operation: str,
     ) -> str:
-        target_path = self._get_string(payload, "target_path", "targetPath") or config["target_path"]
+        target_path = (
+            self._get_string(payload, "target_path", "targetPath")
+            or config["target_path"]
+        )
         if target_path:
             return target_path
         raise DomainError(
@@ -2001,4 +2242,8 @@ class BackportService:
     def _build_assistant_text(parsed_result: dict[str, Any] | None) -> str:
         if parsed_result is None:
             return ""
-        return "<backport_result>\n" + json.dumps(parsed_result, ensure_ascii=False, indent=2) + "\n</backport_result>"
+        return (
+            "<backport_result>\n"
+            + json.dumps(parsed_result, ensure_ascii=False, indent=2)
+            + "\n</backport_result>"
+        )

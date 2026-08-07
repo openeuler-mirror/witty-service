@@ -51,8 +51,8 @@ dependencies = [
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",
-  "black>=24.0",
-  "flake8>=6.0",
+  "ruff>=0.15",
+  "bandit>=1.9",
   "mypy>=1.8",
   "python-semantic-release>=9.0",
 ]
@@ -114,29 +114,27 @@ ignore_missing_imports = false
 follow_imports = "silent"
 exclude = ["tests/*", "examples/*"]
 
-[tool.black]
+[tool.ruff]
 line-length = 88
-target-version = ["py311"]
-include = '\.pyi?$'
-exclude = '''
-/(
-    \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.nox
-  | \.tox
-  | \.venv
-  | _build
-  | buck-out
-  | build
-  | dist
-)/
-'''
+target-version = "py311"
 
-[tool.flake8]
-max-line-length = 88
-extend-ignore = ["E203", "W503"]
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+# E501/E203：与 formatter（line-length=88）及 flake8 兼容
+# RUF001/RUF002/RUF003：中文注释/文档字符串使用全角标点（如（）、：）被误判为歧义 unicode
+# B008/E402：存量治理项（B008×81、E402×13），修复后移除并收紧
+ignore = ["E501", "E203", "RUF001", "RUF002", "RUF003", "B008", "E402"]
+
+[tool.bandit]
+exclude_dirs = ["tests", "data"]
+# subprocess 是 agent 运行时的核心能力，所有调用均为显式 argv（shell=False），
+# 命令来源由调用方保证；集中跳过 B404/B603/B607 噪声规则。
+skips = ["B404", "B603", "B607"]
+
+[tool.codespell]
+skip = ".git,.venv,uv.lock,build,dist,*.egg-info,coverage.json,.mypy_cache,.pytest_cache,.ruff_cache,data,node_modules"
+quiet-level = 3
+ignore-words-list = "buildin,hel"
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
@@ -156,4 +154,6 @@ patch_tags = ["fix", "perf","refactor"]
 [dependency-groups]
 dev = [
     "pytest-cov>=7.1.0",
+    "ruff>=0.15",
+    "bandit>=1.9",
 ]

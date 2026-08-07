@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from witty_service.domain.errors import DomainError
@@ -13,7 +13,7 @@ SANDBOX_STOP_FAILED = "SANDBOX_STOP_FAILED"
 SANDBOX_NOT_SUPPORTED = "SANDBOX_NOT_SUPPORTED"
 
 
-class SandboxStatus(str, Enum):
+class SandboxStatus(StrEnum):
     starting = "starting"
     running = "running"
     stopped = "stopped"
@@ -35,18 +35,12 @@ class AdapterEndpoint:
 
     @property
     def ws_url(self) -> str:
-        if self.base_url.startswith("https"):
-            scheme = "wss"
-        else:
-            scheme = "ws"
+        scheme = "wss" if self.base_url.startswith("https") else "ws"
         host = self.base_url.split("://")[-1]
         return f"{scheme}://{host}/agent/sessions/{{session_id}}/ws"
 
     def ws_endpoint(self, session_id: str) -> str:
-        if self.base_url.startswith("https"):
-            scheme = "wss"
-        else:
-            scheme = "ws"
+        scheme = "wss" if self.base_url.startswith("https") else "ws"
         host = self.base_url.split("://")[-1]
         return f"{scheme}://{host}/agent/sessions/{session_id}/ws"
 
@@ -74,9 +68,7 @@ class SandboxBackend(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def endpoint(
-        self, handle: SandboxHandle | str, **kwargs: Any
-    ) -> AdapterEndpoint:
+    def endpoint(self, handle: SandboxHandle | str, **kwargs: Any) -> AdapterEndpoint:
         raise NotImplementedError
 
     @abstractmethod

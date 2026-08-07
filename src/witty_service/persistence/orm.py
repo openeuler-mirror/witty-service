@@ -1,40 +1,42 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
-    Enum as SQLEnum,
     ForeignKey,
     Index,
     Integer,
-    JSON,
     String,
     Text,
     UniqueConstraint,
+)
+from sqlalchemy import (
+    Enum as SQLEnum,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
     pass
 
 
-class SessionStatus(str, Enum):
+class SessionStatus(StrEnum):
     running = "running"
     idle = "idle"
     error = "error"
 
 
-class MessageStatus(str, Enum):
+class MessageStatus(StrEnum):
     generating = "generating"
     completed = "completed"
     error = "error"
@@ -53,9 +55,13 @@ class AgentORM(Base):
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     workspace_path: Mapped[str] = mapped_column(Text, nullable=False)
     idle_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
-    has_scheduled_tasks: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    has_scheduled_tasks: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     model_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    mcp_server_list: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    mcp_server_list: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
     last_active_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -81,7 +87,9 @@ class AgentRuntimeStateORM(Base):
         ForeignKey("agents.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    runtime_payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    runtime_payload_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
     adapter_base_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     adapter_ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -109,7 +117,9 @@ class SessionORM(Base):
         nullable=False,
         index=True,
     )
-    remote_runtime_agent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    remote_runtime_agent_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
     runtime_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     runtime_session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     runtime_session_key: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -161,7 +171,9 @@ class MessageORM(Base):
     )
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
     status: Mapped[MessageStatus] = mapped_column(
         SQLEnum(
             MessageStatus,
@@ -210,7 +222,9 @@ class MessageEventORM(Base):
         index=True,
     )
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
     seq_no: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -257,7 +271,7 @@ class ModelORM(Base):
 
 
 class SkillRepositoryORM(Base):
-    __tablename__ = 'skill_repo'
+    __tablename__ = "skill_repo"
 
     repo_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     repo_name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -266,7 +280,7 @@ class SkillRepositoryORM(Base):
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
     local_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     skill_discover_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default='init'
+        String(32), nullable=False, default="init"
     )
     skill_num: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
@@ -283,22 +297,24 @@ class SkillRepositoryORM(Base):
 
 
 class SkillORM(Base):
-    __tablename__ = 'skills'
+    __tablename__ = "skills"
     __table_args__ = (
-        UniqueConstraint('repo_id', 'relative_path', name='uq_skills_repo_relative_path'),
+        UniqueConstraint(
+            "repo_id", "relative_path", name="uq_skills_repo_relative_path"
+        ),
     )
 
     skill_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     repo_id: Mapped[str | None] = mapped_column(
         String(36),
-        ForeignKey('skill_repo.repo_id', ondelete='CASCADE'),
+        ForeignKey("skill_repo.repo_id", ondelete="CASCADE"),
         nullable=True,
         index=True,
     )
     skill_name: Mapped[str] = mapped_column(String(255), nullable=False)
     relative_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
-        'metadata',
+        "metadata",
         JSON,
         nullable=False,
         default=dict,
@@ -319,35 +335,35 @@ class SkillORM(Base):
 
 
 class AgentSkillORM(Base):
-    __tablename__ = 'agent_skills'
+    __tablename__ = "agent_skills"
     __table_args__ = (
         CheckConstraint(
             "source_type IN ('builtin', 'git', 'local', 'clawhub', 'wittyhub')",
-            name='ck_agent_skills_source_type',
+            name="ck_agent_skills_source_type",
         ),
         CheckConstraint(
             "(source_type IN ('git', 'local', 'clawhub') AND repo_id IS NOT NULL) OR "
             "(source_type IN ('builtin', 'wittyhub') AND repo_id IS NULL)",
-            name='ck_agent_skills_repo_id_by_source',
+            name="ck_agent_skills_repo_id_by_source",
         ),
     )
 
     agent_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey('agents.id', ondelete='CASCADE'),
+        ForeignKey("agents.id", ondelete="CASCADE"),
         primary_key=True,
     )
     skill_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False)
     repo_id: Mapped[str | None] = mapped_column(
         String(36),
-        ForeignKey('skill_repo.repo_id', ondelete='SET NULL'),
+        ForeignKey("skill_repo.repo_id", ondelete="SET NULL"),
         nullable=True,
     )
     skill_name: Mapped[str] = mapped_column(String(255), nullable=False)
     relative_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
-        'metadata',
+        "metadata",
         JSON,
         nullable=True,
         default=dict,
@@ -362,7 +378,7 @@ class AgentSkillORM(Base):
 
 
 class McpServerORM(Base):
-    __tablename__ = 'mcp_servers'
+    __tablename__ = "mcp_servers"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     mcp_server_name: Mapped[str] = mapped_column(String(255), nullable=False)

@@ -1,6 +1,6 @@
 <!-- Ideally you should open a PR when it is ready for review. Draft PRs will not be reviewed -->
 
-## Summary of PR
+# Summary of PR
 
 <!-- Summarize what the PR does -->
 

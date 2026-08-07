@@ -1,7 +1,12 @@
-import pytest
 from unittest.mock import AsyncMock, MagicMock
-from witty_service.adapter.websocket_client_pool import WebSocketClientPool, AdaptorEndpoint
-from witty_service.adapter.websocket_client import WebSocketClient
+
+import pytest
+
+from witty_service.adapter.websocket_client_pool import (
+    AdaptorEndpoint,
+    WebSocketClientPool,
+)
+
 
 def test_get_client_creates_new_client():
     pool = WebSocketClientPool()
@@ -12,10 +17,11 @@ def test_get_client_creates_new_client():
     )
     factory = MagicMock(return_value=MagicMock())
 
-    client = pool.get_client("agent-1", endpoint, factory)
+    pool.get_client("agent-1", endpoint, factory)
 
     factory.assert_called_once_with("ws://localhost:8080")
     assert ("agent-1", "session-1") in pool._clients
+
 
 def test_get_client_returns_same_client_for_same_agent():
     pool = WebSocketClientPool()
@@ -33,6 +39,7 @@ def test_get_client_returns_same_client_for_same_agent():
     assert client1 is client2
     assert factory.call_count == 1
 
+
 def test_remove_client():
     pool = WebSocketClientPool()
     endpoint = AdaptorEndpoint(
@@ -47,6 +54,7 @@ def test_remove_client():
     pool.remove_client("agent-1")
 
     assert "agent-1" not in pool._clients
+
 
 @pytest.mark.asyncio
 async def test_close_all_closes_all_clients():

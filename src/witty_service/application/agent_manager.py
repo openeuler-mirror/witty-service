@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
-import httpx
 import logging
 import time
-from datetime import datetime
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Protocol
+from typing import Any, ClassVar, Protocol
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+import httpx
 
 logger = logging.getLogger(__name__)
 
 _recovery_lock = asyncio.Lock()
+_background_tasks: set[asyncio.Task[Any]] = set()
 
 
 def _log_prefix(agent_id: str | None = None, session_id: str | None = None) -> str:
@@ -27,16 +30,23 @@ def _log_prefix(agent_id: str | None = None, session_id: str | None = None) -> s
         return f"[{', '.join(parts)}] "
     return ""
 
+
 from witty_service.adapter.http_client import AdaptorHttpClient
-from witty_service.adapter.websocket_client_pool import AdaptorEndpoint, WebSocketClientPool
-from witty_service.adapter.websocket_protocol import OutboundMessage
 from witty_service.adapter.websocket_client import WebSocketClient
+from witty_service.adapter.websocket_client_pool import (
+    AdaptorEndpoint,
+    WebSocketClientPool,
+)
+from witty_service.adapter.websocket_protocol import OutboundMessage
 from witty_service.domain.enums import AgentStatus, can_transition
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.orm import MessageStatus
 from witty_service.persistence.repositories import AgentRecord, SessionRecord
-from witty_service.sandbox.base import SandboxHandle, SandboxStatus, sandbox_not_found, SANDBOX_NOT_FOUND
+from witty_service.sandbox.base import (
+    SandboxHandle,
+)
 from witty_service.storage.runtime_backup import RuntimeBackupStore
+
 from .runtime_config import OpenclawConfig, OpencodeConfig, RuntimeConfig
 from .session_manager import SessionManager
 
@@ -114,14 +124,16 @@ class AgentRepository(Protocol):
         sandbox_id: str | None = None,
         has_scheduled_tasks: bool = False,
         model_id: str | None = None,
-        mcp_server_list: list[str] = [],
+        mcp_server_list: list[str] | None = None,
         last_active_at: Any | None = None,
     ) -> AgentRecord: ...
 
     def get_agent(self, agent_id: str) -> AgentRecord | None: ...
 
     def list_agents_needing_recovery(
-        self, sandbox_type: str | None = None, status_filter: list[AgentStatus] | None = None
+        self,
+        sandbox_type: str | None = None,
+        status_filter: list[AgentStatus] | None = None,
     ) -> list[AgentRecord]: ...
 
     def update_agent_status(
@@ -196,7 +208,9 @@ class AgentRepository(Protocol):
         self, stale_threshold_seconds: int
     ) -> list[Any]: ...
 
-    def find_last_assistant_message_for_session(self, session_id: str) -> Any | None: ...
+    def find_last_assistant_message_for_session(
+        self, session_id: str
+    ) -> Any | None: ...
 
     def update_session_runtime_identity(
         self,
@@ -292,24 +306,22 @@ class SessionStreamRegistry:
         self._terminated.discard(session_id)
         return gen
 
-    def push_event(self, session_id: str, event: dict[str, Any], generation: int) -> None:
+    def push_event(
+        self, session_id: str, event: dict[str, Any], generation: int
+    ) -> None:
         if self._generation.get(session_id) != generation:
             return  # Stale generation — ignore
         if session_id in self._buffers:
             self._buffers[session_id].append(event)
         for q in self._subscribers.get(session_id, []):
-            try:
+            with contextlib.suppress(asyncio.QueueFull):
                 q.put_nowait(event)
-            except asyncio.QueueFull:
-                pass
 
     def end_stream(self, session_id: str) -> None:
         self._terminated.add(session_id)
         for q in self._subscribers.get(session_id, []):
-            try:
+            with contextlib.suppress(asyncio.QueueFull):
                 q.put_nowait(None)  # sentinel
-            except asyncio.QueueFull:
-                pass
 
     def is_active(self, session_id: str) -> bool:
         return session_id in self._subscribers and session_id not in self._terminated
@@ -341,7 +353,7 @@ _stream_registry = SessionStreamRegistry()
 
 
 class AgentManager:
-    _RUNTIME_CONFIGS: dict[str, RuntimeConfig] = {
+    _RUNTIME_CONFIGS: ClassVar[dict[str, RuntimeConfig]] = {
         "opencode": OpencodeConfig(),
         "openclaw": OpenclawConfig(),
     }
@@ -387,9 +399,7 @@ class AgentManager:
             "compatibility": model.compatibility,
         }
 
-    def _get_runtime_gateway_port(
-        self, agent_id: str, adapter_type: str
-    ) -> int | None:
+    def _get_runtime_gateway_port(self, agent_id: str, adapter_type: str) -> int | None:
         """从 sandbox_state 提取 runtime 对应的网关端口."""
         sandbox_state = self._repository.get_sandbox_state(agent_id)
         if sandbox_state is None:
@@ -401,12 +411,14 @@ class AgentManager:
 
     def _find_free_port(self) -> int:
         import socket
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", 0))
             return int(sock.getsockname()[1])
 
     def _is_port_in_use(self, port: int) -> bool:
         import socket
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             try:
                 sock.bind(("127.0.0.1", port))
@@ -466,7 +478,7 @@ class AgentManager:
         client: httpx.Client | None = None
         try:
             client = httpx.Client(base_url=sandbox_state.adapter_base_url, timeout=30.0)
-            
+
             for attempt in range(10):
                 try:
                     response = client.get("/agent/skills")
@@ -482,7 +494,7 @@ class AgentManager:
                         time.sleep(1)
                         continue
                     raise
-                except httpx.ConnectError as exc:
+                except httpx.ConnectError:
                     if attempt < 9:
                         self._logger.debug(
                             "Skills endpoint connection failed (attempt %d/10): agent_id=%s",
@@ -492,7 +504,7 @@ class AgentManager:
                         time.sleep(1)
                         continue
                     raise
-            
+
             payload = response.json()
 
             if isinstance(payload, list):
@@ -539,7 +551,7 @@ class AgentManager:
             self._repository.upsert_installed_agent_skill(
                 agent_id=agent_id,
                 skill_id=skill_id,
-                source_type='builtin',
+                source_type="builtin",
                 repo_id=None,
                 skill_name=normalized_name,
                 relative_path=relative_path,
@@ -658,12 +670,18 @@ class AgentManager:
     def create_agent(self, request: AgentCreateRequest) -> AgentCreateResult:
         agent_id = str(uuid4())
         prefix = _log_prefix(agent_id=agent_id)
-        logger.info(f"{prefix}Creating agent: name=%s sandbox_type=%s", request.name, request.sandbox_type)
-        
+        logger.info(
+            f"{prefix}Creating agent: name=%s sandbox_type=%s",
+            request.name,
+            request.sandbox_type,
+        )
+
         profile_name = agent_id
         gateway_port = self._find_free_port()
-        logger.info(f"{prefix}Using profile: {profile_name}, gateway_port: {gateway_port}")
-        
+        logger.info(
+            f"{prefix}Using profile: {profile_name}, gateway_port: {gateway_port}"
+        )
+
         workspace_path = str(self._workspace_store.init_workspace(agent_id))
         logger.info(f"{prefix}Workspace initialized: path=%s", workspace_path)
         sandbox_handle: SandboxHandle | None = None
@@ -682,12 +700,18 @@ class AgentManager:
                 image_tag=runtime_config.adapter_type,
                 memory_limit=runtime_config.memory_limit,
             )
-            logger.info(f"{prefix}Sandbox started: sandbox_id=%s", sandbox_handle.sandbox_id)
+            logger.info(
+                f"{prefix}Sandbox started: sandbox_id=%s", sandbox_handle.sandbox_id
+            )
             adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
-            logger.info(f"{prefix}Adapter endpoint ready: url=%s", adapter_endpoint.base_url)
+            logger.info(
+                f"{prefix}Adapter endpoint ready: url=%s", adapter_endpoint.base_url
+            )
             sandbox_payload = self._sandbox_handle_payload(sandbox_handle)
             sandbox_payload["metadata"]["gateway_port"] = gateway_port
-            sandbox_payload["metadata"][runtime_config.port_metadata_key()] = gateway_port
+            sandbox_payload["metadata"][runtime_config.port_metadata_key()] = (
+                gateway_port
+            )
             self._repository.save_sandbox_state(
                 agent_id,
                 sandbox_payload_json=sandbox_payload,
@@ -700,13 +724,17 @@ class AgentManager:
             client: httpx.Client | None = None
             for i in range(30):
                 try:
-                    client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=5.0)
+                    client = httpx.Client(
+                        base_url=adapter_endpoint.base_url, timeout=5.0
+                    )
                     response = client.get("/ping")
                     if response.status_code == 200:
                         logger.info(f"{prefix}Sandbox ready after %d attempts", i + 1)
                         break
                 except Exception as exc:
-                    logger.debug(f"{prefix}Health check attempt %d failed: %s", i + 1, exc)
+                    logger.debug(
+                        f"{prefix}Health check attempt %d failed: %s", i + 1, exc
+                    )
                     pass
                 finally:
                     if client is not None:
@@ -732,10 +760,16 @@ class AgentManager:
                 logger.debug(f"{prefix}/agent/start payload: %s", start_payload)
                 start_response = client.post("/agent/start", json=start_payload)
                 start_response.raise_for_status()
-                logger.info(f"{prefix}/agent/start succeeded: status=%d", start_response.status_code)
+                logger.info(
+                    f"{prefix}/agent/start succeeded: status=%d",
+                    start_response.status_code,
+                )
                 started_agent = start_response.json()
                 remote_runtime_agent_id = started_agent.get("id")
-                if not isinstance(remote_runtime_agent_id, str) or not remote_runtime_agent_id:
+                if (
+                    not isinstance(remote_runtime_agent_id, str)
+                    or not remote_runtime_agent_id
+                ):
                     raise DomainError(
                         code=AGENT_CREATE_FAILED,
                         message="Started agent response missing runtime agent id.",
@@ -754,9 +788,14 @@ class AgentManager:
             logger.info(f"{prefix}Calling /agent/sessions...")
             client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=30.0)
             try:
-                response = client.post(f"/agents/{remote_runtime_agent_id}/sessions", json={})
+                response = client.post(
+                    f"/agents/{remote_runtime_agent_id}/sessions", json={}
+                )
                 response.raise_for_status()
-                logger.info(f"{prefix}/agent/sessions succeeded: status=%d", response.status_code)
+                logger.info(
+                    f"{prefix}/agent/sessions succeeded: status=%d",
+                    response.status_code,
+                )
                 session_data = response.json()
                 logger.debug(f"{prefix}Session data: %s", session_data)
             except httpx.HTTPStatusError as exc:
@@ -780,7 +819,10 @@ class AgentManager:
                 self.sync_installed_agent_skills(agent_id)
                 logger.info(f"{prefix}Builtin skills synced successfully")
             except Exception:
-                logger.warning(f"{prefix}Failed to sync builtin skills, continuing...", exc_info=True)
+                logger.warning(
+                    f"{prefix}Failed to sync builtin skills, continuing...",
+                    exc_info=True,
+                )
 
             return AgentCreateResult(
                 agent=replace(running_agent, workspace_path=workspace_path),
@@ -962,8 +1004,12 @@ class AgentManager:
                 )
                 runtime_config = self._get_runtime_config(agent.adapter_type)
                 sandbox_payload = sandbox_state.sandbox_payload_json
-                sandbox_payload.setdefault("metadata", {})["gateway_port"] = gateway_port
-                sandbox_payload.setdefault("metadata", {})[runtime_config.port_metadata_key()] = gateway_port
+                sandbox_payload.setdefault("metadata", {})["gateway_port"] = (
+                    gateway_port
+                )
+                sandbox_payload.setdefault("metadata", {})[
+                    runtime_config.port_metadata_key()
+                ] = gateway_port
                 self._repository.save_sandbox_state(
                     agent_id,
                     sandbox_payload_json=sandbox_payload,
@@ -976,17 +1022,28 @@ class AgentManager:
                 profile=agent.id,
                 gateway_port=gateway_port,
             )
-            logger.debug(f"{prefix}/agent/start payload for resume from paused: %s", start_payload)
+            logger.debug(
+                f"{prefix}/agent/start payload for resume from paused: %s",
+                start_payload,
+            )
             try:
-                started_agent = await adaptor_client.post("/agent/start", json=start_payload, timeout=180.0)
+                started_agent = await adaptor_client.post(
+                    "/agent/start", json=start_payload, timeout=180.0
+                )
                 remote_runtime_agent_id = started_agent.get("id")
-                if not isinstance(remote_runtime_agent_id, str) or not remote_runtime_agent_id:
+                if (
+                    not isinstance(remote_runtime_agent_id, str)
+                    or not remote_runtime_agent_id
+                ):
                     raise DomainError(
                         code=RUNTIME_START_FAILED,
                         message="Started agent response missing runtime agent id during resume from paused.",
                         details={"agent_id": agent_id},
                     )
-                logger.info(f"{prefix}/agent/start succeeded: runtime_agent_id=%s", remote_runtime_agent_id)
+                logger.info(
+                    f"{prefix}/agent/start succeeded: runtime_agent_id=%s",
+                    remote_runtime_agent_id,
+                )
             except httpx.HTTPStatusError as exc:
                 logger.error(f"{prefix}/agent/start failed with HTTP error: %s", exc)
                 raise DomainError(
@@ -1072,16 +1129,22 @@ class AgentManager:
         """从 running 状态恢复（用于服务重启时，子进程已停止但数据库状态仍为 running）"""
         agent = self._get_agent(agent_id)
         prefix = _log_prefix(agent_id=agent_id)
-        logger.info(f"{prefix}Resuming agent from running state (service restart recovery)")
+        logger.info(
+            f"{prefix}Resuming agent from running state (service restart recovery)"
+        )
 
         # 获取隔离参数
         profile_name = agent_id
-        saved_gateway_port = self._get_runtime_gateway_port(agent_id, agent.adapter_type)
-        
+        saved_gateway_port = self._get_runtime_gateway_port(
+            agent_id, agent.adapter_type
+        )
+
         # 检查端口是否被占用，如果被占用则分配新端口
         gateway_port = self._get_available_gateway_port(saved_gateway_port)
         if saved_gateway_port is not None and gateway_port != saved_gateway_port:
-            logger.warning(f"{prefix}Saved gateway port {saved_gateway_port} is in use, using new port {gateway_port}")
+            logger.warning(
+                f"{prefix}Saved gateway port {saved_gateway_port} is in use, using new port {gateway_port}"
+            )
 
         # 1. 重新启动沙箱（传递隔离参数）
         runtime_config = self._get_runtime_config(agent.adapter_type)
@@ -1093,8 +1156,12 @@ class AgentManager:
             memory_limit=runtime_config.memory_limit,
         )
         adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
-        logger.info(f"{prefix}Sandbox restarted: base_url=%s profile=%s gateway_port=%s",
-                    adapter_endpoint.base_url, profile_name, gateway_port)
+        logger.info(
+            f"{prefix}Sandbox restarted: base_url=%s profile=%s gateway_port=%s",
+            adapter_endpoint.base_url,
+            profile_name,
+            gateway_port,
+        )
 
         # 2. 保存沙箱状态（包含 gateway_port）
         sandbox_payload = self._sandbox_handle_payload(sandbox_handle)
@@ -1134,17 +1201,27 @@ class AgentManager:
                 profile=profile_name,
                 gateway_port=gateway_port,
             )
-            logger.debug(f"{prefix}/agent/start payload for recovery: %s", start_payload)
+            logger.debug(
+                f"{prefix}/agent/start payload for recovery: %s", start_payload
+            )
             try:
-                started_agent = await adaptor_client.post("/agent/start", json=start_payload, timeout=180.0)
+                started_agent = await adaptor_client.post(
+                    "/agent/start", json=start_payload, timeout=180.0
+                )
                 remote_runtime_agent_id = started_agent.get("id")
-                if not isinstance(remote_runtime_agent_id, str) or not remote_runtime_agent_id:
+                if (
+                    not isinstance(remote_runtime_agent_id, str)
+                    or not remote_runtime_agent_id
+                ):
                     raise DomainError(
                         code=RUNTIME_START_FAILED,
                         message="Started agent response missing runtime agent id during recovery.",
                         details={"agent_id": agent_id},
                     )
-                logger.info(f"{prefix}/agent/start succeeded: runtime_agent_id=%s", remote_runtime_agent_id)
+                logger.info(
+                    f"{prefix}/agent/start succeeded: runtime_agent_id=%s",
+                    remote_runtime_agent_id,
+                )
             except httpx.HTTPStatusError as exc:
                 logger.error(f"{prefix}/agent/start failed with HTTP error: %s", exc)
                 raise DomainError(
@@ -1217,14 +1294,18 @@ class AgentManager:
         content: str,
         adaptor_client: AdaptorHttpClient | None = None,
     ) -> dict[str, Any]:
-        self._logger.info(f"send_message called: agent_id={agent_id}, session_id={session_id}")
+        self._logger.info(
+            f"send_message called: agent_id={agent_id}, session_id={session_id}"
+        )
         agent = self._get_agent(agent_id)
 
         if adaptor_client is None:
             adaptor_client = self._get_adaptor_http_client(agent_id)
             client_closer = adaptor_client.close
         else:
-            client_closer: Callable[[], Any] = lambda: None
+
+            async def client_closer() -> None:
+                return None
 
         if agent.status is AgentStatus.paused:
             agent = await self.resume_agent(agent_id)
@@ -1235,7 +1316,9 @@ class AgentManager:
                 details={"agent_id": agent_id, "status": agent.status.value},
             )
 
-        self._logger.info(f"Agent status OK: {agent.status}, preparing WebSocket client")
+        self._logger.info(
+            f"Agent status OK: {agent.status}, preparing WebSocket client"
+        )
 
         self._repository.create_message(
             agent_id=agent_id,
@@ -1246,7 +1329,9 @@ class AgentManager:
         self._auto_generate_session_title(agent_id, session_id)
 
         ws_content = self._maybe_prepend_interruption_prefix(session_id, content)
-        ws_client = await self._prepare_ws_message_client(agent_id, session_id, ws_content)
+        ws_client = await self._prepare_ws_message_client(
+            agent_id, session_id, ws_content
+        )
 
         self._logger.info(
             "WebSocket client ready: ws_client_id=%s is_connected=%s agent_id=%s session_id=%s",
@@ -1277,7 +1362,9 @@ class AgentManager:
                 if event_dict["type"] in {"client.error", "stream.error"}:
                     error_payload = event_dict.get("payload", {})
                     error_code = error_payload.get("code", "UNKNOWN_ERROR")
-                    error_message = error_payload.get("message", "Unknown error from adaptor")
+                    error_message = error_payload.get(
+                        "message", "Unknown error from adaptor"
+                    )
                     raise DomainError(
                         code=error_code,
                         message=error_message,
@@ -1291,7 +1378,9 @@ class AgentManager:
                         event_dict["type"],
                     )
                     continue
-                self._logger.info(f"received event: {json.dumps(event_dict, indent=2, ensure_ascii=False)}")
+                self._logger.info(
+                    f"received event: {json.dumps(event_dict, indent=2, ensure_ascii=False)}"
+                )
                 events.append(event_dict)
                 if event_dict["type"] in {"message.completed", "turn.completed"}:
                     has_completed = True
@@ -1354,7 +1443,9 @@ class AgentManager:
         self._auto_generate_session_title(agent_id, session_id)
 
         ws_content = self._maybe_prepend_interruption_prefix(session_id, content)
-        ws_client = await self._prepare_ws_message_client(agent_id, session_id, ws_content)
+        ws_client = await self._prepare_ws_message_client(
+            agent_id, session_id, ws_content
+        )
 
         # Start a new stream generation
         stream_gen = _stream_registry.start_stream(session_id)
@@ -1392,10 +1483,15 @@ class AgentManager:
                     if event_dict["type"] in {"client.error", "stream.error"}:
                         error_payload = event_dict.get("payload", {})
                         error_code = error_payload.get("code", "UNKNOWN_ERROR")
-                        error_message = error_payload.get("message", "Unknown error from adaptor")
+                        error_message = error_payload.get(
+                            "message", "Unknown error from adaptor"
+                        )
                         self._logger.error(
                             "Stream error in background consumer: agent_id=%s session_id=%s code=%s message=%s",
-                            agent_id, session_id, error_code, error_message,
+                            agent_id,
+                            session_id,
+                            error_code,
+                            error_message,
                         )
                         _stream_registry.push_event(session_id, event_dict, stream_gen)
                         _stream_registry.end_stream(session_id)
@@ -1404,7 +1500,9 @@ class AgentManager:
                     if self._should_filter_session_event(event_dict):
                         self._logger.info(
                             "filtered session state event from stream: agent_id=%s session_id=%s event_type=%s",
-                            agent_id, session_id, event_dict["type"],
+                            agent_id,
+                            session_id,
+                            event_dict["type"],
                         )
                         continue
 
@@ -1419,7 +1517,11 @@ class AgentManager:
 
                     seq_no += 1
                     event_type = event_dict["type"]
-                    payload = event_dict.get("payload") if isinstance(event_dict.get("payload"), dict) else {}
+                    payload = (
+                        event_dict.get("payload")
+                        if isinstance(event_dict.get("payload"), dict)
+                        else {}
+                    )
                     try:
                         self._repository.create_message_event_with_retry(
                             agent_id=agent_id,
@@ -1432,7 +1534,10 @@ class AgentManager:
                     except Exception:
                         self._logger.warning(
                             "Failed to persist event: agent_id=%s session_id=%s event_type=%s",
-                            agent_id, session_id, event_type, exc_info=True,
+                            agent_id,
+                            session_id,
+                            event_type,
+                            exc_info=True,
                         )
 
                     if event_type == "message.delta":
@@ -1452,12 +1557,17 @@ class AgentManager:
                     ):
                         if assistant_text:
                             try:
-                                self._repository.update_message_content(assistant_msg_id, assistant_text)
-                                self._repository.update_message_stream_at(assistant_msg_id)
+                                self._repository.update_message_content(
+                                    assistant_msg_id, assistant_text
+                                )
+                                self._repository.update_message_stream_at(
+                                    assistant_msg_id
+                                )
                             except Exception:
                                 self._logger.warning(
                                     "Failed to update message content checkpoint: msg_id=%s",
-                                    assistant_msg_id, exc_info=True,
+                                    assistant_msg_id,
+                                    exc_info=True,
                                 )
                         tokens_since_checkpoint = 0
                         last_checkpoint_time = now
@@ -1466,23 +1576,29 @@ class AgentManager:
                         terminal_received = True
                         if assistant_msg_id:
                             try:
-                                self._repository.update_message_status(assistant_msg_id, MessageStatus.completed)
+                                self._repository.update_message_status(
+                                    assistant_msg_id, MessageStatus.completed
+                                )
                                 self._logger.info(
-                                "update_message_status in ws: assistant_msg_id=%s state=%s",
-                                assistant_msg_id,
-                                MessageStatus.completed,
+                                    "update_message_status in ws: assistant_msg_id=%s state=%s",
+                                    assistant_msg_id,
+                                    MessageStatus.completed,
                                 )
                             except Exception:
                                 self._logger.warning(
                                     "Failed to update message status: msg_id=%s",
-                                    assistant_msg_id, exc_info=True,
+                                    assistant_msg_id,
+                                    exc_info=True,
                                 )
                             try:
-                                self._repository.compact_message_delta_events(assistant_msg_id)
+                                self._repository.compact_message_delta_events(
+                                    assistant_msg_id
+                                )
                             except Exception:
                                 self._logger.warning(
                                     "Failed to compact delta events: msg_id=%s",
-                                    assistant_msg_id, exc_info=True,
+                                    assistant_msg_id,
+                                    exc_info=True,
                                 )
 
                     _stream_registry.push_event(session_id, event_dict, stream_gen)
@@ -1492,15 +1608,21 @@ class AgentManager:
             except Exception:
                 self._logger.warning(
                     "Background WS consumer error: agent_id=%s session_id=%s",
-                    agent_id, session_id, exc_info=True,
+                    agent_id,
+                    session_id,
+                    exc_info=True,
                 )
-                _stream_registry.push_event(session_id, {
-                    "type": "stream.error",
-                    "payload": {
-                        "code": "CONSUMER_ERROR",
-                        "message": "Background WS consumer encountered an error",
+                _stream_registry.push_event(
+                    session_id,
+                    {
+                        "type": "stream.error",
+                        "payload": {
+                            "code": "CONSUMER_ERROR",
+                            "message": "Background WS consumer encountered an error",
+                        },
                     },
-                }, stream_gen)
+                    stream_gen,
+                )
             finally:
                 _stream_registry.end_stream(session_id)
                 _stream_registry.cleanup(session_id)
@@ -1511,6 +1633,8 @@ class AgentManager:
                 )
 
         bg_task = asyncio.create_task(consume_ws())
+        _background_tasks.add(bg_task)
+        bg_task.add_done_callback(_background_tasks.discard)
 
         try:
             while True:
@@ -1524,21 +1648,24 @@ class AgentManager:
         except GeneratorExit:
             self._logger.info(
                 "SSE client disconnected: agent_id=%s session_id=%s — background consumer continues",
-                agent_id, session_id,
+                agent_id,
+                session_id,
             )
             _stream_registry.unsubscribe(session_id, queue)
             raise
         except asyncio.CancelledError:
             self._logger.info(
                 "SSE stream cancelled: agent_id=%s session_id=%s — background consumer continues",
-                agent_id, session_id,
+                agent_id,
+                session_id,
             )
             _stream_registry.unsubscribe(session_id, queue)
             raise
         except Exception:
             self._logger.exception(
                 "SSE stream error: agent_id=%s session_id=%s",
-                agent_id, session_id,
+                agent_id,
+                session_id,
             )
             _stream_registry.unsubscribe(session_id, queue)
             raise
@@ -1553,7 +1680,8 @@ class AgentManager:
 
         if not _stream_registry.is_active(session_id):
             self._logger.info(
-                "reconnect_stream: no active stream for session_id=%s", session_id,
+                "reconnect_stream: no active stream for session_id=%s",
+                session_id,
             )
             return
 
@@ -1561,7 +1689,8 @@ class AgentManager:
         buffered = _stream_registry.get_buffered_events(session_id)
         self._logger.info(
             "reconnect_stream: replaying %d buffered events for session_id=%s",
-            len(buffered), session_id,
+            len(buffered),
+            session_id,
         )
         for event_dict in buffered:
             yield {
@@ -1613,16 +1742,20 @@ class AgentManager:
     ) -> None:
         """通过现有 WS 连接向 agent server 发送 question.reply 消息。"""
         ws_client = self._get_active_ws_client(agent_id, session_id)
-        await ws_client.send({
-            "type": "question.reply",
-            "payload": {
-                "request_id": request_id,
-                "answers": answers,
-            },
-        })
+        await ws_client.send(
+            {
+                "type": "question.reply",
+                "payload": {
+                    "request_id": request_id,
+                    "answers": answers,
+                },
+            }
+        )
         self._logger.info(
             "answer_question sent: agent_id=%s session_id=%s request_id=%s",
-            agent_id, session_id, request_id,
+            agent_id,
+            session_id,
+            request_id,
         )
 
     async def reject_question(
@@ -1634,20 +1767,22 @@ class AgentManager:
     ) -> None:
         """通过现有 WS 连接向 agent server 发送 question.reject 消息。"""
         ws_client = self._get_active_ws_client(agent_id, session_id)
-        await ws_client.send({
-            "type": "question.reject",
-            "payload": {
-                "request_id": request_id,
-            },
-        })
+        await ws_client.send(
+            {
+                "type": "question.reject",
+                "payload": {
+                    "request_id": request_id,
+                },
+            }
+        )
         self._logger.info(
             "reject_question sent: agent_id=%s session_id=%s request_id=%s",
-            agent_id, session_id, request_id,
+            agent_id,
+            session_id,
+            request_id,
         )
 
-    def _get_active_ws_client(
-        self, agent_id: str, session_id: str
-    ) -> WebSocketClient:
+    def _get_active_ws_client(self, agent_id: str, session_id: str) -> WebSocketClient:
         """获取当前 session 的活动 WS 客户端。"""
         endpoint = self._get_adaptor_endpoint(agent_id, session_id)
         ws_client = self._ws_client_pool.get_client(
@@ -1733,9 +1868,11 @@ class AgentManager:
             session = self._session_manager.get_session(agent_id, session_id)
             resolved_runtime_agent_id = session.remote_runtime_agent_id
             if resolved_runtime_agent_id is None:
-                resolved_runtime_agent_id = await self._session_manager.resolve_runtime_agent_id(
-                    adaptor_client=adaptor_client,
-                    runtime_agent_id=runtime_agent_id,
+                resolved_runtime_agent_id = (
+                    await self._session_manager.resolve_runtime_agent_id(
+                        adaptor_client=adaptor_client,
+                        runtime_agent_id=runtime_agent_id,
+                    )
                 )
             return await adaptor_client.get(
                 f"/agents/{resolved_runtime_agent_id}/sessions/{session_id}/events",
@@ -1780,7 +1917,9 @@ class AgentManager:
         last_msg = self._repository.find_last_assistant_message_for_session(session_id)
         if last_msg is not None:
             try:
-                self._repository.update_message_status(last_msg.id, MessageStatus.interrupted)
+                self._repository.update_message_status(
+                    last_msg.id, MessageStatus.interrupted
+                )
                 self._logger.info(
                     "update_message_status in abort: msg_id=%s state=%s",
                     last_msg.id,
@@ -1789,7 +1928,8 @@ class AgentManager:
             except Exception:
                 self._logger.warning(
                     "Failed to mark message interrupted after abort: msg_id=%s",
-                    last_msg.id, exc_info=True,
+                    last_msg.id,
+                    exc_info=True,
                 )
 
     async def delete_agent(self, agent_id: str) -> None:
@@ -1811,14 +1951,18 @@ class AgentManager:
             try:
                 await self._stop_runtime(agent_id)
             except Exception as exc:
-                cleanup_errors.append({"stage": "runtime_stop", "error": self._error_message(exc)})
+                cleanup_errors.append(
+                    {"stage": "runtime_stop", "error": self._error_message(exc)}
+                )
 
         # 3. 清理沙箱
         if sandbox_state is not None:
             try:
                 self._cleanup_sandbox(agent_id)
             except Exception as exc:
-                cleanup_errors.append({"stage": "sandbox_cleanup", "error": self._error_message(exc)})
+                cleanup_errors.append(
+                    {"stage": "sandbox_cleanup", "error": self._error_message(exc)}
+                )
 
         # 4. 保留 workspace 目录（不清除）
 
@@ -1826,12 +1970,14 @@ class AgentManager:
         agent_delete_error = None
         try:
             self._repository.update_agent_status(agent_id, AgentStatus.deleted)
-            logger.info(f"[AgentManager] Agent status updated to deleted in database")
+            logger.info("[AgentManager] Agent status updated to deleted in database")
             # 彻底删除 agent 记录（包括关联的 session、message、skill 等），放在最后执行，确保前面步骤都完成了才删除记录
             self._repository.delete_agent(agent_id)
         except Exception as exc:
             agent_delete_error = exc
-            cleanup_errors.append({"stage": "agent_status", "error": self._error_message(exc)})
+            cleanup_errors.append(
+                {"stage": "agent_status", "error": self._error_message(exc)}
+            )
             logger.error(f"[AgentManager] Failed to update agent status: {exc}")
 
         # 对于删除操作，如果沙箱进程已不存在（"Sandbox handle was not found"），
@@ -1839,8 +1985,12 @@ class AgentManager:
         if agent_delete_error is None and len(cleanup_errors) > 0:
             # 检查是否只有 sandbox_cleanup 错误且错误信息包含 "Sandbox handle was not found"
             non_sandbox_handle_errors = [
-                err for err in cleanup_errors
-                if not (err["stage"] == "sandbox_cleanup" and "Sandbox handle was not found" in err["error"])
+                err
+                for err in cleanup_errors
+                if not (
+                    err["stage"] == "sandbox_cleanup"
+                    and "Sandbox handle was not found" in err["error"]
+                )
             ]
             if len(non_sandbox_handle_errors) == 0:
                 # 只有 "Sandbox handle was not found" 错误，允许删除成功
@@ -1882,7 +2032,10 @@ class AgentManager:
 
     def _maybe_prepend_interruption_prefix(self, session_id: str, content: str) -> str:
         if self._repository.get_last_assistant_status(session_id) == "interrupted":
-            self._logger.info("Last assistant message was interrupted, prepending interruption prefix: session_id=%s", session_id)
+            self._logger.info(
+                "Last assistant message was interrupted, prepending interruption prefix: session_id=%s",
+                session_id,
+            )
             return INTERRUPTION_PREFIX + content
         return content
 
@@ -1927,7 +2080,9 @@ class AgentManager:
         content: str,
     ) -> WebSocketClient:
         endpoint = self._get_adaptor_endpoint(agent_id, session_id)
-        self._logger.info(f"_prepare_ws: agent_id={agent_id}, session_id={session_id}, endpoint={endpoint}")
+        self._logger.info(
+            f"_prepare_ws: agent_id={agent_id}, session_id={session_id}, endpoint={endpoint}"
+        )
         ws_client = self._ws_client_pool.get_client(
             agent_id=agent_id,
             endpoint=endpoint,
@@ -1943,9 +2098,11 @@ class AgentManager:
         )
 
         if not ws_client.is_connected:
-            self._logger.info(f"_prepare_ws: connecting to {endpoint.base_url}/sessions/{session_id}/ws")
+            self._logger.info(
+                f"_prepare_ws: connecting to {endpoint.base_url}/sessions/{session_id}/ws"
+            )
             await ws_client.connect(session_id)
-            self._logger.info(f"_prepare_ws: connected successfully")
+            self._logger.info("_prepare_ws: connected successfully")
 
         msg: OutboundMessage = {
             "type": "message.create",
@@ -1953,7 +2110,7 @@ class AgentManager:
         }
         self._logger.info(f"_prepare_ws: sending message: {msg}")
         await ws_client.send(msg)
-        self._logger.info(f"_prepare_ws: message sent")
+        self._logger.info("_prepare_ws: message sent")
         return ws_client
 
     async def _close_ws_message_client(
@@ -2171,6 +2328,7 @@ class AgentManager:
             return agent
 
         import asyncio
+
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
@@ -2185,7 +2343,9 @@ class AgentManager:
 
         return agent
 
-    def _backup_runtime(self, agent_id: str, runtime_type: str = "openclaw") -> Path | None:
+    def _backup_runtime(
+        self, agent_id: str, runtime_type: str = "openclaw"
+    ) -> Path | None:
         """备份运行时文件"""
         backup_store = RuntimeBackupStore()
         try:
@@ -2203,10 +2363,9 @@ class AgentManager:
         """停止 witty-agent-server 运行时"""
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
-            try:
+            # 可能已经停止
+            with contextlib.suppress(httpx.HTTPStatusError):
                 await adaptor_client.post("/agent/stop", json={})
-            except httpx.HTTPStatusError:
-                pass  # 可能已经停止
         finally:
             await adaptor_client.close()
 
@@ -2339,7 +2498,9 @@ class AgentManager:
         nested_error = payload.get("error")
         if isinstance(nested_error, dict):
             return nested_error
-        if isinstance(payload.get("code"), str) and isinstance(payload.get("message"), str):
+        if isinstance(payload.get("code"), str) and isinstance(
+            payload.get("message"), str
+        ):
             return payload
         return None
 
