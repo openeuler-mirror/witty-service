@@ -4,14 +4,16 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import StreamingResponse
 
+from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.api.auth import require_bearer_auth
 from witty_service.api.schemas import (
     AgentResponse,
@@ -23,26 +25,33 @@ from witty_service.api.schemas import (
     CreateAgentRequest,
     InstallAgentSkillRequest,
     McpServerResponse,
+    MessageEventsResponse,
     QuestionRejectRequest,
     QuestionReplyRequest,
-    UninstallAgentSkillRequest,
-    MessageEventsResponse,
     SendMessageRequest,
     SessionEventsResponse,
     SessionResponse,
+    UninstallAgentSkillRequest,
     UpdateConversationRequest,
 )
 from witty_service.api.services import ServiceContainer
-from witty_service.adapter.http_client import AdaptorHttpClient
-from witty_service.application.agent_manager import AGENT_NOT_FOUND, SKILL_NOT_FOUND, \
-SKILL_INSTALL_RECORD_FAILED, SKILL_UNINSTALL_RECORD_FAILED, SKILL_SYNC_FAILED, AgentCreateRequest
+from witty_service.application.agent_manager import (
+    AGENT_NOT_FOUND,
+    SKILL_INSTALL_RECORD_FAILED,
+    SKILL_NOT_FOUND,
+    SKILL_SYNC_FAILED,
+    SKILL_UNINSTALL_RECORD_FAILED,
+    AgentCreateRequest,
+)
 from witty_service.application.agent_template_service import AgentTemplateService
 from witty_service.application.skill_manager import SkillManager
 from witty_service.domain.enums import AgentStatus
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import AgentRecord
 
-router = APIRouter(prefix="/agents", tags=["agents"], dependencies=[Depends(require_bearer_auth)])
+router = APIRouter(
+    prefix="/agents", tags=["agents"], dependencies=[Depends(require_bearer_auth)]
+)
 logger = logging.getLogger(__name__)
 
 
@@ -110,7 +119,9 @@ def _log_install_dispatch(
         "skill_name": skill_name,
         "skill_id": skill_id,
         "source_type": source_type,
-        "result_keys": sorted(install_result.keys()) if isinstance(install_result, dict) else [],
+        "result_keys": sorted(install_result.keys())
+        if isinstance(install_result, dict)
+        else [],
     }
     if extra:
         log_fields.update(extra)
@@ -130,13 +141,19 @@ def _with_runtime_relative_path(
 
 
 def _build_wittyhub_skill_id(*, skill_source: str, skill_name: str) -> str:
-    return str(uuid5(NAMESPACE_URL, f"wittyhub:{skill_source.strip()}:{skill_name.strip()}"))
+    return str(
+        uuid5(NAMESPACE_URL, f"wittyhub:{skill_source.strip()}:{skill_name.strip()}")
+    )
 
 
-def _build_wittyhub_install_context(payload: InstallAgentSkillRequest) -> _InstallSkillContext:
+def _build_wittyhub_install_context(
+    payload: InstallAgentSkillRequest,
+) -> _InstallSkillContext:
     skill_name = payload.skill_name.strip()
     skill_source = (payload.skill_source or "").strip()
-    skill_id = _build_wittyhub_skill_id(skill_source=skill_source, skill_name=skill_name)
+    skill_id = _build_wittyhub_skill_id(
+        skill_source=skill_source, skill_name=skill_name
+    )
 
     return _InstallSkillContext(
         skill_id=skill_id,
@@ -207,12 +224,18 @@ def create_agent(
     if payload.sandbox_type == "local_process":
         sandbox_state = services.repository.get_sandbox_state(result.agent.id)
         if sandbox_state is not None:
-            process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
+            process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get(
+                "port"
+            )
 
-    return _to_agent_response(result.agent, default_session_id=None, process_port=process_port)
+    return _to_agent_response(
+        result.agent, default_session_id=None, process_port=process_port
+    )
 
 
-@router.post("/agenthub", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/agenthub", response_model=AgentResponse, status_code=status.HTTP_201_CREATED
+)
 def create_agent_from_agenthub(
     payload: CreateAgentHubRequest,
     services: ServiceContainer = Depends(get_services),
@@ -238,12 +261,18 @@ def create_agent_from_agenthub(
     if payload.sandbox_type == "local_process":
         sandbox_state = services.repository.get_sandbox_state(result.agent.id)
         if sandbox_state is not None:
-            process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
+            process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get(
+                "port"
+            )
 
-    return _to_agent_response(result.agent, default_session_id=None, process_port=process_port)
+    return _to_agent_response(
+        result.agent, default_session_id=None, process_port=process_port
+    )
 
 
-@router.get("", response_model=list[AgentResponse] | list[AgentWithConversationsResponse])
+@router.get(
+    "", response_model=list[AgentResponse] | list[AgentWithConversationsResponse]
+)
 def list_agents(
     include_conversations: bool = False,
     services: ServiceContainer = Depends(get_services),
@@ -260,10 +289,15 @@ def list_agents(
             agent = manager._check_and_update_agent_status_if_needed(item["id"])
 
             process_port: int | None = None
-            if agent.sandbox_type == "local_process" and agent.status != AgentStatus.error:
+            if (
+                agent.sandbox_type == "local_process"
+                and agent.status != AgentStatus.error
+            ):
                 sandbox_state = services.repository.get_sandbox_state(agent.id)
                 if sandbox_state is not None:
-                    process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
+                    process_port = sandbox_state.sandbox_payload_json.get(
+                        "metadata", {}
+                    ).get("port")
 
             sessions = services.session_manager.list_sessions(agent.id)
             default_session_id = sessions[0].id if sessions else None
@@ -276,7 +310,9 @@ def list_agents(
             result.append(
                 AgentWithConversationsResponse(
                     **base.model_dump(),
-                    conversations=[ConversationSummaryResponse(**c) for c in item["conversations"]],
+                    conversations=[
+                        ConversationSummaryResponse(**c) for c in item["conversations"]
+                    ],
                 )
             )
         return result
@@ -297,7 +333,9 @@ def list_agents(
         if agent.sandbox_type == "local_process" and agent.status != AgentStatus.error:
             sandbox_state = services.repository.get_sandbox_state(agent.id)
             if sandbox_state is not None:
-                process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
+                process_port = sandbox_state.sandbox_payload_json.get(
+                    "metadata", {}
+                ).get("port")
 
         result.append(
             _to_agent_response(
@@ -310,7 +348,9 @@ def list_agents(
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
-def get_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> AgentResponse:
+def get_agent(
+    agent_id: str, services: ServiceContainer = Depends(get_services)
+) -> AgentResponse:
     """获取单个 agent，并补充默认会话与 runtime skills 信息。"""
     manager = services.get_agent_manager_for_agent(agent_id)
 
@@ -321,7 +361,9 @@ def get_agent(agent_id: str, services: ServiceContainer = Depends(get_services))
         # 沙箱进程已停止
         sessions = services.session_manager.list_sessions(agent_id)
         default_session_id = sessions[0].id if sessions else None
-        return _to_agent_response(agent, default_session_id=default_session_id, process_port=None)
+        return _to_agent_response(
+            agent, default_session_id=default_session_id, process_port=None
+        )
 
     if agent is None:
         raise DomainError(
@@ -337,19 +379,32 @@ def get_agent(agent_id: str, services: ServiceContainer = Depends(get_services))
     if agent.sandbox_type == "local_process":
         sandbox_state = services.repository.get_sandbox_state(agent_id)
         if sandbox_state is not None:
-            process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get("port")
+            process_port = sandbox_state.sandbox_payload_json.get("metadata", {}).get(
+                "port"
+            )
 
-    return _to_agent_response(agent, default_session_id=default_session_id, process_port=process_port)
+    return _to_agent_response(
+        agent, default_session_id=default_session_id, process_port=process_port
+    )
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> Response:
+async def delete_agent(
+    agent_id: str, services: ServiceContainer = Depends(get_services)
+) -> Response:
     manager = services.get_agent_manager_for_agent(agent_id)
+    try:
+        # 先清理调度器中的定时任务 job（DB 级联删除前），避免内存 job 在 agent 删除后空转。
+        await services.scheduled_task_service.handle_agent_deleted(agent_id)
+    except Exception:
+        logger.exception("Failed to clean up scheduled tasks for agent: %s", agent_id)
     await manager.delete_agent(agent_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.get("/{agent_id}/conversations", response_model=list[ConversationSummaryResponse])
+@router.get(
+    "/{agent_id}/conversations", response_model=list[ConversationSummaryResponse]
+)
 def list_conversations(
     agent_id: str,
     services: ServiceContainer = Depends(get_services),
@@ -358,7 +413,9 @@ def list_conversations(
     return [ConversationSummaryResponse(**s) for s in summaries]
 
 
-@router.get("/{agent_id}/conversations/{session_id}", response_model=ConversationDetailResponse)
+@router.get(
+    "/{agent_id}/conversations/{session_id}", response_model=ConversationDetailResponse
+)
 def get_conversation(
     agent_id: str,
     session_id: str,
@@ -408,7 +465,9 @@ def update_conversation(
 
 
 @router.post("/{agent_id}/pause", response_model=AgentResponse)
-def pause_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> AgentResponse:
+def pause_agent(
+    agent_id: str, services: ServiceContainer = Depends(get_services)
+) -> AgentResponse:
     """暂停 agent。"""
     manager = services.get_agent_manager_for_agent(agent_id)
     agent = manager.pause_agent(agent_id)
@@ -418,7 +477,9 @@ def pause_agent(agent_id: str, services: ServiceContainer = Depends(get_services
 
 
 @router.post("/{agent_id}/resume", response_model=AgentResponse)
-async def resume_agent(agent_id: str, services: ServiceContainer = Depends(get_services)) -> AgentResponse:
+async def resume_agent(
+    agent_id: str, services: ServiceContainer = Depends(get_services)
+) -> AgentResponse:
     """恢复 agent。"""
     manager = services.get_agent_manager_for_agent(agent_id)
     agent = await manager.resume_agent(agent_id)
@@ -461,7 +522,9 @@ async def get_session(
     services: ServiceContainer = Depends(get_services),
 ) -> SessionResponse:
     manager = services.get_agent_manager_for_agent(agent_id)
-    session = await manager.get_session(agent_id, session_id, runtime_agent_id=runtime_agent_id)
+    session = await manager.get_session(
+        agent_id, session_id, runtime_agent_id=runtime_agent_id
+    )
     return SessionResponse.model_validate(session)
 
 
@@ -485,7 +548,9 @@ async def get_session_events(
     return SessionEventsResponse.model_validate(result)
 
 
-@router.delete("/{agent_id}/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{agent_id}/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT
+)
 async def delete_session(
     agent_id: str,
     session_id: str,
@@ -493,7 +558,9 @@ async def delete_session(
     services: ServiceContainer = Depends(get_services),
 ) -> Response:
     manager = services.get_agent_manager_for_agent(agent_id)
-    await manager.delete_session(agent_id, session_id, runtime_agent_id=runtime_agent_id)
+    await manager.delete_session(
+        agent_id, session_id, runtime_agent_id=runtime_agent_id
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -508,7 +575,9 @@ async def abort_session(
     services: ServiceContainer = Depends(get_services),
 ) -> dict[str, object]:
     manager = services.get_agent_manager_for_agent(agent_id)
-    return await manager.abort_session(agent_id, session_id, runtime_agent_id=runtime_agent_id)
+    return await manager.abort_session(
+        agent_id, session_id, runtime_agent_id=runtime_agent_id
+    )
 
 
 @router.post(
@@ -563,7 +632,9 @@ async def send_message(
     services: ServiceContainer = Depends(get_services),
 ) -> MessageEventsResponse:
     manager = services.get_agent_manager_for_agent(agent_id)
-    result = await manager.send_message(agent_id=agent_id, session_id=session_id, content=payload.content)
+    result = await manager.send_message(
+        agent_id=agent_id, session_id=session_id, content=payload.content
+    )
     return MessageEventsResponse.model_validate(result)
 
 
@@ -603,8 +674,11 @@ async def reconnect_message_stream(
     return await _build_sse_streaming_response(event_stream)
 
 
-
-@router.post("/{agent_id}/skills/", response_model=AgentSkillResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/{agent_id}/skills/",
+    response_model=AgentSkillResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def install_agent_skill(
     agent_id: str,
     payload: InstallAgentSkillRequest,
@@ -697,7 +771,9 @@ def list_installed_agent_skills(
     return [_to_agent_skill_response(item) for item in records]
 
 
-@router.post("/{agent_id}/skills/installed/sync", response_model=list[AgentSkillResponse])
+@router.post(
+    "/{agent_id}/skills/installed/sync", response_model=list[AgentSkillResponse]
+)
 def sync_installed_agent_skills(
     agent_id: str,
     services: ServiceContainer = Depends(get_services),
@@ -732,7 +808,7 @@ async def uninstall_agent_skill(
             code=SKILL_NOT_FOUND,
             message="Installed skill was not found.",
             details={"agent_id": agent_id, "skill_id": payload.skill_id},
-    )
+        )
 
     skill_manager = SkillManager(repository=services.repository)
     skill_source_path = None
@@ -740,8 +816,12 @@ async def uninstall_agent_skill(
         skill = skill_manager.get_skill_by_skill_id(payload.skill_id)
         if skill is not None:
             skill_source_path = skill_manager.get_skill_source_path(skill)
-        elif installed_record.relative_path and os.path.isabs(installed_record.relative_path):
-            skill_source_path = str(Path(installed_record.relative_path).expanduser().parent)
+        elif installed_record.relative_path and os.path.isabs(
+            installed_record.relative_path
+        ):
+            skill_source_path = str(
+                Path(installed_record.relative_path).expanduser().parent
+            )
 
     agent_manager = services.get_agent_manager_for_agent(agent_id)
     uninstall_kwargs: dict[str, Any] = {
@@ -816,7 +896,9 @@ def _to_agent_skill_response(item: Any) -> AgentSkillResponse:
     )
 
 
-async def _build_sse_streaming_response(event_stream: AsyncIterator[dict[str, Any]]) -> StreamingResponse:
+async def _build_sse_streaming_response(
+    event_stream: AsyncIterator[dict[str, Any]],
+) -> StreamingResponse:
     first_event = await _prefetch_first_event(event_stream)
 
     async def stream() -> AsyncIterator[str]:
@@ -852,7 +934,9 @@ async def _prefetch_first_event(
         return None
 
 
-@router.post("/{agent_id}/mcp-servers/{server_id}/enable", response_model=McpServerResponse)
+@router.post(
+    "/{agent_id}/mcp-servers/{server_id}/enable", response_model=McpServerResponse
+)
 async def enable_mcp_server(
     agent_id: str,
     server_id: str,
@@ -866,7 +950,7 @@ async def enable_mcp_server(
             message="Agent was not found.",
             details={"agent_id": agent_id},
         )
-    
+
     mcp_server = services.repository.get_mcp_server(server_id)
     if mcp_server is None:
         raise DomainError(
@@ -886,9 +970,8 @@ async def enable_mcp_server(
         base_url=services.repository.get_sandbox_state(agent_id).adapter_base_url
     )
     runtime_mcp_config = mcp_server.mcp_server_config
-    if (
-        isinstance(runtime_mcp_config, dict)
-        and isinstance(runtime_mcp_config.get(mcp_server.mcp_server_name), dict)
+    if isinstance(runtime_mcp_config, dict) and isinstance(
+        runtime_mcp_config.get(mcp_server.mcp_server_name), dict
     ):
         runtime_mcp_config = runtime_mcp_config[mcp_server.mcp_server_name]
 
@@ -917,7 +1000,9 @@ async def enable_mcp_server(
     )
 
 
-@router.post("/{agent_id}/mcp-servers/{server_id}/disable", response_model=McpServerResponse)
+@router.post(
+    "/{agent_id}/mcp-servers/{server_id}/disable", response_model=McpServerResponse
+)
 async def disable_mcp_server(
     agent_id: str,
     server_id: str,
@@ -931,7 +1016,7 @@ async def disable_mcp_server(
             message="Agent was not found.",
             details={"agent_id": agent_id},
         )
-    
+
     mcp_server = services.repository.get_mcp_server(server_id)
     if mcp_server is None:
         raise DomainError(

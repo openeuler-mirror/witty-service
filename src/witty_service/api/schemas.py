@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, model_validator
@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, model_valida
 
 def _format_utc_datetime(dt: datetime) -> str:
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt.isoformat().replace("+00:00", "Z")
 
 
@@ -32,6 +32,7 @@ class CreateAgentRequest(BaseModel):
 
 class CreateAgentHubRequest(BaseModel):
     """从 git 模板创建 agent 的请求。"""
+
     git_url: str = Field(min_length=1, description="远程 git 仓库地址")
     branch: str = Field(default="main", description="git 分支")
     sandbox_type: str = Field(min_length=1)
@@ -75,8 +76,10 @@ class InstallAgentSkillRequest(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_wittyhub_payload(self) -> "InstallAgentSkillRequest":
-        if self.source_type == "wittyhub" and not (self.skill_source and self.skill_source.strip()):
+    def validate_wittyhub_payload(self) -> InstallAgentSkillRequest:
+        if self.source_type == "wittyhub" and not (
+            self.skill_source and self.skill_source.strip()
+        ):
             raise ValueError("skill_source is required when source_type is wittyhub")
         return self
 
@@ -88,7 +91,9 @@ class UninstallAgentSkillRequest(BaseModel):
 class AgentSkillResponse(BaseModel):
     agent_id: str
     skill_id: str
-    source_type: str = Field(description="安装来源类型，如 builtin、git、local、clawhub、wittyhub")
+    source_type: str = Field(
+        description="安装来源类型，如 builtin、git、local、clawhub、wittyhub"
+    )
     repo_id: str | None
     skill_name: str
     installed_at: UtcDatetime
@@ -164,6 +169,7 @@ class UpdateModelRequest(BaseModel):
     temperature: float | None = None
     is_default: bool | None = None
 
+
 class ModelResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -223,6 +229,7 @@ class SessionEventsResponse(BaseModel):
     items: list[SessionEventItem]
     pagination: PaginationInfo
 
+
 class ConversationSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -230,6 +237,7 @@ class ConversationSummaryResponse(BaseModel):
     agent_id: str
     title: str | None = None
     pinned: bool = False
+    scheduled_task_id: str | None = None
     status: str
     message_count: int = 0
     last_message_status: str | None = None
@@ -262,11 +270,11 @@ class UpdateConversationRequest(BaseModel):
 
 
 class SkillSourceType:
-    GIT = 'git'
-    LOCAL = 'local'
-    BUILDIN = 'builtin'
-    CLAWHUB = 'clawhub'
-    WITTYHUB = 'wittyhub'
+    GIT = "git"
+    LOCAL = "local"
+    BUILDIN = "builtin"
+    CLAWHUB = "clawhub"
+    WITTYHUB = "wittyhub"
 
 
 class SkillRepositoryRequest(BaseModel):
@@ -299,5 +307,6 @@ class SkillResponse(BaseModel):
     metadata: dict[str, Any]
     skill_source: str | None = Field(
         default=None,
-        description="技能来源地址；可能为远程仓库 URL、本地路径或 runtime 来源标识")
+        description="技能来源地址；可能为远程仓库 URL、本地路径或 runtime 来源标识",
+    )
     skill_md_url: str | None

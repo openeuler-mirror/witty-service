@@ -7,10 +7,15 @@ from typing import Any
 from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.adapter.websocket_client_pool import WebSocketClientPool
 from witty_service.application.agent_manager import AGENT_NOT_FOUND, AgentManager
+from witty_service.application.scheduled_task_service import ScheduledTaskService
 from witty_service.application.session_manager import SessionManager
 from witty_service.config import get_settings
 from witty_service.domain.errors import DomainError, insight_disabled
-from witty_service.persistence.db import create_session_factory, create_sqlite_engine, init_db
+from witty_service.persistence.db import (
+    create_session_factory,
+    create_sqlite_engine,
+    init_db,
+)
 from witty_service.persistence.repositories import SqliteRepository
 from witty_service.sandbox.base import SandboxBackend
 from witty_service.sandbox.factory import create_sandbox_backend
@@ -26,9 +31,15 @@ class ServiceContainer:
     insight_http_client: AdaptorHttpClient | None = None
     session_manager: SessionManager = field(init=False)
     insight_facade: Any = field(init=False, default=None)
+    scheduled_task_service: ScheduledTaskService = field(init=False)
 
     def __post_init__(self) -> None:
         self.session_manager = SessionManager(repository=self.repository)
+        self.scheduled_task_service = ScheduledTaskService(
+            repository=self.repository,
+            get_agent_manager=self.get_agent_manager_for_agent,
+            settings=get_settings().scheduler,
+        )
 
     def get_sandbox_backend(self, sandbox_type: str) -> SandboxBackend:
         key = sandbox_type.lower()

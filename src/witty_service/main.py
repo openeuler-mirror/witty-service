@@ -5,12 +5,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from witty_service.api.agents import router as agents_router
-from witty_service.api.cve import router as cve_router
 from witty_service.api.backport import router as backport_router
+from witty_service.api.cve import router as cve_router
 from witty_service.api.errors import register_exception_handlers
 from witty_service.api.insight import router as insight_router
-from witty_service.api.models import router as models_router
 from witty_service.api.mcp_servers import router as mcp_servers_router
+from witty_service.api.models import router as models_router
+from witty_service.api.scheduled_tasks import router as scheduled_tasks_router
 from witty_service.api.services import ServiceContainer, build_default_services
 from witty_service.api.skills import router as skills_router
 from witty_service.application.skill_manager import SkillManager
@@ -27,7 +28,7 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
     register_exception_handlers(app)
 
     settings = get_settings()
-    
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors.origins,
@@ -59,6 +60,7 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
     @app.on_event("startup")
     def recover_stale_generations() -> None:
         from witty_service.persistence.orm import MessageStatus
+
         repository = app.state.services.repository
         stale = repository.find_stale_generating_messages(stale_threshold_seconds=30)
         for msg in stale:
@@ -79,8 +81,9 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
         app.state.backport_run_store.list_runs(active_run_ids=set())
 
     @app.on_event("startup")
-    def recover_agents() -> None:
+    async def recover_agents() -> None:
         import asyncio
+
         from witty_service.application.agent_manager import _recovery_lock
         from witty_service.domain.enums import AgentStatus
 
@@ -88,7 +91,9 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
             """恢复单个 agent"""
             agent_id = agent.id
             try:
-                logger.info("Recovering running agent: id=%s name=%s", agent_id, agent.name)
+                logger.info(
+                    "Recovering running agent: id=%s name=%s", agent_id, agent.name
+                )
                 agent_manager = services.get_agent_manager_for_agent(agent_id)
                 await agent_manager.resume_agent(agent_id)
                 logger.info("Successfully recovered running agent: id=%s", agent_id)
@@ -146,22 +151,31 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
                 logger.info("Application startup complete")
             logger.info("Released recovery lock")
 
-        for sandbox_type in ("local_process", "docker"):
-            # 使用 call_later 推迟到下一轮 event loop 迭代，
-            # 避免 recovery 任务在 uvicorn 输出 "Application startup complete" 之前运行。
-            asyncio.get_running_loop().call_later(
-                0,
-                lambda st=sandbox_type: asyncio.create_task(_recover_agents(st)),
+        # 先完成 agent 恢复，再让后续 startup handler 启动定时任务调度器，
+        # 避免定时任务在 agent 恢复窗口内触发而报 TASK_AGENT_NOT_RUNNABLE。
+        try:
+            await asyncio.gather(
+                _recover_agents("local_process"),
+                _recover_agents("docker"),
             )
+        except Exception:
+            logger.exception("Agent recovery failed during startup")
+
+    @app.on_event("startup")
+    async def start_scheduled_tasks() -> None:
+        """启动定时任务调度器：agent 恢复完成后再注册任务，避免恢复窗口内的触发失败。"""
+        await app.state.services.scheduled_task_service.start()
 
     @app.on_event("shutdown")
     async def close_services() -> None:
+        await app.state.services.scheduled_task_service.shutdown()
         await app.state.services.close()
 
     app.include_router(agents_router)
     app.include_router(cve_router)
     app.include_router(models_router)
     app.include_router(mcp_servers_router)
+    app.include_router(scheduled_tasks_router)
     app.include_router(skills_router)
     app.include_router(backport_router)
     app.include_router(insight_router)
