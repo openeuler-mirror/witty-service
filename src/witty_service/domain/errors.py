@@ -5,7 +5,6 @@ from typing import Any
 
 from witty_service.domain.models import ErrorPayload
 
-
 INSIGHT_DISABLED = "INSIGHT_DISABLED"
 INSIGHT_UNAVAILABLE = "INSIGHT_UNAVAILABLE"
 INSIGHT_TIMEOUT = "INSIGHT_TIMEOUT"
@@ -93,7 +92,9 @@ class AgentDefaultNotConfiguredError(AgentServiceError):
 
 
 class AgentContextMismatchError(AgentServiceError):
-    def __init__(self, *, requested_agent_id: str, current_agent_id: str | None) -> None:
+    def __init__(
+        self, *, requested_agent_id: str, current_agent_id: str | None
+    ) -> None:
         super().__init__(
             code="AGENT_CONTEXT_MISMATCH",
             message="requested agent id does not match current agent context",
@@ -203,5 +204,6 @@ def session_not_found(
     return DomainError(
         code=SESSION_NOT_FOUND,
         message="Session was not found.",
+        status_code=404,
         details=details,
     )
