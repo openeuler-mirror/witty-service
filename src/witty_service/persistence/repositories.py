@@ -115,6 +115,7 @@ class SessionRecord:
     runtime_session_key: str | None = None
     title: str | None = None
     pinned: bool = False
+    scheduled_task_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -527,6 +528,7 @@ class SqliteRepository:
                             "agent_id": session_row.agent_id,
                             "title": session_row.title,
                             "pinned": session_row.pinned,
+                            "scheduled_task_id": session_row.scheduled_task_id,
                             "status": session_row.status.value
                             if isinstance(session_row.status, SessionStatus)
                             else str(session_row.status),
@@ -1111,6 +1113,21 @@ class SqliteRepository:
             session.refresh(row)
             return self._to_session_record(row)
 
+    def mark_session_scheduled(self, session_id: str, task_id: str) -> SessionRecord:
+        """将会话标记为指定定时任务的执行产物。
+
+        任务删除时 ``sessions.scheduled_task_id`` 外键级联删除该任务的全部
+        执行会话（含消息），侧边栏据此识别归属，不再依赖运行记录的数量上限。
+        """
+        with self._session_factory() as session:
+            row = session.get(SessionORM, session_id)
+            if row is None:
+                raise KeyError(f"Session not found: {session_id}")
+            row.scheduled_task_id = task_id
+            session.commit()
+            session.refresh(row)
+            return self._to_session_record(row)
+
     def list_sessions_with_summary(self, agent_id: str) -> list[dict[str, Any]]:
         with self._session_factory() as session:
             msg_count_subq = (
@@ -1153,6 +1170,7 @@ class SqliteRepository:
                         "agent_id": row.agent_id,
                         "title": row.title,
                         "pinned": row.pinned,
+                        "scheduled_task_id": row.scheduled_task_id,
                         "status": row.status.value
                         if isinstance(row.status, SessionStatus)
                         else row.status,
@@ -1273,6 +1291,7 @@ class SqliteRepository:
             runtime_session_key=row.runtime_session_key,
             title=row.title,
             pinned=row.pinned,
+            scheduled_task_id=row.scheduled_task_id,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )

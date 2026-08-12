@@ -136,6 +136,12 @@ class SessionORM(Base):
     )
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    scheduled_task_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("scheduled_tasks.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -128,6 +128,45 @@ def test_delete_scheduled_task_cascades_runs(repo: SqliteRepository) -> None:
     assert repo.get_scheduled_task_run(run.id) is None
 
 
+def test_mark_session_scheduled_sets_provenance(repo: SqliteRepository) -> None:
+    _create_agent(repo)
+    task = _create_task(repo)
+    session = repo.create_session("agent-1")
+
+    marked = repo.mark_session_scheduled(session.id, task.id)
+
+    assert marked.scheduled_task_id == task.id
+    assert repo.get_session(session.id).scheduled_task_id == task.id
+
+    summaries = repo.list_sessions_with_summary("agent-1")
+    assert summaries[0]["scheduled_task_id"] == task.id
+
+    agents = repo.list_agents_with_conversations()
+    conv = agents[0]["conversations"][0]
+    assert conv["scheduled_task_id"] == task.id
+
+
+def test_mark_session_scheduled_missing_session_raises(repo: SqliteRepository) -> None:
+    _create_agent(repo)
+    task = _create_task(repo)
+
+    with pytest.raises(KeyError):
+        repo.mark_session_scheduled("missing-session", task.id)
+
+
+def test_delete_scheduled_task_cascades_sessions(repo: SqliteRepository) -> None:
+    """删除任务时，归属该任务的执行会话（及其消息）一并级联删除。"""
+    _create_agent(repo)
+    task = _create_task(repo)
+    session = repo.create_session("agent-1")
+    repo.mark_session_scheduled(session.id, task.id)
+
+    repo.delete_scheduled_task(task.id)
+
+    assert repo.get_session(session.id) is None
+    assert repo.list_sessions_with_summary("agent-1") == []
+
+
 def test_scheduled_task_run_crud_and_ordering(repo: SqliteRepository) -> None:
     _create_agent(repo)
     task = _create_task(repo)

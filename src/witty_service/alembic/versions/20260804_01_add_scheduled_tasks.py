@@ -80,9 +80,29 @@ def upgrade() -> None:
         "scheduled_task_runs",
         ["task_id", "created_at"],
     )
+    with op.batch_alter_table("sessions") as batch_op:
+        batch_op.add_column(
+            sa.Column(
+                "scheduled_task_id",
+                sa.String(length=36),
+                sa.ForeignKey(
+                    "scheduled_tasks.id",
+                    name="fk_sessions_scheduled_task_id",
+                    ondelete="CASCADE",
+                ),
+                nullable=True,
+            )
+        )
+        batch_op.create_index(
+            "ix_sessions_scheduled_task_id",
+            ["scheduled_task_id"],
+        )
 
 
 def downgrade() -> None:
+    with op.batch_alter_table("sessions") as batch_op:
+        batch_op.drop_index("ix_sessions_scheduled_task_id")
+        batch_op.drop_column("scheduled_task_id")
     op.drop_index(
         "ix_scheduled_task_runs_task_created", table_name="scheduled_task_runs"
     )
