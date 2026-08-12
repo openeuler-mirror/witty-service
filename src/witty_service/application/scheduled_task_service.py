@@ -120,14 +120,28 @@ class ScheduledTaskService:
             return
         self._recover_orphan_runs()
         tasks = self._repository.list_scheduled_tasks()
+        enabled_count = sum(1 for task in tasks if task.enabled)
+        skipped = 0
         for task in tasks:
-            if task.enabled:
+            if not task.enabled:
+                continue
+            try:
                 self._schedule_task(task)
+            except Exception:
+                skipped += 1
+                logger.exception(
+                    "Skipped scheduling task %s due to invalid schedule configuration.",
+                    task.id,
+                )
         self._scheduler.start()
         logger.info(
-            "Scheduled task scheduler started with %d enabled task(s)",
-            sum(1 for t in tasks if t.enabled),
+            "Scheduled task scheduler started with %d enabled task(s)", enabled_count
         )
+        if skipped:
+            logger.warning(
+                "%d enabled task(s) skipped due to invalid schedule configuration",
+                skipped,
+            )
 
     async def shutdown(self) -> None:
         # 先取消在飞的运行任务，避免 run 记录遗留为 running，只能靠孤儿恢复兜底。
@@ -345,22 +359,24 @@ class ScheduledTaskService:
             with contextlib.suppress(KeyError):
                 self._repository.update_agent_has_scheduled_tasks(task.agent_id, False)
 
-    def handle_agent_deleted(self, agent_id: str) -> None:
+    async def handle_agent_deleted(self, agent_id: str) -> None:
         """Agent 删除前的调度器清理：移除该 agent 所有任务的 job 与互斥状态。
 
-        必须在数据库级联删除任务前调用。同步方法直接修改互斥状态，调用方须确保
-        在无 await 挂起点的同步段中调用，否则需改为 async 并持有 _state_lock。
+        必须在数据库级联删除任务前调用。持有 _state_lock，与
+        _acquire_slot/_release_slot 的互斥状态修改保持一致的锁协议。
         """
-        task_ids = [
-            task.id for task in self._repository.list_scheduled_tasks(agent_id=agent_id)
-        ]
-        for task_id in task_ids:
-            self._unschedule_task(task_id)
-            self._active_runs.pop(task_id, None)
-            # 取消该任务在飞的运行，避免其继续对着已删除的 agent 空转。
-            for bg_task in self._bg_tasks_by_task.pop(task_id, set()):
-                bg_task.cancel()
-        self._busy_agents.discard(agent_id)
+        async with self._state_lock:
+            task_ids = [
+                task.id
+                for task in self._repository.list_scheduled_tasks(agent_id=agent_id)
+            ]
+            for task_id in task_ids:
+                self._unschedule_task(task_id)
+                self._active_runs.pop(task_id, None)
+                # 取消该任务在飞的运行，避免其继续对着已删除的 agent 空转。
+                for bg_task in self._bg_tasks_by_task.pop(task_id, set()):
+                    bg_task.cancel()
+            self._busy_agents.discard(agent_id)
 
     def enable_task(self, task_id: str) -> ScheduledTaskRecord:
         self._require_task(task_id)
@@ -537,7 +553,7 @@ class ScheduledTaskService:
         async with self._state_lock:
             if self._active_runs.get(task_id) == run_id:
                 self._active_runs.pop(task_id, None)
-            self._busy_agents.discard(agent_id)
+                self._busy_agents.discard(agent_id)
 
     def _record_skipped(self, task_id: str) -> ScheduledTaskRunRecord:
         run = self._repository.create_scheduled_task_run(

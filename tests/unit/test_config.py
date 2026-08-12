@@ -20,13 +20,13 @@ def _clear_database_env(monkeypatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
-def test_database_settings_defaults_disable_auto_create(monkeypatch) -> None:
+def test_database_settings_defaults_enable_auto_create(monkeypatch) -> None:
     _clear_database_env(monkeypatch)
 
     settings = config_module.DatabaseSettings.from_env()
 
     assert settings.url.endswith("/.witty/db/witty_service.sqlite3")
-    assert settings.auto_create is False
+    assert settings.auto_create is True
 
 
 @pytest.mark.parametrize("raw_value", ["1", "true", "TRUE", "yes"])
@@ -58,6 +58,27 @@ def test_insight_settings_defaults(monkeypatch) -> None:
     assert settings.base_url == "http://127.0.0.1:7396"
     assert settings.timeout_seconds == 10.0
     assert settings.bearer_token is None
+
+
+def test_scheduler_settings_default_timezone(monkeypatch) -> None:
+    monkeypatch.delenv("WITTY_SCHEDULER_TZ", raising=False)
+
+    assert config_module.SchedulerSettings.from_env().timezone == "Asia/Shanghai"
+
+
+def test_scheduler_settings_accepts_valid_timezone(monkeypatch) -> None:
+    monkeypatch.setenv("WITTY_SCHEDULER_TZ", "America/New_York")
+
+    assert config_module.SchedulerSettings.from_env().timezone == "America/New_York"
+
+
+def test_scheduler_settings_rejects_invalid_timezone(monkeypatch) -> None:
+    monkeypatch.setenv("WITTY_SCHEDULER_TZ", "Invalid/Zone")
+
+    with pytest.raises(
+        ValueError, match="Invalid timezone configured via WITTY_SCHEDULER_TZ"
+    ):
+        config_module.SchedulerSettings.from_env()
 
 
 def test_insight_settings_reads_env(monkeypatch) -> None:

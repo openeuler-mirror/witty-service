@@ -54,6 +54,7 @@ Witty Service 统一配置管理
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # ==============================================================================
 # CORS 配置
@@ -407,8 +408,15 @@ class SchedulerSettings:
 
     @classmethod
     def from_env(cls) -> "SchedulerSettings":
+        timezone = os.getenv("WITTY_SCHEDULER_TZ", "Asia/Shanghai")
+        try:
+            ZoneInfo(timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(
+                f"Invalid timezone configured via WITTY_SCHEDULER_TZ: {timezone!r}"
+            ) from exc
         return cls(
-            timezone=os.getenv("WITTY_SCHEDULER_TZ", "Asia/Shanghai"),
+            timezone=timezone,
             misfire_grace_seconds=int(
                 os.getenv("WITTY_SCHEDULER_MISFIRE_GRACE_SECONDS", "300")
             ),
