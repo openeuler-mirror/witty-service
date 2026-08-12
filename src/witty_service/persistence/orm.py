@@ -136,6 +136,12 @@ class SessionORM(Base):
     )
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    scheduled_task_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("scheduled_tasks.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -393,4 +399,87 @@ class McpServerORM(Base):
         nullable=False,
         default=utcnow,
         onupdate=utcnow,
+    )
+
+
+class ScheduledTaskORM(Base):
+    """定时任务定义（witty-service 统一调度的事实源）。"""
+
+    __tablename__ = "scheduled_tasks"
+    __table_args__ = (
+        CheckConstraint(
+            "schedule_type IN ('cron', 'interval')",
+            name="ck_scheduled_tasks_schedule_type",
+        ),
+        CheckConstraint(
+            "(schedule_type = 'cron' AND cron_expr IS NOT NULL AND "
+            "interval_seconds IS NULL) OR "
+            "(schedule_type = 'interval' AND interval_seconds IS NOT NULL AND "
+            "cron_expr IS NULL)",
+            name="ck_scheduled_tasks_schedule_fields",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    schedule_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    cron_expr: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    workspace_folder: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class ScheduledTaskRunORM(Base):
+    """定时任务单次运行记录。"""
+
+    __tablename__ = "scheduled_task_runs"
+    __table_args__ = (
+        Index("ix_scheduled_task_runs_task_created", "task_id", "created_at"),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'succeeded', 'failed', 'skipped')",
+            name="ck_scheduled_task_runs_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("scheduled_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
     )

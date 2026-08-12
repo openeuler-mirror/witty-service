@@ -20,6 +20,8 @@ from witty_service.persistence.orm import (
     MessageORM,
     MessageStatus,
     ModelORM,
+    ScheduledTaskORM,
+    ScheduledTaskRunORM,
     SessionORM,
     SessionStatus,
     SkillORM,
@@ -73,6 +75,34 @@ class McpServerRecord:
 
 
 @dataclass(slots=True)
+class ScheduledTaskRecord:
+    id: str
+    name: str
+    schedule_type: str
+    cron_expr: str | None
+    interval_seconds: int | None
+    timezone: str
+    content: str
+    agent_id: str
+    workspace_folder: str | None
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(slots=True)
+class ScheduledTaskRunRecord:
+    id: str
+    task_id: str
+    session_id: str | None
+    status: str
+    error: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+
+
+@dataclass(slots=True)
 class SessionRecord:
     id: str
     agent_id: str
@@ -85,6 +115,7 @@ class SessionRecord:
     runtime_session_key: str | None = None
     title: str | None = None
     pinned: bool = False
+    scheduled_task_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -497,6 +528,7 @@ class SqliteRepository:
                             "agent_id": session_row.agent_id,
                             "title": session_row.title,
                             "pinned": session_row.pinned,
+                            "scheduled_task_id": session_row.scheduled_task_id,
                             "status": session_row.status.value
                             if isinstance(session_row.status, SessionStatus)
                             else str(session_row.status),
@@ -689,6 +721,11 @@ class SqliteRepository:
             row = session.get(SessionORM, session_id)
             if row is None:
                 return
+            # 会话删除后，解除定时任务运行记录对它的引用，
+            # 避免前端拿到指向已删除会话的 session_id 后反复请求报 SESSION_NOT_FOUND。
+            session.query(ScheduledTaskRunORM).filter(
+                ScheduledTaskRunORM.session_id == session_id
+            ).update({"session_id": None}, synchronize_session=False)
             session.delete(row)
             session.commit()
 
@@ -1076,6 +1113,21 @@ class SqliteRepository:
             session.refresh(row)
             return self._to_session_record(row)
 
+    def mark_session_scheduled(self, session_id: str, task_id: str) -> SessionRecord:
+        """将会话标记为指定定时任务的执行产物。
+
+        任务删除时 ``sessions.scheduled_task_id`` 外键级联删除该任务的全部
+        执行会话（含消息），侧边栏据此识别归属，不再依赖运行记录的数量上限。
+        """
+        with self._session_factory() as session:
+            row = session.get(SessionORM, session_id)
+            if row is None:
+                raise KeyError(f"Session not found: {session_id}")
+            row.scheduled_task_id = task_id
+            session.commit()
+            session.refresh(row)
+            return self._to_session_record(row)
+
     def list_sessions_with_summary(self, agent_id: str) -> list[dict[str, Any]]:
         with self._session_factory() as session:
             msg_count_subq = (
@@ -1118,6 +1170,7 @@ class SqliteRepository:
                         "agent_id": row.agent_id,
                         "title": row.title,
                         "pinned": row.pinned,
+                        "scheduled_task_id": row.scheduled_task_id,
                         "status": row.status.value
                         if isinstance(row.status, SessionStatus)
                         else row.status,
@@ -1238,6 +1291,7 @@ class SqliteRepository:
             runtime_session_key=row.runtime_session_key,
             title=row.title,
             pinned=row.pinned,
+            scheduled_task_id=row.scheduled_task_id,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -1892,4 +1946,319 @@ class SqliteRepository:
             metadata=dict(row.metadata_json or {}) if row.metadata_json else None,
             skill_source=row.skill_source,
             skill_md_url=row.skill_md_url,
+        )
+
+    def create_scheduled_task(
+        self,
+        *,
+        task_id: str | None = None,
+        name: str,
+        schedule_type: str,
+        cron_expr: str | None,
+        interval_seconds: int | None,
+        timezone: str,
+        content: str,
+        agent_id: str,
+        workspace_folder: str | None = None,
+        enabled: bool = True,
+    ) -> ScheduledTaskRecord:
+        with self._session_factory() as session:
+            row = ScheduledTaskORM(
+                id=task_id or str(uuid4()),
+                name=name,
+                schedule_type=schedule_type,
+                cron_expr=cron_expr,
+                interval_seconds=interval_seconds,
+                timezone=timezone,
+                content=content,
+                agent_id=agent_id,
+                workspace_folder=workspace_folder,
+                enabled=enabled,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._to_scheduled_task_record(row)
+
+    def get_scheduled_task(self, task_id: str) -> ScheduledTaskRecord | None:
+        with self._session_factory() as session:
+            row = session.get(ScheduledTaskORM, task_id)
+            return self._to_scheduled_task_record(row) if row is not None else None
+
+    def list_scheduled_tasks(
+        self,
+        agent_id: str | None = None,
+    ) -> list[ScheduledTaskRecord]:
+        with self._session_factory() as session:
+            query = session.query(ScheduledTaskORM)
+            if agent_id is not None:
+                query = query.filter(ScheduledTaskORM.agent_id == agent_id)
+            rows = query.order_by(ScheduledTaskORM.created_at.asc()).all()
+            return [self._to_scheduled_task_record(row) for row in rows]
+
+    def update_scheduled_task(
+        self,
+        task_id: str,
+        *,
+        name: str,
+        schedule_type: str,
+        cron_expr: str | None,
+        interval_seconds: int | None,
+        timezone: str,
+        content: str,
+        workspace_folder: str | None,
+        enabled: bool,
+    ) -> ScheduledTaskRecord:
+        with self._session_factory() as session:
+            row = session.get(ScheduledTaskORM, task_id)
+            if row is None:
+                raise KeyError(f"Scheduled task not found: {task_id}")
+            row.name = name
+            row.schedule_type = schedule_type
+            row.cron_expr = cron_expr
+            row.interval_seconds = interval_seconds
+            row.timezone = timezone
+            row.content = content
+            row.workspace_folder = workspace_folder
+            row.enabled = enabled
+            session.commit()
+            session.refresh(row)
+            return self._to_scheduled_task_record(row)
+
+    def set_scheduled_task_enabled(
+        self,
+        task_id: str,
+        enabled: bool,
+    ) -> ScheduledTaskRecord:
+        with self._session_factory() as session:
+            row = session.get(ScheduledTaskORM, task_id)
+            if row is None:
+                raise KeyError(f"Scheduled task not found: {task_id}")
+            row.enabled = enabled
+            session.commit()
+            session.refresh(row)
+            return self._to_scheduled_task_record(row)
+
+    def delete_scheduled_task(self, task_id: str) -> None:
+        with self._session_factory() as session:
+            row = session.get(ScheduledTaskORM, task_id)
+            if row is None:
+                return
+            session.delete(row)
+            session.commit()
+
+    def count_scheduled_tasks_for_agent(self, agent_id: str) -> int:
+        with self._session_factory() as session:
+            return (
+                session.query(func.count(ScheduledTaskORM.id))
+                .filter(ScheduledTaskORM.agent_id == agent_id)
+                .scalar()
+                or 0
+            )
+
+    def update_agent_has_scheduled_tasks(
+        self,
+        agent_id: str,
+        has_scheduled_tasks: bool,
+    ) -> AgentRecord:
+        with self._session_factory() as session:
+            row = session.get(AgentORM, agent_id)
+            if row is None:
+                raise KeyError(f"Agent not found: {agent_id}")
+            row.has_scheduled_tasks = has_scheduled_tasks
+            session.commit()
+            session.refresh(row)
+            return self._to_agent_record(row)
+
+    def create_scheduled_task_run(
+        self,
+        *,
+        run_id: str | None = None,
+        task_id: str,
+        status: str = "pending",
+        session_id: str | None = None,
+        error: str | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+    ) -> ScheduledTaskRunRecord:
+        with self._session_factory() as session:
+            row = ScheduledTaskRunORM(
+                id=run_id or str(uuid4()),
+                task_id=task_id,
+                status=status,
+                session_id=session_id,
+                error=error,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._to_scheduled_task_run_record(row)
+
+    def get_scheduled_task_run(
+        self,
+        run_id: str,
+    ) -> ScheduledTaskRunRecord | None:
+        with self._session_factory() as session:
+            row = session.get(ScheduledTaskRunORM, run_id)
+            return self._to_scheduled_task_run_record(row) if row is not None else None
+
+    def list_scheduled_task_runs(
+        self,
+        task_id: str,
+        limit: int = 100,
+    ) -> list[ScheduledTaskRunRecord]:
+        with self._session_factory() as session:
+            rows = (
+                session.query(ScheduledTaskRunORM, SessionORM.id)
+                .outerjoin(SessionORM, SessionORM.id == ScheduledTaskRunORM.session_id)
+                .filter(ScheduledTaskRunORM.task_id == task_id)
+                .order_by(ScheduledTaskRunORM.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+            records: list[ScheduledTaskRunRecord] = []
+            for run_row, session_exists in rows:
+                # 会话已被删除时不再返回失效的 session_id，
+                # 前端据此跳过该运行记录的会话加载，避免持续 404/400 报错。
+                if session_exists is None:
+                    run_row.session_id = None
+                records.append(self._to_scheduled_task_run_record(run_row))
+            return records
+
+    def list_scheduled_task_runs_by_task_ids(
+        self,
+        task_ids: list[str],
+        limit_per_task: int,
+    ) -> dict[str, list[ScheduledTaskRunRecord]]:
+        """一次查询返回多个任务各自最近 N 条运行记录（created_at 降序）。
+
+        用于列表聚合接口（GET /scheduled-tasks?include_runs=N），
+        避免前端为每个任务单独发请求造成 N+1。
+        """
+        result: dict[str, list[ScheduledTaskRunRecord]] = {
+            task_id: [] for task_id in task_ids
+        }
+        if not task_ids:
+            return result
+        with self._session_factory() as session:
+            ranked = (
+                session.query(
+                    ScheduledTaskRunORM.id.label("run_id"),
+                    func.row_number()
+                    .over(
+                        partition_by=ScheduledTaskRunORM.task_id,
+                        order_by=ScheduledTaskRunORM.created_at.desc(),
+                    )
+                    .label("rn"),
+                )
+                .filter(ScheduledTaskRunORM.task_id.in_(task_ids))
+                .subquery()
+            )
+            rows = (
+                session.query(ScheduledTaskRunORM, SessionORM.id)
+                .join(ranked, ranked.c.run_id == ScheduledTaskRunORM.id)
+                .outerjoin(SessionORM, SessionORM.id == ScheduledTaskRunORM.session_id)
+                .filter(ranked.c.rn <= limit_per_task)
+                .order_by(ScheduledTaskRunORM.created_at.desc())
+                .all()
+            )
+        for run_row, session_exists in rows:
+            if session_exists is None:
+                run_row.session_id = None
+            result[run_row.task_id].append(self._to_scheduled_task_run_record(run_row))
+        return result
+
+    def update_scheduled_task_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        session_id: str | None,
+        error: str | None,
+        started_at: datetime | None,
+        finished_at: datetime | None,
+    ) -> ScheduledTaskRunRecord:
+        with self._session_factory() as session:
+            row = session.get(ScheduledTaskRunORM, run_id)
+            if row is None:
+                raise KeyError(f"Scheduled task run not found: {run_id}")
+            row.status = status
+            row.session_id = session_id
+            row.error = error
+            row.started_at = started_at
+            row.finished_at = finished_at
+            session.commit()
+            session.refresh(row)
+            return self._to_scheduled_task_run_record(row)
+
+    def find_stale_scheduled_task_runs(
+        self,
+        stale_before: datetime,
+        statuses: tuple[str, ...] = ("pending", "running"),
+    ) -> list[ScheduledTaskRunRecord]:
+        with self._session_factory() as session:
+            rows = (
+                session.query(ScheduledTaskRunORM)
+                .filter(
+                    ScheduledTaskRunORM.status.in_(statuses),
+                    func.coalesce(
+                        ScheduledTaskRunORM.started_at,
+                        ScheduledTaskRunORM.created_at,
+                    )
+                    < stale_before,
+                )
+                .all()
+            )
+            return [self._to_scheduled_task_run_record(row) for row in rows]
+
+    def prune_scheduled_task_runs(self, task_id: str, keep: int) -> None:
+        with self._session_factory() as session:
+            stale_ids = [
+                row[0]
+                for row in (
+                    session.query(ScheduledTaskRunORM.id)
+                    .filter(ScheduledTaskRunORM.task_id == task_id)
+                    .order_by(ScheduledTaskRunORM.created_at.desc())
+                    .offset(keep)
+                    .all()
+                )
+            ]
+            if stale_ids:
+                session.query(ScheduledTaskRunORM).filter(
+                    ScheduledTaskRunORM.id.in_(stale_ids)
+                ).delete(synchronize_session=False)
+            session.commit()
+
+    @staticmethod
+    def _to_scheduled_task_record(row: ScheduledTaskORM) -> ScheduledTaskRecord:
+        return ScheduledTaskRecord(
+            id=row.id,
+            name=row.name,
+            schedule_type=row.schedule_type,
+            cron_expr=row.cron_expr,
+            interval_seconds=row.interval_seconds,
+            timezone=row.timezone,
+            content=row.content,
+            agent_id=row.agent_id,
+            workspace_folder=row.workspace_folder,
+            enabled=row.enabled,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _to_scheduled_task_run_record(
+        row: ScheduledTaskRunORM,
+    ) -> ScheduledTaskRunRecord:
+        return ScheduledTaskRunRecord(
+            id=row.id,
+            task_id=row.task_id,
+            session_id=row.session_id,
+            status=row.status,
+            error=row.error,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+            created_at=row.created_at,
         )
