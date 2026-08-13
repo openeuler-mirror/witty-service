@@ -51,21 +51,25 @@ Witty Service 统一配置管理
     print(settings.logging.level)
 """
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-import os
-
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # ==============================================================================
 # CORS 配置
 # ==============================================================================
 
+
 @dataclass(frozen=True)
 class CorsSettings:
     """CORS 跨域资源共享配置"""
+
     origins: list[str] = field(default_factory=lambda: ["*"])
     credentials: bool = True
-    methods: list[str] = field(default_factory=lambda: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+    methods: list[str] = field(
+        default_factory=lambda: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+    )
     headers: list[str] = field(default_factory=lambda: ["*"])
 
 
@@ -73,10 +77,11 @@ class CorsSettings:
 # 数据库配置
 # ==============================================================================
 
+
 @dataclass(frozen=True)
 class DatabaseSettings:
     """数据库连接配置
-    
+
     环境变量:
         WITTY_DATABASE_URL: 数据库连接URL
             - SQLite: sqlite:///path/to/db.sqlite3
@@ -86,6 +91,7 @@ class DatabaseSettings:
             - true/false
             - 默认: true
     """
+
     url: str
     auto_create: bool = True
 
@@ -105,16 +111,18 @@ class DatabaseSettings:
 # 日志配置
 # ==============================================================================
 
+
 @dataclass(frozen=True)
 class LoggingSettings:
     """日志系统配置
-    
+
     环境变量:
         WITTY_LOG_LEVEL: 日志级别 (DEBUG, INFO, WARNING, ERROR), 默认 INFO
         WITTY_LOG_FILE: 日志文件路径, 默认 WITTY_WORKSPACE_ROOT/logs/witty-service.log
         WITTY_LOG_MAX_BYTES: 单个日志文件最大字节数, 默认 10MB
         WITTY_LOG_BACKUP_COUNT: 备份日志文件数量, 默认 5
     """
+
     level: str = "INFO"
     file: str = ""
     max_bytes: int = 10 * 1024 * 1024
@@ -122,7 +130,9 @@ class LoggingSettings:
 
     @classmethod
     def from_env(cls) -> "LoggingSettings":
-        workspace_root = Path(os.getenv("WITTY_WORKSPACE_ROOT", "~/.witty")).expanduser()
+        workspace_root = Path(
+            os.getenv("WITTY_WORKSPACE_ROOT", "~/.witty")
+        ).expanduser()
         default_log_file = workspace_root / "logs" / "witty-service.log"
         return cls(
             level=os.getenv("WITTY_LOG_LEVEL", "INFO").upper(),
@@ -136,10 +146,11 @@ class LoggingSettings:
 # Docker 沙箱配置
 # ==============================================================================
 
+
 @dataclass(frozen=True)
 class DockerSettings:
     """Docker 沙箱运行时配置
-    
+
     环境变量:
         WITTY_DOCKER_HOST: Docker 守护进程主机地址, 默认 127.0.0.1
         WITTY_DOCKER_CONTAINER_PORT: 容器内部服务端口, 默认 8080
@@ -156,6 +167,7 @@ class DockerSettings:
         WITTY_DOCKER_TMPFS_SIZE: /tmp tmpfs 大小, 默认 256M
         WITTY_DOCKER_READ_ONLY: 根文件系统只读, 默认 true
     """
+
     host: str = "127.0.0.1"
     container_port: int = 8080
     container_workspace_path: str = "/witty-workspace"
@@ -174,16 +186,21 @@ class DockerSettings:
         return cls(
             host=os.getenv("WITTY_DOCKER_HOST", "127.0.0.1"),
             container_port=int(os.getenv("WITTY_DOCKER_CONTAINER_PORT", 8080)),
-            container_workspace_path=os.getenv("WITTY_DOCKER_CONTAINER_WORKSPACE_PATH", "/witty-workspace"),
+            container_workspace_path=os.getenv(
+                "WITTY_DOCKER_CONTAINER_WORKSPACE_PATH", "/witty-workspace"
+            ),
             stop_timeout=int(os.getenv("WITTY_DOCKER_STOP_TIMEOUT", 10)),
-            image=os.getenv("WITTY_DOCKER_IMAGE", "ghcr.io/openwitty/witty-agent-server"),
+            image=os.getenv(
+                "WITTY_DOCKER_IMAGE", "ghcr.io/openwitty/witty-agent-server"
+            ),
             memory_limit=os.getenv("WITTY_DOCKER_MEMORY_LIMIT", "512m"),
             pids_limit=int(os.getenv("WITTY_DOCKER_PIDS_LIMIT", "100")),
             cpu_shares=int(os.getenv("WITTY_DOCKER_CPU_SHARES", "512")),
             nofile_soft_limit=int(os.getenv("WITTY_DOCKER_NOFILE_SOFT_LIMIT", "1024")),
             nofile_hard_limit=int(os.getenv("WITTY_DOCKER_NOFILE_HARD_LIMIT", "4096")),
             tmpfs_size=os.getenv("WITTY_DOCKER_TMPFS_SIZE", "256M"),
-            read_only=os.getenv("WITTY_DOCKER_READ_ONLY", "true").lower() not in ("0", "false", "no"),
+            read_only=os.getenv("WITTY_DOCKER_READ_ONLY", "true").lower()
+            not in ("0", "false", "no"),
         )
 
 
@@ -191,15 +208,17 @@ class DockerSettings:
 # OpenClaw Gateway 配置
 # ==============================================================================
 
+
 @dataclass(frozen=True)
 class OpenClawGatewaySettings:
     """OpenClaw Gateway 网关配置
-    
+
     环境变量:
         OPENCLAW_GATEWAY_IDLE_TIMEOUT: 网关空闲超时时间(秒), 默认 1200 (20分钟)
         OPENCLAW_GATEWAY_LIFECYCLE_END_DRAIN_TIMEOUT: 生命周期结束排水超时时间(秒), 默认 60
         OPENCLAW_STATE_DIR: 网关状态存储目录, 默认 ~/.openclaw
     """
+
     idle_timeout: float = 1200.0
     lifecycle_end_drain_timeout: float = 60.0
     state_dir: str | None = None
@@ -208,7 +227,9 @@ class OpenClawGatewaySettings:
     def from_env(cls) -> "OpenClawGatewaySettings":
         return cls(
             idle_timeout=float(os.getenv("OPENCLAW_GATEWAY_IDLE_TIMEOUT", "1200")),
-            lifecycle_end_drain_timeout=float(os.getenv("OPENCLAW_GATEWAY_LIFECYCLE_END_DRAIN_TIMEOUT", "60")),
+            lifecycle_end_drain_timeout=float(
+                os.getenv("OPENCLAW_GATEWAY_LIFECYCLE_END_DRAIN_TIMEOUT", "60")
+            ),
             state_dir=os.getenv("OPENCLAW_STATE_DIR"),
         )
 
@@ -217,15 +238,17 @@ class OpenClawGatewaySettings:
 # 工作空间配置
 # ==============================================================================
 
+
 @dataclass(frozen=True)
 class WorkspaceSettings:
     """工作空间目录配置
-    
+
     环境变量:
         WITTY_WORKSPACE_ROOT: 工作空间根目录, 默认 ~/.witty
         WITTY_AGENT_SERVER_APP_DIR: Agent 服务器应用目录, 可选
         WITTY_RECOVERY_MAX_CONCURRENT: 启动时恢复 agent 的最大并发数, 默认 5
     """
+
     root: str = "~/.witty"
     agent_server_app_dir: str | None = None
     recovery_max_concurrent: int = 5
@@ -235,7 +258,9 @@ class WorkspaceSettings:
         return cls(
             root=os.getenv("WITTY_WORKSPACE_ROOT", "~/.witty"),
             agent_server_app_dir=os.getenv("WITTY_AGENT_SERVER_APP_DIR"),
-            recovery_max_concurrent=int(os.getenv("WITTY_RECOVERY_MAX_CONCURRENT", "5")),
+            recovery_max_concurrent=int(
+                os.getenv("WITTY_RECOVERY_MAX_CONCURRENT", "5")
+            ),
         )
 
     def root_path(self) -> Path:
@@ -247,13 +272,15 @@ class WorkspaceSettings:
 # OpenClaw 配置
 # ==============================================================================
 
+
 @dataclass(frozen=True)
 class OpenClawSettings:
     """OpenClaw 通用配置
-    
+
     环境变量:
         OPENCLAW_CONFIG_PATH: OpenClaw 配置文件路径, 默认 ~/.openclaw/openclaw.json
     """
+
     config_path: str = "~/.openclaw/openclaw.json"
 
     @classmethod
@@ -270,6 +297,7 @@ class OpenClawSettings:
 # ==============================================================================
 # Witty Insight 配置
 # ==============================================================================
+
 
 @dataclass(frozen=True)
 class InsightSettings:
@@ -292,7 +320,8 @@ class InsightSettings:
         raw_token = os.getenv("WITTY_INSIGHT_BEARER_TOKEN")
         bearer_token = raw_token.strip() or None if raw_token is not None else None
         return cls(
-            enabled=os.getenv("WITTY_INSIGHT_ENABLED", "true").lower() in ("1", "true", "yes"),
+            enabled=os.getenv("WITTY_INSIGHT_ENABLED", "true").lower()
+            in ("1", "true", "yes"),
             base_url=os.getenv("WITTY_INSIGHT_BASE_URL", "http://127.0.0.1:7396"),
             timeout_seconds=float(os.getenv("WITTY_INSIGHT_TIMEOUT_SECONDS", "10")),
             bearer_token=bearer_token,
@@ -303,13 +332,15 @@ class InsightSettings:
 # OpenCode 配置
 # ==============================================================================
 
+
 @dataclass(frozen=True)
 class OpenCodeSettings:
     """OpenCode runtime 配置。
-    
+
     环境变量:
         OPENCODE_STATE_DIR: opencode 状态存储目录, 默认 ~/.opencode
     """
+
     state_dir: str = "~/.opencode"
 
     @classmethod
@@ -326,6 +357,7 @@ class OpenCodeSettings:
 # Runtime 统一配置
 # ==============================================================================
 
+
 @dataclass(frozen=True)
 class RuntimeSettings:
     """Runtime 调度配置。
@@ -337,6 +369,7 @@ class RuntimeSettings:
         WITTY_RUNTIME_DEFAULT: 当前实例运行的 runtime 类型, 默认 openclaw
         WITTY_RUNTIME_SUPPORTED: 镜像支持的所有 runtime 类型, 默认 openclaw,opencode
     """
+
     default_type: str = "openclaw"
     supported: tuple[str, ...] = ("openclaw", "opencode")
 
@@ -353,16 +386,60 @@ class RuntimeSettings:
 
 
 # ==============================================================================
+# 定时任务调度配置
+# ==============================================================================
+
+
+@dataclass(frozen=True)
+class SchedulerSettings:
+    """定时任务调度器配置。
+
+    环境变量:
+        WITTY_SCHEDULER_TZ: 默认时区 (IANA 名称), 默认 Asia/Shanghai
+        WITTY_SCHEDULER_MISFIRE_GRACE_SECONDS: 错过触发后的宽限秒数, 默认 300
+        WITTY_SCHEDULER_MAX_RUN_RECORDS: 每个任务保留的最大运行记录数, 默认 100
+        WITTY_SCHEDULER_ORPHAN_RUN_TIMEOUT_SECONDS: 服务重启时视为孤儿运行的超时秒数, 默认 1800
+    """
+
+    timezone: str = "Asia/Shanghai"
+    misfire_grace_seconds: int = 300
+    max_run_records: int = 100
+    orphan_run_timeout_seconds: int = 1800
+
+    @classmethod
+    def from_env(cls) -> "SchedulerSettings":
+        timezone = os.getenv("WITTY_SCHEDULER_TZ", "Asia/Shanghai")
+        try:
+            ZoneInfo(timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(
+                f"Invalid timezone configured via WITTY_SCHEDULER_TZ: {timezone!r}"
+            ) from exc
+        return cls(
+            timezone=timezone,
+            misfire_grace_seconds=int(
+                os.getenv("WITTY_SCHEDULER_MISFIRE_GRACE_SECONDS", "300")
+            ),
+            max_run_records=int(os.getenv("WITTY_SCHEDULER_MAX_RUN_RECORDS", "100")),
+            orphan_run_timeout_seconds=int(
+                os.getenv("WITTY_SCHEDULER_ORPHAN_RUN_TIMEOUT_SECONDS", "1800")
+            ),
+        )
+
+
+# ==============================================================================
 # 主配置类
 # ==============================================================================
+
 
 @dataclass(frozen=True)
 class Settings:
     """Witty Service 统一配置容器
-    
+
     整合所有子配置模块，通过 from_env() 类方法从环境变量加载配置。
     使用 get_settings() 函数获取单例配置实例。
     """
+
     auth_token: str
     cors: CorsSettings
     database: DatabaseSettings
@@ -374,6 +451,7 @@ class Settings:
     insight: InsightSettings
     opencode: OpenCodeSettings
     runtime: RuntimeSettings
+    scheduler: SchedulerSettings
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -390,6 +468,7 @@ class Settings:
             insight=InsightSettings.from_env(),
             opencode=OpenCodeSettings.from_env(),
             runtime=RuntimeSettings.from_env(),
+            scheduler=SchedulerSettings.from_env(),
         )
 
 
@@ -402,10 +481,10 @@ _settings: Settings | None = None
 
 def get_settings() -> Settings:
     """获取配置单例实例
-    
+
     使用全局单例模式，首次调用时从环境变量加载配置，
     后续调用直接返回缓存的配置实例。
-    
+
     Returns:
         Settings: 配置实例
     """
@@ -413,4 +492,3 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = Settings.from_env()
     return _settings
-

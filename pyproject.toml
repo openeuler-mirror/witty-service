@@ -45,6 +45,7 @@ dependencies = [
   "python-multipart>=0.0.29",
   "gitpython>=3.1.40",
   "docker>=7.0",
+  "apscheduler>=3.11,<4",
 ]
 
 [project.optional-dependencies]
