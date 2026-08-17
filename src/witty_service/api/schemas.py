@@ -25,7 +25,6 @@ class CreateAgentRequest(BaseModel):
     adapter_type: str = Field(min_length=1)
     idle_timeout_seconds: int = Field(gt=0)
     sandbox_id: str | None = None
-    has_scheduled_tasks: bool = False
     model_id: str | None = None
     mcp_server_list: list[str] = Field(default_factory=list)
 
@@ -39,7 +38,6 @@ class CreateAgentHubRequest(BaseModel):
     adapter_type: str = Field(min_length=1)
     idle_timeout_seconds: int = Field(gt=0)
     sandbox_id: str | None = None
-    has_scheduled_tasks: bool = False
     model_id: str | None = None
 
 
@@ -118,7 +116,6 @@ class AgentResponse(BaseModel):
     sandbox_id: str | None
     workspace_path: str
     idle_timeout_seconds: int
-    has_scheduled_tasks: bool
     model_id: str | None = None
     mcp_server_list: list[str] = Field(default_factory=list)
     created_at: UtcDatetime

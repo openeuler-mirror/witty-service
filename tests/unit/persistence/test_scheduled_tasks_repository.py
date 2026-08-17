@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from witty_service.domain.enums import AgentStatus
 from witty_service.persistence.db import (
@@ -97,18 +98,6 @@ def test_scheduled_task_crud(repo: SqliteRepository) -> None:
     assert toggled.enabled is True
 
 
-def test_scheduled_task_agent_flag_and_count(repo: SqliteRepository) -> None:
-    _create_agent(repo)
-    _create_task(repo)
-    _create_task(repo, name="每日报表")
-
-    assert repo.count_scheduled_tasks_for_agent("agent-1") == 2
-    assert repo.count_scheduled_tasks_for_agent("missing") == 0
-
-    agent = repo.update_agent_has_scheduled_tasks("agent-1", True)
-    assert agent.has_scheduled_tasks is True
-
-
 def test_delete_agent_cascades_scheduled_tasks(repo: SqliteRepository) -> None:
     _create_agent(repo)
     task = _create_task(repo)
@@ -138,7 +127,10 @@ def test_mark_session_scheduled_sets_provenance(repo: SqliteRepository) -> None:
     assert marked.scheduled_task_id == task.id
     assert repo.get_session(session.id).scheduled_task_id == task.id
 
-    summaries = repo.list_sessions_with_summary("agent-1")
+    # 默认排除定时会话：侧栏“最近对话”不再混入定时会话。
+    assert repo.list_sessions_with_summary("agent-1") == []
+    # 显式包含时仍能看到归属标记。
+    summaries = repo.list_sessions_with_summary("agent-1", exclude_scheduled=False)
     assert summaries[0]["scheduled_task_id"] == task.id
 
     agents = repo.list_agents_with_conversations()
@@ -170,6 +162,7 @@ def test_delete_scheduled_task_cascades_sessions(repo: SqliteRepository) -> None
 def test_scheduled_task_run_crud_and_ordering(repo: SqliteRepository) -> None:
     _create_agent(repo)
     task = _create_task(repo)
+    session = repo.create_session("agent-1")
 
     run_1 = repo.create_scheduled_task_run(task_id=task.id, status="running")
     run_2 = repo.create_scheduled_task_run(task_id=task.id, status="succeeded")
@@ -183,19 +176,20 @@ def test_scheduled_task_run_crud_and_ordering(repo: SqliteRepository) -> None:
     updated = repo.update_scheduled_task_run(
         run_1.id,
         status="failed",
-        session_id="session-1",
+        session_id=session.id,
         error="boom",
         started_at=run_1.started_at,
         finished_at=datetime.now(UTC),
     )
     assert updated.status == "failed"
-    assert updated.session_id == "session-1"
+    assert updated.session_id == session.id
     assert updated.error == "boom"
 
 
-def test_list_scheduled_task_runs_drops_session_id_for_deleted_session(
+def test_delete_session_removes_associated_run(
     repo: SqliteRepository,
 ) -> None:
+    """删除会话时，引用它的执行记录一并删除，不留悬挂 session_id。"""
     _create_agent(repo)
     task = _create_task(repo)
     session = repo.create_session("agent-1")
@@ -213,27 +207,23 @@ def test_list_scheduled_task_runs_drops_session_id_for_deleted_session(
 
     repo.delete_session(session.id)
 
-    assert repo.list_scheduled_task_runs(task.id)[0].session_id is None
+    assert repo.list_scheduled_task_runs(task.id) == []
+    assert repo.get_scheduled_task_run(run.id) is None
 
 
-def test_list_scheduled_task_runs_drops_dangling_session_id(
+def test_run_session_id_fk_rejects_dangling_session(
     repo: SqliteRepository,
 ) -> None:
-    """运行记录引用的会话已不存在时，列表不再返回失效的 session_id。"""
+    """session_id 是外键：引用不存在的会话由数据库直接拒绝，不再有悬挂引用。"""
     _create_agent(repo)
     task = _create_task(repo)
-    run = repo.create_scheduled_task_run(task_id=task.id, status="succeeded")
-    repo.update_scheduled_task_run(
-        run.id,
-        status="succeeded",
-        session_id="ghost-session",
-        error=None,
-        started_at=None,
-        finished_at=None,
-    )
 
-    listed = repo.list_scheduled_task_runs(task.id)
-    assert listed[0].session_id is None
+    with pytest.raises(IntegrityError):
+        repo.create_scheduled_task_run(
+            task_id=task.id,
+            status="succeeded",
+            session_id="ghost-session",
+        )
 
 
 def test_list_scheduled_task_runs_by_task_ids_groups_and_orders(
@@ -264,26 +254,48 @@ def test_list_scheduled_task_runs_by_task_ids_groups_and_orders(
     assert grouped["missing-task"] == []
 
 
-def test_list_scheduled_task_runs_by_task_ids_drops_dangling_session(
+def test_list_scheduled_task_runs_page_aggregates_and_paginates(
+    repo: SqliteRepository,
+) -> None:
+    """跨任务聚合分页：created_at 降序、附带 task_name/agent_id、返回 total。"""
+    _create_agent(repo)
+    _create_agent(repo, agent_id="agent-2")
+    task_a = _create_task(repo, name="任务A")
+    task_b = _create_task(repo, name="任务B", agent_id="agent-2")
+    for task, count in ((task_a, 3), (task_b, 2)):
+        for _ in range(count):
+            repo.create_scheduled_task_run(task_id=task.id, status="succeeded")
+
+    records, total = repo.list_scheduled_task_runs_page(limit=2, offset=1)
+
+    assert total == 5
+    assert len(records) == 2
+    # 创建顺序 a1,a2,a3,b1,b2 → 降序 [b2,b1,a3,a2,a1]；offset=1 取 [b1,a3]
+    assert [r.task_id for r in records] == [task_b.id, task_a.id]
+    assert records[0].task_name == "任务B"
+    assert records[0].agent_id == "agent-2"
+    assert records[1].task_name == "任务A"
+
+    first_page, first_total = repo.list_scheduled_task_runs_page(limit=3, offset=0)
+    assert first_total == 5
+    assert len(first_page) == 3
+
+
+def test_list_scheduled_task_runs_page_filters_by_agent(
     repo: SqliteRepository,
 ) -> None:
     _create_agent(repo)
-    task = _create_task(repo)
-    run = repo.create_scheduled_task_run(task_id=task.id, status="succeeded")
-    repo.update_scheduled_task_run(
-        run.id,
-        status="succeeded",
-        session_id="ghost-session",
-        error=None,
-        started_at=None,
-        finished_at=None,
-    )
+    _create_agent(repo, agent_id="agent-2")
+    task_a = _create_task(repo)
+    task_b = _create_task(repo, agent_id="agent-2")
+    for task, count in ((task_a, 3), (task_b, 2)):
+        for _ in range(count):
+            repo.create_scheduled_task_run(task_id=task.id, status="succeeded")
 
-    grouped = repo.list_scheduled_task_runs_by_task_ids(
-        task_ids=[task.id],
-        limit_per_task=10,
-    )
-    assert grouped[task.id][0].session_id is None
+    records, total = repo.list_scheduled_task_runs_page(agent_id="agent-1")
+
+    assert total == 3
+    assert all(record.agent_id == "agent-1" for record in records)
 
 
 def test_find_stale_scheduled_task_runs(repo: SqliteRepository) -> None:

@@ -94,7 +94,6 @@ class AgentCreateRequest:
     idle_timeout_seconds: int
     description: str = ""
     sandbox_id: str | None = None
-    has_scheduled_tasks: bool = False
     model_id: str | None = None
     mcp_server_list: list[str] = field(default_factory=list)
 
@@ -122,7 +121,6 @@ class AgentRepository(Protocol):
         description: str = "",
         status: AgentStatus = AgentStatus.creating,
         sandbox_id: str | None = None,
-        has_scheduled_tasks: bool = False,
         model_id: str | None = None,
         mcp_server_list: list[str] | None = None,
         last_active_at: Any | None = None,
@@ -2025,7 +2023,6 @@ class AgentManager:
             idle_timeout_seconds=request.idle_timeout_seconds,
             status=AgentStatus.creating,
             sandbox_id=request.sandbox_id,
-            has_scheduled_tasks=request.has_scheduled_tasks,
             model_id=request.model_id,
             mcp_server_list=request.mcp_server_list,
         )

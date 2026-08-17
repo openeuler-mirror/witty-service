@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from witty_service.api.schemas import UtcDatetime
+from witty_service.domain.enums import ScheduledTaskRunStatus
 
 
 class CreateScheduledTaskRequest(BaseModel):
@@ -80,11 +81,25 @@ class ScheduledTaskRunResponse(BaseModel):
     id: str
     task_id: str
     session_id: str | None
-    status: str
+    status: ScheduledTaskRunStatus
     error: str | None
     started_at: UtcDatetime | None
     finished_at: UtcDatetime | None
     created_at: UtcDatetime
+
+
+class ScheduledTaskRunWithTaskResponse(ScheduledTaskRunResponse):
+    """执行记录 + 所属任务元数据（跨任务聚合分页接口使用）。"""
+
+    task_name: str
+    agent_id: str
+
+
+class ScheduledTaskRunsPageResponse(BaseModel):
+    items: list[ScheduledTaskRunWithTaskResponse]
+    total: int
+    limit: int
+    offset: int
 
 
 class ScheduledTaskTemplateResponse(BaseModel):

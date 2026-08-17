@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -9,7 +9,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from witty_service.domain.enums import AgentStatus
+from witty_service.domain.enums import AgentStatus, ScheduledTaskRunStatus
 from witty_service.domain.errors import session_not_found
 from witty_service.persistence.orm import (
     AgentORM,
@@ -41,7 +41,6 @@ class AgentRecord:
     sandbox_id: str | None
     workspace_path: str
     idle_timeout_seconds: int
-    has_scheduled_tasks: bool
     model_id: str | None
     mcp_server_list: list[str]
     last_active_at: datetime | None
@@ -95,11 +94,19 @@ class ScheduledTaskRunRecord:
     id: str
     task_id: str
     session_id: str | None
-    status: str
+    status: ScheduledTaskRunStatus
     error: str | None
     started_at: datetime | None
     finished_at: datetime | None
     created_at: datetime
+
+
+@dataclass(slots=True)
+class ScheduledTaskRunWithTaskRecord(ScheduledTaskRunRecord):
+    """执行记录 + 所属任务元数据（跨任务聚合分页用）。"""
+
+    task_name: str
+    agent_id: str
 
 
 @dataclass(slots=True)
@@ -371,7 +378,6 @@ class SqliteRepository:
         description: str = "",
         status: AgentStatus | str = AgentStatus.creating,
         sandbox_id: str | None = None,
-        has_scheduled_tasks: bool = False,
         model_id: str | None = None,
         last_active_at: datetime | None = None,
     ) -> AgentRecord:
@@ -385,7 +391,6 @@ class SqliteRepository:
             description=description,
             status=status,
             sandbox_id=sandbox_id,
-            has_scheduled_tasks=has_scheduled_tasks,
             model_id=model_id,
             last_active_at=last_active_at,
         )
@@ -402,7 +407,6 @@ class SqliteRepository:
         description: str = "",
         status: AgentStatus | str = AgentStatus.creating,
         sandbox_id: str | None = None,
-        has_scheduled_tasks: bool = False,
         model_id: str | None = None,
         mcp_server_list: list[str] | None = None,
         last_active_at: datetime | None = None,
@@ -418,7 +422,6 @@ class SqliteRepository:
                 sandbox_id=sandbox_id,
                 workspace_path=workspace_path,
                 idle_timeout_seconds=idle_timeout_seconds,
-                has_scheduled_tasks=has_scheduled_tasks,
                 model_id=model_id,
                 mcp_server_list=mcp_server_list or [],
                 last_active_at=last_active_at,
@@ -515,7 +518,6 @@ class SqliteRepository:
                         "sandbox_id": agent_row.sandbox_id,
                         "workspace_path": agent_row.workspace_path,
                         "idle_timeout_seconds": agent_row.idle_timeout_seconds,
-                        "has_scheduled_tasks": agent_row.has_scheduled_tasks,
                         "model_id": agent_row.model_id,
                         "created_at": agent_row.created_at,
                         "updated_at": agent_row.updated_at,
@@ -721,11 +723,8 @@ class SqliteRepository:
             row = session.get(SessionORM, session_id)
             if row is None:
                 return
-            # 会话删除后，解除定时任务运行记录对它的引用，
-            # 避免前端拿到指向已删除会话的 session_id 后反复请求报 SESSION_NOT_FOUND。
-            session.query(ScheduledTaskRunORM).filter(
-                ScheduledTaskRunORM.session_id == session_id
-            ).update({"session_id": None}, synchronize_session=False)
+            # 删除会话时，引用它的定时任务执行记录由 DB 外键
+            # (scheduled_task_runs.session_id ON DELETE CASCADE) 级联删除。
             session.delete(row)
             session.commit()
 
@@ -1128,7 +1127,9 @@ class SqliteRepository:
             session.refresh(row)
             return self._to_session_record(row)
 
-    def list_sessions_with_summary(self, agent_id: str) -> list[dict[str, Any]]:
+    def list_sessions_with_summary(
+        self, agent_id: str, *, exclude_scheduled: bool = True
+    ) -> list[dict[str, Any]]:
         with self._session_factory() as session:
             msg_count_subq = (
                 session.query(
@@ -1151,7 +1152,7 @@ class SqliteRepository:
                 .scalar_subquery()
             )
 
-            rows = (
+            query = (
                 session.query(
                     SessionORM,
                     func.coalesce(msg_count_subq.c.msg_count, 0),
@@ -1159,9 +1160,10 @@ class SqliteRepository:
                 )
                 .outerjoin(msg_count_subq, SessionORM.id == msg_count_subq.c.session_id)
                 .filter(SessionORM.agent_id == agent_id)
-                .order_by(SessionORM.updated_at.desc())
-                .all()
             )
+            if exclude_scheduled:
+                query = query.filter(SessionORM.scheduled_task_id.is_(None))
+            rows = query.order_by(SessionORM.updated_at.desc()).all()
             result = []
             for row, msg_count, last_status in rows:
                 result.append(
@@ -1269,7 +1271,6 @@ class SqliteRepository:
             sandbox_id=row.sandbox_id,
             workspace_path=row.workspace_path,
             idle_timeout_seconds=row.idle_timeout_seconds,
-            has_scheduled_tasks=row.has_scheduled_tasks,
             model_id=row.model_id,
             mcp_server_list=row.mcp_server_list or [],
             last_active_at=row.last_active_at,
@@ -2047,35 +2048,12 @@ class SqliteRepository:
             session.delete(row)
             session.commit()
 
-    def count_scheduled_tasks_for_agent(self, agent_id: str) -> int:
-        with self._session_factory() as session:
-            return (
-                session.query(func.count(ScheduledTaskORM.id))
-                .filter(ScheduledTaskORM.agent_id == agent_id)
-                .scalar()
-                or 0
-            )
-
-    def update_agent_has_scheduled_tasks(
-        self,
-        agent_id: str,
-        has_scheduled_tasks: bool,
-    ) -> AgentRecord:
-        with self._session_factory() as session:
-            row = session.get(AgentORM, agent_id)
-            if row is None:
-                raise KeyError(f"Agent not found: {agent_id}")
-            row.has_scheduled_tasks = has_scheduled_tasks
-            session.commit()
-            session.refresh(row)
-            return self._to_agent_record(row)
-
     def create_scheduled_task_run(
         self,
         *,
         run_id: str | None = None,
         task_id: str,
-        status: str = "pending",
+        status: ScheduledTaskRunStatus = ScheduledTaskRunStatus.running,
         session_id: str | None = None,
         error: str | None = None,
         started_at: datetime | None = None,
@@ -2111,21 +2089,13 @@ class SqliteRepository:
     ) -> list[ScheduledTaskRunRecord]:
         with self._session_factory() as session:
             rows = (
-                session.query(ScheduledTaskRunORM, SessionORM.id)
-                .outerjoin(SessionORM, SessionORM.id == ScheduledTaskRunORM.session_id)
+                session.query(ScheduledTaskRunORM)
                 .filter(ScheduledTaskRunORM.task_id == task_id)
                 .order_by(ScheduledTaskRunORM.created_at.desc())
                 .limit(limit)
                 .all()
             )
-            records: list[ScheduledTaskRunRecord] = []
-            for run_row, session_exists in rows:
-                # 会话已被删除时不再返回失效的 session_id，
-                # 前端据此跳过该运行记录的会话加载，避免持续 404/400 报错。
-                if session_exists is None:
-                    run_row.session_id = None
-                records.append(self._to_scheduled_task_run_record(run_row))
-            return records
+            return [self._to_scheduled_task_run_record(row) for row in rows]
 
     def list_scheduled_task_runs_by_task_ids(
         self,
@@ -2157,24 +2127,68 @@ class SqliteRepository:
                 .subquery()
             )
             rows = (
-                session.query(ScheduledTaskRunORM, SessionORM.id)
+                session.query(ScheduledTaskRunORM)
                 .join(ranked, ranked.c.run_id == ScheduledTaskRunORM.id)
-                .outerjoin(SessionORM, SessionORM.id == ScheduledTaskRunORM.session_id)
                 .filter(ranked.c.rn <= limit_per_task)
                 .order_by(ScheduledTaskRunORM.created_at.desc())
                 .all()
             )
-        for run_row, session_exists in rows:
-            if session_exists is None:
-                run_row.session_id = None
+        for run_row in rows:
             result[run_row.task_id].append(self._to_scheduled_task_run_record(run_row))
         return result
+
+    def list_scheduled_task_runs_page(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        agent_id: str | None = None,
+    ) -> tuple[list[ScheduledTaskRunWithTaskRecord], int]:
+        """跨任务聚合分页查询执行记录（created_at 降序），供 GET /scheduled-tasks/runs 使用。
+
+        返回 (records, total)：records 附带 task_name/agent_id。
+        """
+        with self._session_factory() as session:
+            # 复用同一个 join + filter 的 base 查询，count 与分页共用，避免条件漂移。
+            base = session.query(ScheduledTaskRunORM).join(
+                ScheduledTaskORM, ScheduledTaskORM.id == ScheduledTaskRunORM.task_id
+            )
+            if agent_id is not None:
+                base = base.filter(ScheduledTaskORM.agent_id == agent_id)
+
+            total = base.count()
+            rows = (
+                base.with_entities(
+                    ScheduledTaskRunORM,
+                    ScheduledTaskORM.name,
+                    ScheduledTaskORM.agent_id,
+                )
+                .order_by(
+                    ScheduledTaskRunORM.created_at.desc(),
+                    ScheduledTaskRunORM.id.desc(),
+                )
+                .offset(offset)
+                .limit(limit)
+                .all()
+            )
+
+            records: list[ScheduledTaskRunWithTaskRecord] = []
+            for run_row, task_name, task_agent_id in rows:
+                # 从基础记录派生，父类字段变化时无需在此逐个复制。
+                base_record = self._to_scheduled_task_run_record(run_row)
+                records.append(
+                    ScheduledTaskRunWithTaskRecord(
+                        **asdict(base_record),
+                        task_name=task_name,
+                        agent_id=task_agent_id,
+                    )
+                )
+            return records, total
 
     def update_scheduled_task_run(
         self,
         run_id: str,
         *,
-        status: str,
+        status: ScheduledTaskRunStatus,
         session_id: str | None,
         error: str | None,
         started_at: datetime | None,
@@ -2196,7 +2210,9 @@ class SqliteRepository:
     def find_stale_scheduled_task_runs(
         self,
         stale_before: datetime,
-        statuses: tuple[str, ...] = ("pending", "running"),
+        statuses: tuple[ScheduledTaskRunStatus, ...] = (
+            ScheduledTaskRunStatus.running,
+        ),
     ) -> list[ScheduledTaskRunRecord]:
         with self._session_factory() as session:
             rows = (
@@ -2256,7 +2272,7 @@ class SqliteRepository:
             id=row.id,
             task_id=row.task_id,
             session_id=row.session_id,
-            status=row.status,
+            status=ScheduledTaskRunStatus(row.status),
             error=row.error,
             started_at=row.started_at,
             finished_at=row.finished_at,

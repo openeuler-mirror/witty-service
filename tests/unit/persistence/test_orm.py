@@ -13,13 +13,12 @@
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
-from sqlalchemy import UniqueConstraint, create_engine, select
+from sqlalchemy import UniqueConstraint, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 from witty_service.persistence.db import (
     create_session_factory,
@@ -43,7 +42,6 @@ from witty_service.persistence.orm import (
     SkillRepositoryORM,
     utcnow,
 )
-
 
 # ---------------------------------------------------------------------------
 # 夹具
@@ -80,7 +78,6 @@ def _new_agent(
         status=status,
         workspace_path="/tmp/workspace",
         idle_timeout_seconds=300,
-        has_scheduled_tasks=False,
         mcp_server_list=[],
     )
     defaults.update(overrides)
@@ -153,7 +150,6 @@ def test_session_table_schema_includes_runtime_identity_columns() -> None:
 def test_agent_orm_default_values() -> None:
     agent = _new_agent()
     assert agent.description == ""
-    assert agent.has_scheduled_tasks is False
     assert agent.mcp_server_list == []
     assert agent.sandbox_id is None
     assert agent.model_id is None
@@ -162,7 +158,9 @@ def test_agent_orm_default_values() -> None:
 
 def test_agent_orm_create_and_query(session: Session) -> None:
     now = utcnow()
-    agent = _new_agent(last_active_at=now, model_id="model-1", mcp_server_list=["x", "y"])
+    agent = _new_agent(
+        last_active_at=now, model_id="model-1", mcp_server_list=["x", "y"]
+    )
     session.add(agent)
     session.commit()
 
@@ -225,7 +223,9 @@ def test_agent_runtime_state_defaults(session: Session) -> None:
 def test_agent_runtime_state_cascade_delete(session: Session) -> None:
     session.add(_new_agent())
     session.commit()
-    state = AgentRuntimeStateORM(agent_id="agent-1", adapter_base_url="http://x", adapter_ready=True)
+    state = AgentRuntimeStateORM(
+        agent_id="agent-1", adapter_base_url="http://x", adapter_ready=True
+    )
     state.runtime_payload_json = {"foo": "bar"}
     session.add(state)
     session.commit()
@@ -411,7 +411,15 @@ def test_message_orm_cascade_delete_with_session(session: Session) -> None:
 
 def test_message_event_orm_unique_seq_per_session(session: Session) -> None:
     _new_session(session)
-    session.add(MessageORM(id="msg-1", agent_id="agent-1", session_id="sess-1", role="user", content="x"))
+    session.add(
+        MessageORM(
+            id="msg-1",
+            agent_id="agent-1",
+            session_id="sess-1",
+            role="user",
+            content="x",
+        )
+    )
     session.commit()
 
     session.add(
@@ -451,7 +459,15 @@ def test_message_event_orm_seq_index_present() -> None:
 
 def test_message_event_orm_set_null_on_message_delete(session: Session) -> None:
     _new_session(session)
-    session.add(MessageORM(id="msg-1", agent_id="agent-1", session_id="sess-1", role="user", content="x"))
+    session.add(
+        MessageORM(
+            id="msg-1",
+            agent_id="agent-1",
+            session_id="sess-1",
+            role="user",
+            content="x",
+        )
+    )
     session.commit()
     session.add(
         MessageEventORM(
@@ -550,10 +566,14 @@ def test_skill_unique_repo_relative_path(session: Session) -> None:
     repo = SkillRepositoryORM(repo_id="r-1", repo_name="r1", source_type="git")
     session.add(repo)
     session.commit()
-    session.add(SkillORM(skill_id="s-1", repo_id="r-1", skill_name="a", relative_path="x/y.md"))
+    session.add(
+        SkillORM(skill_id="s-1", repo_id="r-1", skill_name="a", relative_path="x/y.md")
+    )
     session.commit()
 
-    session.add(SkillORM(skill_id="s-2", repo_id="r-1", skill_name="b", relative_path="x/y.md"))
+    session.add(
+        SkillORM(skill_id="s-2", repo_id="r-1", skill_name="b", relative_path="x/y.md")
+    )
     with pytest.raises(IntegrityError):
         session.commit()
     session.rollback()
@@ -563,7 +583,9 @@ def test_skill_cascade_delete_with_repo(session: Session) -> None:
     repo = SkillRepositoryORM(repo_id="r-1", repo_name="r1", source_type="git")
     session.add(repo)
     session.commit()
-    session.add(SkillORM(skill_id="s-1", repo_id="r-1", skill_name="a", relative_path="a.md"))
+    session.add(
+        SkillORM(skill_id="s-1", repo_id="r-1", skill_name="a", relative_path="a.md")
+    )
     session.commit()
 
     session.delete(session.get(SkillRepositoryORM, "r-1"))
@@ -660,7 +682,9 @@ def test_agent_skill_wittyhub_without_repo_id_ok(session: Session) -> None:
 def test_agent_skill_clawhub_with_repo_id_ok(session: Session) -> None:
     session.add(_new_agent())
     session.commit()
-    session.add(SkillRepositoryORM(repo_id="r-1", repo_name="r1", source_type="clawhub"))
+    session.add(
+        SkillRepositoryORM(repo_id="r-1", repo_name="r1", source_type="clawhub")
+    )
     session.commit()
     session.add(
         AgentSkillORM(

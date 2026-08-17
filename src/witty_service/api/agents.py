@@ -213,7 +213,6 @@ def create_agent(
             adapter_type=payload.adapter_type,
             idle_timeout_seconds=payload.idle_timeout_seconds,
             sandbox_id=payload.sandbox_id,
-            has_scheduled_tasks=payload.has_scheduled_tasks,
             model_id=payload.model_id,
             mcp_server_list=payload.mcp_server_list,
         )
@@ -252,7 +251,6 @@ def create_agent_from_agenthub(
         adapter_type=payload.adapter_type,
         idle_timeout_seconds=payload.idle_timeout_seconds,
         sandbox_id=payload.sandbox_id,
-        has_scheduled_tasks=payload.has_scheduled_tasks,
         model_id=payload.model_id,
     )
 
@@ -409,7 +407,10 @@ def list_conversations(
     agent_id: str,
     services: ServiceContainer = Depends(get_services),
 ) -> list[ConversationSummaryResponse]:
-    summaries = services.repository.list_sessions_with_summary(agent_id)
+    # 侧栏“最近对话”只展示用户手动会话，定时任务产生的会话不混入。
+    summaries = services.repository.list_sessions_with_summary(
+        agent_id, exclude_scheduled=True
+    )
     return [ConversationSummaryResponse(**s) for s in summaries]
 
 
@@ -871,7 +872,6 @@ def _to_agent_response(
         sandbox_id=agent.sandbox_id,
         workspace_path=agent.workspace_path,
         idle_timeout_seconds=agent.idle_timeout_seconds,
-        has_scheduled_tasks=agent.has_scheduled_tasks,
         model_id=agent.model_id,
         mcp_server_list=agent.mcp_server_list,
         created_at=agent.created_at,

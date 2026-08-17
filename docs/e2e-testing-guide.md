@@ -7,6 +7,7 @@
 3. 故障排查清单
 
 当前接口基线：
+
 - Agent 生命周期：`/agents/*`
 - Session：`/agents/{agent_id}/sessions/*`
 - 消息接口：`/agents/{agent_id}/sessions/{session_id}/messages`、`/agents/{agent_id}/sessions/{session_id}/messages/stream`
@@ -35,6 +36,7 @@ uv run uvicorn witty_service.main:create_app --factory --host 0.0.0.0 --port 800
 ```
 
 建议准备：
+
 - `curl`（HTTP 请求）
 - WebSocket 客户端（示例里使用 `websocket-client`）
 
@@ -47,6 +49,7 @@ uv build
 ```
 
 构建产物会生成在 `dist/` 目录下：
+
 - `witty_service-0.1.0-py3-none-any.whl` - Wheel 包
 - `witty_service-0.1.0.tar.gz` - Source 包
 
@@ -101,6 +104,7 @@ curl -s http://127.0.0.1:8000/healthz
 ```
 
 字段说明：
+
 - `code`: 稳定错误码
 - `message`: 人类可读错误信息
 - `details`: 可选，结构化错误细节
@@ -173,6 +177,7 @@ curl -s http://127.0.0.1:8000/healthz
 | `/insight/export/atif/conversation/{conversation_id}` | `GET` | 导出指定 conversation 的 ATIF 文档 |
 
 说明：
+
 - `GET /agents/{agent_id}/sessions`
 - `POST /agents/{agent_id}/sessions`
 - `GET /agents/{agent_id}/sessions/{session_id}`
@@ -183,12 +188,14 @@ curl -s http://127.0.0.1:8000/healthz
 未显式传入时，`witty-service` 会调用远端 `/agent/list`，优先使用 `defaultId`，若不存在则回退到 `default=true` 的条目。
 
 Agent 接口与 `runtime_agent_id` 的关系：
+
 - `witty-service` 自己的 `agent_id` 表示一个沙箱内的 `witty-agent-server` 进程实例
 - 远端 `runtime_agent_id` 表示该进程内的 runtime agent / OpenClaw subagent
 - `POST /agents`、`GET /agents`、`GET /agents/{agent_id}`、`DELETE /agents/{agent_id}`、`POST /agents/{agent_id}/pause`、`POST /agents/{agent_id}/resume` 这些 Agent 生命周期接口**不直接接收** `runtime_agent_id`
 - `runtime_agent_id` 只影响 session 相关接口的远端路由选择，不改变 `witty-service` 自己的 agent 主键语义
 
 Insight BFF 接口说明：
+
 - `/insight/*` 由 `witty-service` 对外提供，是面向前端的聚合接口，不等同于 raw `witty-insight /api/*`
 - `session_id` 表示 Witty session id；`runtime_session_id` 仅作为辅助调试字段保留
 - `witty_agent_id` 是 Insight 数据的主过滤维度
@@ -209,6 +216,7 @@ Insight BFF 接口说明：
 | `local` | 从本地 ZIP 归档注册技能目录 | `local_path`（通常由上传接口生成） |
 
 说明：
+
 - `builtin`、`clawhub`、`wittyhub` 会出现在技能记录的来源字段中，但当前不作为 `POST /skills/repos`、`PATCH /skills/repos/{repo_id}` 的可写入来源。
 - Git 仓库名会按 `url[@branch]` 归一化后生成，重复注册会返回 `400`。
 - 上传 ZIP 时会校验压缩包格式、大小、文件数量和解压后总体积。
@@ -393,7 +401,6 @@ stateDiagram-v2
 | `adapter_type` | string | 是 | 适配器类型：如 `openclaw` |
 | `idle_timeout_seconds` | integer | 是 | 空闲超时时间（秒），必须大于 0 |
 | `sandbox_id` | string | 否 | 沙箱 ID |
-| `has_scheduled_tasks` | boolean | 否 | 是否有定时任务，默认 `false` |
 | `model_id` | string | 否 | 模型 ID，关联 `/models` 中配置的模型 |
 | `mcp_server_list` | array | 否 | MCP Server ID 列表，关联 `/mcp-servers` 中配置的 MCP Server |
 
@@ -410,7 +417,6 @@ stateDiagram-v2
   "sandbox_id": null,
   "workspace_path": "/path/to/workspace",
   "idle_timeout_seconds": 3600,
-  "has_scheduled_tasks": false,
   "mcp_server_list": ["mcp-server-id-1", "mcp-server-id-2"],
   "created_at": "2026-04-10T12:00:00",
   "updated_at": "2026-04-10T12:00:00",
@@ -429,7 +435,6 @@ stateDiagram-v2
 | `sandbox_id` | string \| null | 沙箱 ID |
 | `workspace_path` | string | 工作区路径 |
 | `idle_timeout_seconds` | integer | 空闲超时时间 |
-| `has_scheduled_tasks` | boolean | 是否有定时任务 |
 | `model_id` | string \| null | 模型 ID |
 | `mcp_server_list` | array | MCP Server ID 列表 |
 | `created_at` | datetime | 创建时间 |
@@ -438,6 +443,7 @@ stateDiagram-v2
 | `process_port` | integer \| null | 本地进程沙箱的端口号（仅 `sandbox_type=local_process` 时有值） |
 
 补充说明：
+
 - `default_session_id` 是 Agent 创建成功后立即创建的默认 session
 - 这个默认 session 的远端 `runtime_agent_id` 不是通过 `POST /agents` 入参传入，而是由内部 `/agent/start` 结果决定
 - 如果你需要把后续 session 显式路由到某个 remote runtime agent（例如 `dev`），应在 `POST /agents/{agent_id}/sessions?runtime_agent_id=dev` 时传入
@@ -461,7 +467,6 @@ stateDiagram-v2
 | `adapter_type` | string | 是 | 适配器类型：如 `openclaw` |
 | `idle_timeout_seconds` | integer | 是 | 空闲超时时间（秒），必须大于 0 |
 | `sandbox_id` | string | 否 | 沙箱 ID |
-| `has_scheduled_tasks` | boolean | 否 | 是否有定时任务，默认 `false` |
 | `model_id` | string | 否 | 模型 ID，关联 `/models` 中配置的模型 |
 
 - 输出 `201`（`AgentResponse`，与 `POST /agents` 相同）
@@ -510,7 +515,6 @@ flowchart TD
     "sandbox_id": null,
     "workspace_path": "/path/to/workspace",
     "idle_timeout_seconds": 3600,
-    "has_scheduled_tasks": false,
     "mcp_server_list": ["mcp-server-id-1"],
     "created_at": "2026-04-10T12:00:00",
     "updated_at": "2026-04-10T12:00:00",
@@ -542,7 +546,6 @@ flowchart TD
   "sandbox_id": null,
   "workspace_path": "/path/to/workspace",
   "idle_timeout_seconds": 3600,
-  "has_scheduled_tasks": false,
   "mcp_server_list": ["mcp-server-id-1"],
   "created_at": "2026-04-10T12:00:00",
   "updated_at": "2026-04-10T12:00:00",
@@ -590,7 +593,6 @@ flowchart TD
   "sandbox_id": "sandbox-id",
   "workspace_path": "/path/to/workspace",
   "idle_timeout_seconds": 3600,
-  "has_scheduled_tasks": false,
   "mcp_server_list": ["mcp-server-id-1"],
   "created_at": "2026-04-10T12:00:00",
   "updated_at": "2026-04-10T12:30:00",
@@ -626,7 +628,6 @@ flowchart TD
   "sandbox_id": "sandbox-id",
   "workspace_path": "/path/to/workspace",
   "idle_timeout_seconds": 3600,
-  "has_scheduled_tasks": false,
   "mcp_server_list": ["mcp-server-id-1"],
   "created_at": "2026-04-10T12:00:00",
   "updated_at": "2026-04-10T12:35:00",
@@ -1257,6 +1258,7 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 | `TEMPLATE_REPO_CLONE_FAILED` | 500 | 从 git 克隆 agent 模板仓库失败 |
 
 **HTTP 状态码映射规则：**
+
 - 以 `_NOT_FOUND` 结尾 → `404`
 - 以 `_NOT_SUPPORTED` 或 `_MISMATCH` 结尾 → `400`
 - 以 `INVALID_` 开头 → `409`
@@ -1296,6 +1298,7 @@ SESSION_ID=$(
 ```
 
 说明：
+
 - 若不传 `runtime_agent_id`，会使用远端默认 runtime agent。
 - 若希望显式打到某个 subagent（例如 `dev`），请通过 query 参数传入。
 
@@ -1429,6 +1432,7 @@ curl -s -X DELETE "http://127.0.0.1:8000/agents/${AGENT_ID}" \
 在 Docker 容器中运行 adaptor service（`witty-agent-server`）。
 
 **启动行为：**
+
 - 在随机 `host_port` 启动容器
 - 将本地 `workspace_path` 挂载到容器的 `/witty-workspace`
 - 容器内端口固定为 `8080`
@@ -1445,6 +1449,7 @@ curl -s -X DELETE "http://127.0.0.1:8000/agents/${AGENT_ID}" \
 | `WITTY_DOCKER_STOP_TIMEOUT` | 容器停止超时（秒） | `10` |
 
 **注意事项：**
+
 - `workspace_path` 必须为绝对路径
 - 工作区目录必须存在
 
@@ -1461,6 +1466,7 @@ curl -s -X DELETE "http://127.0.0.1:8000/agents/${AGENT_ID}" \
 | `WITTY_AGENT_SERVER_APP_DIR` | `witty-agent-server` 代码目录（必填） | 空 |
 
 **注意事项：**
+
 - `WITTY_AGENT_SERVER_APP_DIR` 必须指向有效的 `witty-agent-server` 代码目录
 - local process 场景下，每个 `witty-service` agent 都会拉起一个独立的 `witty-agent-server` 进程，并占用一个随机端口
 - `witty-service.agent_id` 表示这个本地子进程实例；远端 `runtime_agent_id` 表示该进程内的 OpenClaw subagent，两者不是同一个维度

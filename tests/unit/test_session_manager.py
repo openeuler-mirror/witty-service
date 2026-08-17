@@ -285,3 +285,52 @@ def test_update_session_runtime_identity_delegates_to_repository() -> None:
         "runtime_session_id": "runtime-session-1",
         "runtime_session_key": "agent:agent-1:session:session-1",
     }
+
+
+@pytest.mark.asyncio
+async def test_delete_session_remote_deletes_locally_when_runtime_delete_fails() -> (
+    None
+):
+    """runtime 删除失败时仍删除本地会话，避免执行记录残留导致侧栏复活。"""
+    repo = RepositoryStub()
+    manager = SessionManager(repo)
+    client = AdaptorClientStub()
+    created = await manager.create_session_remote("agent-1", client)
+
+    original_post = client.post
+
+    async def failing_post(path: str, json: dict):
+        if path.endswith("/delete"):
+            raise httpx.ConnectError("runtime offline")
+        return await original_post(path, json)
+
+    client.post = failing_post  # type: ignore[method-assign]
+
+    await manager.delete_session_remote("agent-1", created.id, client)
+
+    assert created.id in repo.deleted
+    assert repo.get_session(created.id) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_session_remote_deletes_locally_when_runtime_resolution_fails() -> (
+    None
+):
+    """runtime 不可达（解析默认 agent 失败）时仍删除本地会话。"""
+    repo = RepositoryStub()
+    manager = SessionManager(repo)
+    client = AdaptorClientStub()
+    created = await manager.create_session_remote("agent-1", client)
+    # 清除 runtime 映射，强制走 resolve 路径并模拟失败。
+    repo.upsert_session(
+        session_id=created.id,
+        agent_id="agent-1",
+        status="idle",
+        remote_runtime_agent_id=None,
+    )
+    client.agents_payload = {}
+
+    await manager.delete_session_remote("agent-1", created.id, client)
+
+    assert created.id in repo.deleted
+    assert repo.get_session(created.id) is None

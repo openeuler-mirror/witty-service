@@ -21,6 +21,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from witty_service.domain.enums import ScheduledTaskRunStatus
+
+_SCHEDULED_TASK_RUN_STATUS_VALUES = ", ".join(
+    f"'{status.value}'" for status in ScheduledTaskRunStatus
+)
+
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
@@ -55,9 +61,6 @@ class AgentORM(Base):
     sandbox_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     workspace_path: Mapped[str] = mapped_column(Text, nullable=False)
     idle_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
-    has_scheduled_tasks: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False
-    )
     model_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     mcp_server_list: Mapped[list[str]] = mapped_column(
         JSON, nullable=False, default=list
@@ -454,8 +457,9 @@ class ScheduledTaskRunORM(Base):
     __tablename__ = "scheduled_task_runs"
     __table_args__ = (
         Index("ix_scheduled_task_runs_task_created", "task_id", "created_at"),
+        Index("ix_scheduled_task_runs_created_at", "created_at"),
         CheckConstraint(
-            "status IN ('pending', 'running', 'succeeded', 'failed', 'skipped')",
+            f"status IN ({_SCHEDULED_TASK_RUN_STATUS_VALUES})",
             name="ck_scheduled_task_runs_status",
         ),
     )
@@ -467,8 +471,15 @@ class ScheduledTaskRunORM(Base):
         nullable=False,
         index=True,
     )
-    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    session_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=ScheduledTaskRunStatus.running
+    )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),

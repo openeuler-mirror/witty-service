@@ -318,6 +318,53 @@ def test_list_task_runs_passes_limit_through() -> None:
     assert [item.id for item in resp] == ["run-1", "run-2"]
 
 
+def test_list_runs_page_returns_aggregated_page() -> None:
+    services = _services()
+    services.scheduled_task_service.list_runs_page.return_value = (
+        [
+            {
+                "id": "run-1",
+                "task_id": "task-1",
+                "session_id": "session-1",
+                "status": "succeeded",
+                "error": None,
+                "started_at": _now(),
+                "finished_at": _now(),
+                "created_at": _now(),
+                "task_name": "每日竞品追踪",
+                "agent_id": "agent-1",
+            }
+        ],
+        1,
+    )
+
+    resp = tasks_api.list_runs_page(
+        limit=20,
+        offset=0,
+        agent_id=None,
+        services=services,
+    )
+
+    services.scheduled_task_service.list_runs_page.assert_called_once_with(
+        limit=20,
+        offset=0,
+        agent_id=None,
+    )
+    assert resp.total == 1
+    assert resp.limit == 20
+    assert resp.offset == 0
+    assert resp.items[0].task_name == "每日竞品追踪"
+    assert resp.items[0].agent_id == "agent-1"
+
+
+def test_runs_route_declared_before_task_id_route() -> None:
+    """回归防护：/runs 必须声明在 /{task_id} 之前，否则会被当作 task_id 捕获。"""
+    paths = [route.path for route in tasks_api.router.routes]
+    assert paths.index("/scheduled-tasks/runs") < paths.index(
+        "/scheduled-tasks/{task_id}"
+    )
+
+
 def test_get_task_run_returns_record() -> None:
     services = _services()
     services.scheduled_task_service.get_task_run.return_value = _run_record()
