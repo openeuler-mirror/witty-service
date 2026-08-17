@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import httpx
@@ -146,6 +146,7 @@ def test_get_session_raises_for_missing_session() -> None:
         manager.get_session("agent-1", "missing")
 
     assert exc_info.value.code == SESSION_NOT_FOUND
+    assert exc_info.value.status_code == 404
 
 
 def test_get_session_rejects_agent_mismatch() -> None:
@@ -227,13 +228,14 @@ async def test_get_session_remote_404_cleans_local_session_cache() -> None:
         await manager.get_session_remote("agent-1", "remote-session-404", client)
 
     assert exc_info.value.code == SESSION_NOT_FOUND
+    assert exc_info.value.status_code == 404
     assert repo.deleted == ["remote-session-404"]
 
 
 def test_upsert_session_delegates_all_fields() -> None:
     repo = RepositoryStub()
     manager = SessionManager(repo)
-    created_at = datetime.now(timezone.utc)
+    created_at = datetime.now(UTC)
 
     session = manager.upsert_session(
         session_id="session-1",

@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.api import services as services_module
 from witty_service.api.services import ServiceContainer
-from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.config import (
     CorsSettings,
     DatabaseSettings,
@@ -18,6 +18,7 @@ from witty_service.config import (
     OpenClawSettings,
     OpenCodeSettings,
     RuntimeSettings,
+    SchedulerSettings,
     Settings,
     WorkspaceSettings,
 )
@@ -125,14 +126,20 @@ def test_ensure_dir_exists_creates_sqlite_parent(tmp_path) -> None:
     assert db_path.parent.exists()
 
 
-def test_build_default_services_creates_insight_http_client_when_enabled(monkeypatch) -> None:
+def test_build_default_services_creates_insight_http_client_when_enabled(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("WITTY_INSIGHT_ENABLED", "true")
     monkeypatch.setenv("WITTY_INSIGHT_BASE_URL", "http://127.0.0.1:7396")
     monkeypatch.setenv("WITTY_INSIGHT_TIMEOUT_SECONDS", "7.5")
     monkeypatch.setenv("WITTY_INSIGHT_BEARER_TOKEN", "secret-token")
-    monkeypatch.setattr(services_module, "create_sqlite_engine", lambda *_args, **_kwargs: MagicMock())
+    monkeypatch.setattr(
+        services_module, "create_sqlite_engine", lambda *_args, **_kwargs: MagicMock()
+    )
     monkeypatch.setattr(services_module, "init_db", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(services_module, "create_session_factory", lambda *_args, **_kwargs: MagicMock())
+    monkeypatch.setattr(
+        services_module, "create_session_factory", lambda *_args, **_kwargs: MagicMock()
+    )
 
     container = services_module.build_default_services()
 
@@ -144,7 +151,9 @@ def test_build_default_services_creates_insight_http_client_when_enabled(monkeyp
     }
 
 
-def test_build_default_services_passes_database_auto_create_flag(monkeypatch, tmp_path) -> None:
+def test_build_default_services_passes_database_auto_create_flag(
+    monkeypatch, tmp_path
+) -> None:
     engine = MagicMock()
     captured: dict[str, object] = {}
     settings = Settings(
@@ -159,16 +168,21 @@ def test_build_default_services_passes_database_auto_create_flag(monkeypatch, tm
         insight=InsightSettings(enabled=False),
         opencode=OpenCodeSettings(),
         runtime=RuntimeSettings(),
+        scheduler=SchedulerSettings(),
     )
 
     monkeypatch.setattr(services_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(services_module, "create_sqlite_engine", lambda *_args, **_kwargs: engine)
+    monkeypatch.setattr(
+        services_module, "create_sqlite_engine", lambda *_args, **_kwargs: engine
+    )
     monkeypatch.setattr(
         services_module,
         "init_db",
         lambda _engine, **kwargs: captured.update(engine=_engine, **kwargs),
     )
-    monkeypatch.setattr(services_module, "create_session_factory", lambda *_args, **_kwargs: MagicMock())
+    monkeypatch.setattr(
+        services_module, "create_session_factory", lambda *_args, **_kwargs: MagicMock()
+    )
 
     services_module.build_default_services()
 
