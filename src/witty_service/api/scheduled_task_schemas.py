@@ -38,6 +38,16 @@ class UpdateScheduledTaskRequest(BaseModel):
     content: str | None = Field(default=None, min_length=1)
     workspace_folder: str | None = Field(default=None, max_length=512)
 
+    @model_validator(mode="after")
+    def _reject_explicit_nulls(self) -> UpdateScheduledTaskRequest:
+        """部分更新语义：省略字段=保持原值，仅 workspace_folder 可显式传 null 表示清空。"""
+        for field in ("name", "schedule_type", "timezone", "content"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(
+                    f"{field} cannot be null; omit the field to keep its current value"
+                )
+        return self
+
 
 class RunScheduledTaskRequest(BaseModel):
     """手动触发运行时可选请求体：复用前端已建会话，缺省由后端新建。"""

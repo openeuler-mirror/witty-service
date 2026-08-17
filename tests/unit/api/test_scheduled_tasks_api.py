@@ -202,6 +202,27 @@ def test_update_task_omitted_fields_are_not_passed() -> None:
     )
 
 
+@pytest.mark.parametrize("field", ["name", "schedule_type", "timezone", "content"])
+def test_update_task_rejects_explicit_null(field: str) -> None:
+    """非可空字段显式传 null 应被拒绝，避免落到服务层/DB 变成 500。"""
+    with pytest.raises(ValidationError):
+        UpdateScheduledTaskRequest(**{field: None})
+
+
+def test_update_task_allows_explicit_null_for_workspace_folder() -> None:
+    """workspace_folder 显式传 null 表示清空，是唯一允许 null 的更新字段。"""
+    payload = UpdateScheduledTaskRequest(workspace_folder=None)
+    assert payload.model_fields_set == {"workspace_folder"}
+    assert payload.workspace_folder is None
+
+
+def test_update_task_allows_null_for_schedule_only_fields() -> None:
+    """cron_expr/interval_seconds 的 null 由服务层按 schedule_type 语义校验，schema 不拦截。"""
+    payload = UpdateScheduledTaskRequest(cron_expr=None, interval_seconds=None)
+    assert payload.cron_expr is None
+    assert payload.interval_seconds is None
+
+
 def test_delete_task_returns_204() -> None:
     services = _services()
 
