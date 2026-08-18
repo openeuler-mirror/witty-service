@@ -133,9 +133,9 @@ def test_mark_session_scheduled_sets_provenance(repo: SqliteRepository) -> None:
     summaries = repo.list_sessions_with_summary("agent-1", exclude_scheduled=False)
     assert summaries[0]["scheduled_task_id"] == task.id
 
+    # include_conversations 只返回普通会话，定时会话不混入。
     agents = repo.list_agents_with_conversations()
-    conv = agents[0]["conversations"][0]
-    assert conv["scheduled_task_id"] == task.id
+    assert agents[0]["conversations"] == []
 
 
 def test_mark_session_scheduled_missing_session_raises(repo: SqliteRepository) -> None:

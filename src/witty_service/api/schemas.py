@@ -254,6 +254,7 @@ class ConversationDetailResponse(BaseModel):
     agent_id: str
     title: str | None = None
     pinned: bool = False
+    scheduled_task_id: str | None = None
     status: str
     messages: list[dict[str, Any]] = Field(default_factory=list)
     has_more: bool = False
