@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Protocol
 
@@ -14,6 +15,8 @@ from witty_service.domain.errors import (
     session_not_found,
 )
 from witty_service.persistence.repositories import AgentRecord, SessionRecord
+
+logger = logging.getLogger(__name__)
 
 AGENT_NOT_FOUND = "AGENT_NOT_FOUND"
 SESSION_AGENT_MISMATCH = "SESSION_AGENT_MISMATCH"
@@ -278,18 +281,45 @@ class SessionManager:
         adaptor_client: AdaptorHttpClient,
         runtime_agent_id: str | None = None,
     ) -> None:
-        """透传到 witty-agent-server 删除 session"""
+        """删除 session：本地删除为最终动作，不因 runtime 暂不可达而中止。
+
+        定时任务会话（尤其后台 cron 触发的执行）由后端直接创建，删除时若
+        runtime 离线/重启/超时，远端删除会失败；若此时中止本地删除，前端
+        会移除本地会话但服务端会话与执行记录仍在，侧栏随后把该执行记录
+        重新渲染为轻量条目，点击又恢复出已删除会话。因此远端删除仅尽力而为，
+        本地删除（含执行记录级联清理）必须完成。
+        """
         local_session = self.get_session(agent_id, session_id)
         resolved_runtime_agent_id = local_session.remote_runtime_agent_id
         if resolved_runtime_agent_id is None:
-            resolved_runtime_agent_id = await self.resolve_runtime_agent_id(
-                adaptor_client=adaptor_client,
-                runtime_agent_id=runtime_agent_id,
-            )
-        await adaptor_client.post(
-            f"/agents/{resolved_runtime_agent_id}/sessions/{session_id}/delete",
-            json={},
-        )
+            try:
+                resolved_runtime_agent_id = await self.resolve_runtime_agent_id(
+                    adaptor_client=adaptor_client,
+                    runtime_agent_id=runtime_agent_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to resolve runtime agent while deleting session: "
+                    "agent_id=%s session_id=%s",
+                    agent_id,
+                    session_id,
+                    exc_info=True,
+                )
+                resolved_runtime_agent_id = None
+        if resolved_runtime_agent_id is not None:
+            try:
+                await adaptor_client.post(
+                    f"/agents/{resolved_runtime_agent_id}/sessions/{session_id}/delete",
+                    json={},
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to delete session on runtime; deleting locally: "
+                    "runtime_agent_id=%s session_id=%s",
+                    resolved_runtime_agent_id,
+                    session_id,
+                    exc_info=True,
+                )
         self._repository.delete_session(session_id)
 
     def _require_agent(self, agent_id: str) -> None:

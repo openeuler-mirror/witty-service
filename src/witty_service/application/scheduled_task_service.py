@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,12 +24,13 @@ from apscheduler.triggers.cron import CronTrigger  # type: ignore
 from apscheduler.triggers.interval import IntervalTrigger  # type: ignore
 
 from witty_service.config import SchedulerSettings, get_settings
-from witty_service.domain.enums import AgentStatus
+from witty_service.domain.enums import AgentStatus, ScheduledTaskRunStatus
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import (
     AgentRecord,
     ScheduledTaskRecord,
     ScheduledTaskRunRecord,
+    ScheduledTaskRunWithTaskRecord,
     SqliteRepository,
 )
 
@@ -164,7 +164,7 @@ class ScheduledTaskService:
             try:
                 self._repository.update_scheduled_task_run(
                     run.id,
-                    status="failed",
+                    status=ScheduledTaskRunStatus.failed,
                     session_id=run.session_id,
                     error="Run interrupted by service restart.",
                     started_at=run.started_at,
@@ -228,9 +228,6 @@ class ScheduledTaskService:
             workspace_folder=workspace_folder,
             enabled=enabled,
         )
-        if not agent.has_scheduled_tasks:
-            with contextlib.suppress(KeyError):
-                self._repository.update_agent_has_scheduled_tasks(agent_id, True)
         if task.enabled:
             self._schedule_task(task)
         return task
@@ -261,6 +258,19 @@ class ScheduledTaskService:
     ) -> list[ScheduledTaskRunRecord]:
         self._require_task(task_id)
         return self._repository.list_scheduled_task_runs(task_id=task_id, limit=limit)
+
+    def list_runs_page(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        agent_id: str | None = None,
+    ) -> tuple[list[ScheduledTaskRunWithTaskRecord], int]:
+        """跨任务聚合分页查询执行记录，供执行记录页使用（含任务名/agent）。"""
+        return self._repository.list_scheduled_task_runs_page(
+            limit=limit,
+            offset=offset,
+            agent_id=agent_id,
+        )
 
     def get_task_run(self, task_id: str, run_id: str) -> ScheduledTaskRunRecord:
         run = self._repository.get_scheduled_task_run(run_id)
@@ -355,9 +365,6 @@ class ScheduledTaskService:
             )
         self._unschedule_task(task_id)
         self._repository.delete_scheduled_task(task_id)
-        if self._repository.count_scheduled_tasks_for_agent(task.agent_id) == 0:
-            with contextlib.suppress(KeyError):
-                self._repository.update_agent_has_scheduled_tasks(task.agent_id, False)
 
     async def handle_agent_deleted(self, agent_id: str) -> None:
         """Agent 删除前的调度器清理：移除该 agent 所有任务的 job 与互斥状态。
@@ -472,7 +479,7 @@ class ScheduledTaskService:
         provided_session_id: str | None = None,
     ) -> None:
         session_id: str | None = None
-        status = "succeeded"
+        status: ScheduledTaskRunStatus = ScheduledTaskRunStatus.succeeded
         error: str | None = None
         try:
             session_id = await self._run_agent_turn(
@@ -481,8 +488,12 @@ class ScheduledTaskService:
                 started_at=started_at,
                 provided_session_id=provided_session_id,
             )
+        except asyncio.CancelledError:
+            status = ScheduledTaskRunStatus.failed
+            error = "Run cancelled during service shutdown."
+            raise
         except Exception as exc:
-            status = "failed"
+            status = ScheduledTaskRunStatus.failed
             error = (
                 f"{exc.code}: {exc}"
                 if isinstance(exc, DomainError)
@@ -536,7 +547,7 @@ class ScheduledTaskService:
             started_at = utcnow()
             run = self._repository.create_scheduled_task_run(
                 task_id=task.id,
-                status="running",
+                status=ScheduledTaskRunStatus.running,
                 started_at=started_at,
             )
             self._active_runs[task.id] = run.id
@@ -558,7 +569,7 @@ class ScheduledTaskService:
     def _record_skipped(self, task_id: str) -> ScheduledTaskRunRecord:
         run = self._repository.create_scheduled_task_run(
             task_id=task_id,
-            status="skipped",
+            status=ScheduledTaskRunStatus.skipped,
             error="Task or agent is busy, this run was skipped.",
             finished_at=utcnow(),
         )
@@ -620,7 +631,7 @@ class ScheduledTaskService:
         try:
             self._repository.update_scheduled_task_run(
                 run_id,
-                status="running",
+                status=ScheduledTaskRunStatus.running,
                 session_id=session_id,
                 error=None,
                 started_at=started_at,

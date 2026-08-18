@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from types import SimpleNamespace
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,7 +12,7 @@ from witty_service.persistence.repositories import AgentRecord
 
 
 def _agent_record() -> AgentRecord:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return AgentRecord(
         id="agent-1",
         name="Template Agent",
@@ -24,7 +23,6 @@ def _agent_record() -> AgentRecord:
         sandbox_id=None,
         workspace_path="/tmp/agent-1",
         idle_timeout_seconds=300,
-        has_scheduled_tasks=False,
         model_id=None,
         mcp_server_list=[],
         created_at=now,
@@ -62,7 +60,9 @@ skills:
     assert template.version == "2.0.0"
     assert template.tags == ["dev", "helper"]
     assert template.prompt.system == "Be helpful"
-    assert template.resolve_skill_source_path(template.skills[0], tmp_path) == skill_file
+    assert (
+        template.resolve_skill_source_path(template.skills[0], tmp_path) == skill_file
+    )
 
 
 def test_agent_template_rejects_non_mapping_yaml(tmp_path) -> None:
@@ -105,7 +105,9 @@ skills:
     ]
 
 
-def test_agent_template_service_creates_agent_from_template(tmp_path, monkeypatch) -> None:
+def test_agent_template_service_creates_agent_from_template(
+    tmp_path, monkeypatch
+) -> None:
     (tmp_path / "agent.yaml").write_text(
         """
 name: Template Agent

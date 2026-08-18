@@ -12,10 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import git
-import yaml
 
 from witty_service.application.agent_manager import (
-    AGENT_CREATE_FAILED,
     AgentCreateRequest,
     AgentCreateResult,
     AgentManager,
@@ -25,7 +23,6 @@ from witty_service.config import get_settings
 from witty_service.domain.agent_template import AgentTemplate, AgentTemplateSkill
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import AgentRecord
-from witty_service.sandbox.base import SandboxBackend
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +54,6 @@ class AgentTemplateService:
         adapter_type: str,
         idle_timeout_seconds: int,
         sandbox_id: str | None = None,
-        has_scheduled_tasks: bool = False,
         model_id: str | None = None,
         mcp_server_list: list[str] | None = None,
     ) -> AgentCreateResult:
@@ -84,7 +80,6 @@ class AgentTemplateService:
             adapter_type=adapter_type,
             idle_timeout_seconds=idle_timeout_seconds,
             sandbox_id=sandbox_id,
-            has_scheduled_tasks=has_scheduled_tasks,
             model_id=model_id,
             mcp_server_list=mcp_server_list or [],
         )
@@ -178,7 +173,9 @@ class AgentTemplateService:
         template_dir: Path,
     ) -> None:
         """逐个安装模板中定义的 skills。"""
-        openclaw_skills_dir = Path.home() / ".openclaw" / f"workspace-{agent.id}" / "skills"
+        openclaw_skills_dir = (
+            Path.home() / ".openclaw" / f"workspace-{agent.id}" / "skills"
+        )
         openclaw_skills_dir.mkdir(parents=True, exist_ok=True)
 
         repo = self._repository
@@ -199,22 +196,34 @@ class AgentTemplateService:
                 # 1. 拷贝 skill 目录到 ~/.openclaw/skills/
                 if source_path and source_path.exists():
                     # 获取技能目录（如果 source_path 是文件，则取其父目录）
-                    skill_dir = source_path.parent if source_path.is_file() else source_path
+                    skill_dir = (
+                        source_path.parent if source_path.is_file() else source_path
+                    )
                     dest_path = openclaw_skills_dir / skill_dir.name
-                    
+
                     # 如果目标目录已存在，先删除
                     if dest_path.exists():
                         shutil.rmtree(dest_path)
-                    
+
                     # 拷贝整个目录
                     shutil.copytree(skill_dir, dest_path)
-                    logger.info("Skill directory copied to openclaw: %s -> %s", skill_dir, dest_path)
+                    logger.info(
+                        "Skill directory copied to openclaw: %s -> %s",
+                        skill_dir,
+                        dest_path,
+                    )
 
                 # 2. 记录到数据库
-                logger.info("Recording skill to DB: agent_id=%s skill=%s", agent.id, skill.name)
+                logger.info(
+                    "Recording skill to DB: agent_id=%s skill=%s", agent.id, skill.name
+                )
                 try:
                     skill_id = str(uuid.uuid4())
-                    relative_path = str(source_path.relative_to(template_dir)) if source_path else None
+                    relative_path = (
+                        str(source_path.relative_to(template_dir))
+                        if source_path
+                        else None
+                    )
                     repo.upsert_installed_agent_skill(
                         agent_id=agent.id,
                         skill_id=skill_id,
@@ -226,9 +235,19 @@ class AgentTemplateService:
                         skill_source=skill.source,
                         skill_md_url=None,
                     )
-                    logger.info("Skill recorded to DB successfully: agent_id=%s skill=%s skill_id=%s", agent.id, skill.name, skill_id)
+                    logger.info(
+                        "Skill recorded to DB successfully: agent_id=%s skill=%s skill_id=%s",
+                        agent.id,
+                        skill.name,
+                        skill_id,
+                    )
                 except Exception as db_exc:
-                    logger.error("Failed to record skill to DB: agent_id=%s skill=%s error=%s", agent.id, skill.name, db_exc)
+                    logger.error(
+                        "Failed to record skill to DB: agent_id=%s skill=%s error=%s",
+                        agent.id,
+                        skill.name,
+                        db_exc,
+                    )
                     raise
 
             except Exception as exc:
@@ -239,7 +258,9 @@ class AgentTemplateService:
                     exc,
                 )
 
-    def _write_inline_skill(self, skill: AgentTemplateSkill, template_dir: Path) -> Path:
+    def _write_inline_skill(
+        self, skill: AgentTemplateSkill, template_dir: Path
+    ) -> Path:
         """将 inline skill 写入临时文件，返回路径。"""
         inline_dir = template_dir / ".inline_skills"
         inline_dir.mkdir(exist_ok=True)

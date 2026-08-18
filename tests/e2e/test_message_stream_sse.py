@@ -1,20 +1,21 @@
 from __future__ import annotations
+
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 from fastapi.testclient import TestClient
-
-from src.application.agent_manager import AgentCreateRequest, AgentManager
-from src.adapter.websocket_client_pool import AdaptorEndpoint, WebSocketClientPool
+from src.adapter.websocket_client_pool import WebSocketClientPool
 from src.adapter.websocket_protocol import InboundEvent, OutboundMessage
+from src.api.services import ServiceContainer
+from src.application.agent_manager import AgentCreateRequest, AgentManager
 from src.application.session_manager import SessionManager
 from src.main import create_app
 from src.persistence.repositories import AgentRecord, SessionRecord
 from src.sandbox.base import AdapterEndpoint, SandboxHandle
-from src.api.services import ServiceContainer
 
 
 @dataclass
@@ -53,7 +54,6 @@ class FakeRepository:
         idle_timeout_seconds: int,
         status,
         sandbox_id: str | None = None,
-        has_scheduled_tasks: bool = False,
         last_active_at: Any | None = None,
     ) -> AgentRecord:
         now = datetime.now(UTC)
@@ -66,7 +66,6 @@ class FakeRepository:
             sandbox_id=sandbox_id,
             workspace_path=workspace_path,
             idle_timeout_seconds=idle_timeout_seconds,
-            has_scheduled_tasks=has_scheduled_tasks,
             last_active_at=last_active_at,
             created_at=now,
             updated_at=now,
@@ -77,7 +76,9 @@ class FakeRepository:
     def get_agent(self, agent_id: str) -> AgentRecord | None:
         return self.agents.get(agent_id)
 
-    def update_agent_status(self, agent_id: str, status, updated_at: Any | None = None) -> AgentRecord:
+    def update_agent_status(
+        self, agent_id: str, status, updated_at: Any | None = None
+    ) -> AgentRecord:
         current = self.agents[agent_id]
         updated = AgentRecord(
             id=current.id,
@@ -88,7 +89,6 @@ class FakeRepository:
             sandbox_id=current.sandbox_id,
             workspace_path=current.workspace_path,
             idle_timeout_seconds=current.idle_timeout_seconds,
-            has_scheduled_tasks=current.has_scheduled_tasks,
             last_active_at=current.last_active_at,
             created_at=current.created_at,
             updated_at=updated_at or datetime.now(UTC),
@@ -166,7 +166,14 @@ class FakeWorkspaceStore:
 
 
 class FakeSandboxBackend:
-    def start(self, *, agent_id: str, workspace_path: str, env: dict[str, str] | None = None, **_: Any) -> SandboxHandle:
+    def start(
+        self,
+        *,
+        agent_id: str,
+        workspace_path: str,
+        env: dict[str, str] | None = None,
+        **_: Any,
+    ) -> SandboxHandle:
         return SandboxHandle(
             sandbox_id=f"sandbox-{agent_id}",
             agent_id=agent_id,
@@ -179,7 +186,9 @@ class FakeSandboxBackend:
 
     def endpoint(self, handle: SandboxHandle | str, **kwargs: Any) -> AdapterEndpoint:
         assert isinstance(handle, SandboxHandle)
-        return AdapterEndpoint(base_url=f"http://adapter/{handle.sandbox_id}", health_url=None)
+        return AdapterEndpoint(
+            base_url=f"http://adapter/{handle.sandbox_id}", health_url=None
+        )
 
     def cleanup(self, handle: SandboxHandle | str, **kwargs: Any) -> None:
         return None
@@ -258,32 +267,34 @@ def test_message_stream_endpoint_ends_after_completed(monkeypatch):
     agent = result.agent
     session = result.default_session
     mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
-    mock_ws_client.set_events([
-        InboundEvent(
-            type="message.delta",
-            session_id=session.id,
-            runtime_type="openclaw",
-            event_id="evt-1",
-            ts_ms=100,
-            payload={"delta": "hel"},
-        ),
-        InboundEvent(
-            type="message.completed",
-            session_id=session.id,
-            runtime_type="openclaw",
-            event_id="evt-2",
-            ts_ms=200,
-            payload={},
-        ),
-        InboundEvent(
-            type="message.delta",
-            session_id=session.id,
-            runtime_type="openclaw",
-            event_id="evt-3",
-            ts_ms=300,
-            payload={"delta": "ignored"},
-        ),
-    ])
+    mock_ws_client.set_events(
+        [
+            InboundEvent(
+                type="message.delta",
+                session_id=session.id,
+                runtime_type="openclaw",
+                event_id="evt-1",
+                ts_ms=100,
+                payload={"delta": "hel"},
+            ),
+            InboundEvent(
+                type="message.completed",
+                session_id=session.id,
+                runtime_type="openclaw",
+                event_id="evt-2",
+                ts_ms=200,
+                payload={},
+            ),
+            InboundEvent(
+                type="message.delta",
+                session_id=session.id,
+                runtime_type="openclaw",
+                event_id="evt-3",
+                ts_ms=300,
+                payload={"delta": "ignored"},
+            ),
+        ]
+    )
 
     ws_client_pool.get_client = lambda agent_id, endpoint, factory: mock_ws_client
 

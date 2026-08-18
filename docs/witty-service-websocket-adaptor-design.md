@@ -527,6 +527,7 @@ def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoi
 | `GET /agents/{agent_id}/skills/installed` | NA | 查询已安装技能：查询本地数据库，返回 agent 已安装的技能列表 |
 
 **说明：**
+
 - witty-service 通过 **SandboxBackend 抽象层** 管理 witty-agent-server 的生命周期
 - Session 接口全部透传到 witty-agent-server，本地仅做缓存和聚合
 - **docker 场景**：使用 Docker SDK 启动容器，容器内部自行调用 `/v1/agent/start`
@@ -637,6 +638,7 @@ DELETE /agents/{agent_id}/sessions/{session_id}
 ```
 
 新增字段：
+
 - `context_initialized`: bool - witty-agent-server 创建时返回
 - `runtime_type`: string - witty-agent-server 创建时返回
 
@@ -739,6 +741,7 @@ POST /agents/{agent_id}/resume
 #### 6.4.1 deleted 场景详细说明
 
 **前置条件**：
+
 - Agent 状态为 `deleted`
 - Workspace 目录保留在 `~/witty-service/agent-workspaces/{agent_id}/workspace/`
 - 运行时备份在 `~/witty-service/{agent_id}/runtime_backup/`
@@ -771,12 +774,14 @@ POST /agents/{agent_id}/resume
 | /agent/start 失败 | 抛出 `RUNTIME_START_FAILED`，状态保持 deleted |
 
 **agent_id 复用**：
+
 - `local_process` 场景下，resume 时使用原有的 `agent_id`
 - `agent_id` 不变，workspace 目录不变，只重新启动进程和运行时
 
 #### 6.4.2 paused 场景详细说明
 
 **前置条件**：
+
 - Agent 状态为 `paused`
 - 沙箱（docker 容器或 subprocess）仍在运行
 - 运行时已停止（通过 `/agent/stop`）
@@ -809,6 +814,7 @@ POST /agents/{agent_id}/resume
 **恢复时机**：Resume Agent 时（状态为 deleted）
 
 **恢复逻辑**：
+
 1. 如果备份存在，将备份恢复到运行时默认位置
 2. 重新启动沙箱
 3. 调用 `/agent/start`
@@ -908,6 +914,7 @@ witty-service/src/
 ```
 
 **说明：**
+
 - `LocalWorkspaceStore` 的 base_path 改为 `~/witty-service/`
 - workspace 仍放在 `~/witty-service/agent-workspaces/{agent_id}/workspace/`
 - 运行时备份放在 `~/witty-service/{agent_id}/runtime_backup/`
@@ -977,11 +984,13 @@ class AdaptorReceiveError(DomainError):
 witty-service 使用 SQLite 作为本地持久化存储，数据库文件默认路径为 `~/witty-service/db/witty_service.sqlite3`。
 
 **技术选型：**
+
 - ORM：SQLAlchemy 2.0（declarative style）
 - 数据库：SQLite（支持 foreign key 约束）
 - 连接管理：sessionmaker factory
 
 **数据库配置：**
+
 - 环境变量 `WITTY_DATABASE_URL`：可自定义数据库连接 URL
 - 默认值：`sqlite:///~/witty-service/db/witty_service.sqlite3`
 
@@ -1012,7 +1021,6 @@ witty-service 使用 SQLite 作为本地持久化存储，数据库文件默认�
 | `sandbox_id` | VARCHAR(255) | NULL | 沙箱 ID（容器 ID 或进程 ID） |
 | `workspace_path` | TEXT | NOT NULL | 工作区绝对路径 |
 | `idle_timeout_seconds` | INTEGER | NOT NULL | 空闲超时时间（秒） |
-| `has_scheduled_tasks` | BOOLEAN | NOT NULL, DEFAULT FALSE | 是否有定时任务 |
 | `last_active_at` | DATETIME | NULL | 最后活跃时间 |
 | `created_at` | DATETIME | NOT NULL | 创建时间 |
 | `updated_at` | DATETIME | NOT NULL | 更新时间 |
@@ -1053,6 +1061,7 @@ witty-service 使用 SQLite 作为本地持久化存储，数据库文件默认�
 | `created_at` | DATETIME | NOT NULL | 创建时间 |
 
 **唯一约束：**
+
 - `(session_id, seq_no)` 唯一，保证同一会话内事件序号不冲突
 
 #### 10.3.5 `agent_runtime_state` - Agent 运行时状态表

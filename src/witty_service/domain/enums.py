@@ -11,6 +11,15 @@ class AgentStatus(StrEnum):
     error = "error"
 
 
+class ScheduledTaskRunStatus(StrEnum):
+    """定时任务单次运行记录的状态。"""
+
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+    skipped = "skipped"
+
+
 def can_transition(from_status: AgentStatus, to_status: AgentStatus) -> bool:
     valid_transitions = {
         AgentStatus.creating: {

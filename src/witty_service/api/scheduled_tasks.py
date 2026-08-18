@@ -10,6 +10,8 @@ from witty_service.api.scheduled_task_schemas import (
     RunScheduledTaskRequest,
     ScheduledTaskResponse,
     ScheduledTaskRunResponse,
+    ScheduledTaskRunsPageResponse,
+    ScheduledTaskRunWithTaskResponse,
     ScheduledTaskTemplateResponse,
     UpdateScheduledTaskRequest,
 )
@@ -91,6 +93,27 @@ def list_tasks(
         _to_task_response(task, recent_runs=runs_by_task.get(task.id, []))
         for task in tasks
     ]
+
+
+@router.get("/runs", response_model=ScheduledTaskRunsPageResponse)
+def list_runs_page(
+    limit: int = Query(default=20, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    agent_id: str | None = None,
+    services: ServiceContainer = Depends(get_services),
+) -> ScheduledTaskRunsPageResponse:
+    """跨任务聚合分页返回全部执行记录（含任务名/agent），供执行记录页使用。"""
+    items, total = _task_service(services).list_runs_page(
+        limit=limit,
+        offset=offset,
+        agent_id=agent_id,
+    )
+    return ScheduledTaskRunsPageResponse(
+        items=[ScheduledTaskRunWithTaskResponse.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/{task_id}", response_model=ScheduledTaskResponse)

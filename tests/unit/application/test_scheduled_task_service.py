@@ -7,6 +7,7 @@ import pytest
 
 from witty_service.application.scheduled_task_service import ScheduledTaskService
 from witty_service.config import SchedulerSettings
+from witty_service.domain.enums import ScheduledTaskRunStatus
 from witty_service.persistence.repositories import ScheduledTaskRecord
 
 
@@ -42,6 +43,14 @@ class _FakeRepository:
 
     def update_scheduled_task_run(self, *args: object, **kwargs: object) -> None:
         return None
+
+    def list_scheduled_task_runs_page(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        agent_id: str | None = None,
+    ) -> tuple[list[object], int]:
+        return [], 0
 
 
 class _FakeScheduler:
@@ -186,3 +195,58 @@ async def test_start_skips_invalid_task_and_still_starts_scheduler() -> None:
 
     assert service._scheduler.started
     assert service._scheduler.job_ids == ["good-task"]
+
+
+def test_list_runs_page_delegates_to_repository() -> None:
+    service = _make_service()
+
+    records, total = service.list_runs_page(limit=10, offset=5, agent_id="agent-1")
+
+    assert records == []
+    assert total == 0
+
+
+class _CancellationFakeRepository(_FakeRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.run_updates: list[dict[str, object]] = []
+
+    def update_scheduled_task_run(
+        self, *args: object, **kwargs: object
+    ) -> _FakeRunRecord:
+        self.run_updates.append(kwargs)
+        return _FakeRunRecord(str(kwargs.get("run_id", "run-1")))
+
+    def prune_scheduled_task_runs(self, task_id: str, keep: int) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_run_in_flight_marks_cancelled_run_as_failed() -> None:
+    """服务关闭/任务取消时，运行记录不得被初始的 succeeded 状态覆盖。"""
+    repository = _CancellationFakeRepository()
+    service = _make_service(repository)
+    task = _make_task("t1")
+
+    async def _raise_cancel(
+        task: ScheduledTaskRecord,
+        *,
+        run_id: str,
+        started_at: datetime,
+        provided_session_id: str | None = None,
+    ) -> str:
+        raise asyncio.CancelledError
+
+    service._run_agent_turn = _raise_cancel  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await service._run_in_flight(
+            task=task,
+            run_id="run-1",
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    assert repository.run_updates[-1]["status"] == ScheduledTaskRunStatus.failed
+    assert (
+        repository.run_updates[-1]["error"] == "Run cancelled during service shutdown."
+    )
