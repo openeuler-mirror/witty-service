@@ -1903,6 +1903,7 @@ class AgentManager:
         runtime_agent_id: str | None = None,
     ) -> dict[str, object]:
         adaptor_client = self._get_adaptor_http_client(agent_id)
+        remote_error: Exception | None = None
         try:
             await self._session_manager.abort_session_remote(
                 agent_id,
@@ -1910,8 +1911,14 @@ class AgentManager:
                 adaptor_client,
                 runtime_agent_id=runtime_agent_id,
             )
+        except Exception as exc:
+            # adaptor 不可达等失败不应阻塞后续本地副作用：调度器 _run_agent_turn
+            # 仍依赖 message.status=interrupted + WS 关闭来识别 abort 并落终态，
+            # 否则定时 run 会永远卡在 running、任务下次到点直接 skipped。
+            remote_error = exc
         finally:
             await adaptor_client.close()
+
         last_msg = self._repository.find_last_assistant_message_for_session(session_id)
         if last_msg is not None:
             try:
@@ -1929,6 +1936,27 @@ class AgentManager:
                     last_msg.id,
                     exc_info=True,
                 )
+
+        # 关闭当前会话的活动消息 WS：调度 run 的 _run_agent_turn 正在消费
+        # manager.send_message_stream，若不主动断开，它会继续等待 WS 事件，
+        # 永远感知不到用户已经 abort。关闭后流会立即结束并在调度服务中落终态。
+        try:
+            ws_client = self._get_active_ws_client(agent_id, session_id)
+        except DomainError:
+            ws_client = None
+        if ws_client is not None:
+            await self._close_ws_message_client(
+                agent_id=agent_id,
+                session_id=session_id,
+                ws_client=ws_client,
+            )
+
+        # 远端 abort 失败时向上层返回错误，但本地副作用已全部执行，
+        # 不会让定时 run 卡在 running 状态。
+        if remote_error is not None:
+            raise remote_error
+
+        return {"id": session_id, "aborted": True}
 
     async def delete_agent(self, agent_id: str) -> None:
         agent = self._get_agent(agent_id)

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
 from witty_service.application.scheduled_task_service import ScheduledTaskService
 from witty_service.config import SchedulerSettings
-from witty_service.domain.enums import ScheduledTaskRunStatus
+from witty_service.domain.enums import AgentStatus, ScheduledTaskRunStatus
+from witty_service.domain.errors import DomainError
+from witty_service.persistence.orm import MessageStatus
 from witty_service.persistence.repositories import ScheduledTaskRecord
 
 
@@ -250,3 +253,80 @@ async def test_run_in_flight_marks_cancelled_run_as_failed() -> None:
     assert (
         repository.run_updates[-1]["error"] == "Run cancelled during service shutdown."
     )
+
+
+class _SyncMarkFakeRepository(_FakeRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.marked_sessions: list[tuple[str, str]] = []
+        self.run_updates: list[dict[str, object]] = []
+
+    def get_session(self, session_id: str) -> SimpleNamespace:
+        return SimpleNamespace(id=session_id, agent_id="agent-1")
+
+    def mark_session_scheduled(self, session_id: str, task_id: str) -> None:
+        self.marked_sessions.append((session_id, task_id))
+
+    def update_scheduled_task_run(self, *args: object, **kwargs: object) -> None:
+        self.run_updates.append(kwargs)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_run_marks_provided_session_before_return() -> None:
+    """手动触发复用前端会话时，必须在返回 run 前完成 scheduled_task_id 打标。"""
+    repository = _SyncMarkFakeRepository()
+    service = _make_service(repository)
+    service._spawn_run = lambda **kwargs: None  # type: ignore[method-assign]
+    service._require_run = lambda run_id: _FakeRunRecord(run_id)  # type: ignore[method-assign]
+
+    await service._dispatch_run(_make_task("t1"), session_id="session-1")
+
+    assert repository.marked_sessions == [("session-1", "t1")]
+    assert any(
+        update.get("session_id") == "session-1"
+        and update.get("status") == ScheduledTaskRunStatus.running
+        for update in repository.run_updates
+    )
+
+
+class _AbortedRunFakeRepository(_FakeRepository):
+    def get_agent(self, agent_id: str) -> SimpleNamespace:
+        return SimpleNamespace(id=agent_id, status=AgentStatus.running)
+
+    def get_session(self, session_id: str) -> SimpleNamespace:
+        return SimpleNamespace(id=session_id, agent_id="agent-1")
+
+    def mark_session_scheduled(self, session_id: str, task_id: str) -> None:
+        return None
+
+    def update_scheduled_task_run(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    def find_last_assistant_message_for_session(
+        self, session_id: str
+    ) -> SimpleNamespace:
+        return SimpleNamespace(status=MessageStatus.interrupted)
+
+
+class _EndsWithoutTerminalManager:
+    async def send_message_stream(self, agent_id: str, session_id: str, content: str):
+        if False:  # pragma: no cover - keeps this an async generator
+            yield {}
+
+
+@pytest.mark.asyncio
+async def test_run_agent_turn_recognizes_user_abort() -> None:
+    """会话被用户 abort 后，流未正常完成时应抛 TASK_RUN_ABORTED。"""
+    service = _make_service(_AbortedRunFakeRepository())
+    service._get_agent_manager = lambda agent_id: _EndsWithoutTerminalManager()  # type: ignore[method-assign]
+    service._prepare_workspace_folder = lambda task: None  # type: ignore[method-assign]
+
+    with pytest.raises(DomainError) as exc_info:
+        await service._run_agent_turn(
+            _make_task("t1"),
+            run_id="run-1",
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+            provided_session_id="session-1",
+        )
+
+    assert exc_info.value.code == "TASK_RUN_ABORTED"

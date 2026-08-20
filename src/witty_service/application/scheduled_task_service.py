@@ -26,6 +26,7 @@ from apscheduler.triggers.interval import IntervalTrigger  # type: ignore
 from witty_service.config import SchedulerSettings, get_settings
 from witty_service.domain.enums import AgentStatus, ScheduledTaskRunStatus
 from witty_service.domain.errors import DomainError
+from witty_service.persistence.orm import MessageStatus
 from witty_service.persistence.repositories import (
     AgentRecord,
     ScheduledTaskRecord,
@@ -426,16 +427,53 @@ class ScheduledTaskService:
         *,
         session_id: str | None = None,
     ) -> ScheduledTaskRunRecord:
-        """抢占互斥槽并后台派发一次运行；忙碌时登记 skipped 记录。"""
+        """抢占互斥槽并后台派发一次运行；忙碌时登记 skipped 记录。
+
+        前端已建会话时，必须在返回运行记录前同步完成会话归属标记与
+        session_id 回填：否则页面刷新可能落在“会话已创建、后端尚未打标”
+        的窗口，把定时执行会话误归入普通会话。
+        """
         acquired = await self._acquire_slot(task)
         if acquired is None:
             return self._record_skipped(task.id)
         run_id, started_at = acquired
+
+        prepared_session_id = session_id
+        if prepared_session_id is not None:
+            try:
+                prepared_session_id = self._validate_provided_session(
+                    task, prepared_session_id
+                )
+                self._repository.mark_session_scheduled(prepared_session_id, task.id)
+                self._repository.update_scheduled_task_run(
+                    run_id,
+                    status=ScheduledTaskRunStatus.running,
+                    session_id=prepared_session_id,
+                    error=None,
+                    started_at=started_at,
+                    finished_at=None,
+                )
+            except Exception as exc:
+                await self._release_slot(
+                    task_id=task.id,
+                    agent_id=task.agent_id,
+                    run_id=run_id,
+                )
+                self._repository.update_scheduled_task_run(
+                    run_id,
+                    status=ScheduledTaskRunStatus.failed,
+                    session_id=prepared_session_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                    started_at=started_at,
+                    finished_at=utcnow(),
+                )
+                raise
+
         self._spawn_run(
             task=task,
             run_id=run_id,
             started_at=started_at,
-            session_id=session_id,
+            session_id=prepared_session_id,
         )
         return self._require_run(run_id)
 
@@ -663,6 +701,12 @@ class ScheduledTaskService:
                 error_payload = payload if isinstance(payload, dict) else None
 
         if not completed:
+            if self._is_session_aborted(session_id):
+                raise DomainError(
+                    code="TASK_RUN_ABORTED",
+                    message="Run aborted by user.",
+                    details={"session_id": session_id},
+                )
             if error_payload:
                 raise DomainError(
                     code=str(error_payload.get("code") or "STREAM_ERROR"),
@@ -681,6 +725,11 @@ class ScheduledTaskService:
                 },
             )
         return session_id
+
+    def _is_session_aborted(self, session_id: str) -> bool:
+        """判断会话是否已被用户中止（abort 端点会把最后一条助手消息标记为 interrupted）。"""
+        last_msg = self._repository.find_last_assistant_message_for_session(session_id)
+        return last_msg is not None and last_msg.status is MessageStatus.interrupted
 
     def _validate_provided_session(
         self,

@@ -523,7 +523,9 @@ class SqliteRepository:
                         "updated_at": agent_row.updated_at,
                         "conversations": [],
                     }
-                if session_row is not None:
+                # include_conversations 与 /conversations 对齐：只返回普通会话，
+                # 定时任务执行会话由 /scheduled-tasks 接口提供。
+                if session_row is not None and session_row.scheduled_task_id is None:
                     agents_map[agent_row.id]["conversations"].append(
                         {
                             "id": session_row.id,

@@ -433,6 +433,7 @@ def get_conversation(
         agent_id=session.agent_id,
         title=session.title,
         pinned=session.pinned,
+        scheduled_task_id=session.scheduled_task_id,
         status=session.status,
         messages=messages,
         has_more=has_more,
