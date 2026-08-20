@@ -46,6 +46,7 @@ class BackportConfigPayload(BaseModel):
     source_repo_state: dict[str, Any] | None = None
     target_repo_state: dict[str, Any] | None = None
     enable_conflict_summary: bool = False
+    enable_prerequisite_scan: bool = False
     cvekit_options: dict[str, Any] = Field(default_factory=dict)
 
 

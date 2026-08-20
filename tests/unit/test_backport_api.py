@@ -396,3 +396,47 @@ def test_pause_run_returns_finished_record_without_mutating() -> None:
     assert response.status == "success"
     assert response.pause_requested is False
     assert request.app.state.backport_runs["run-1"]["updated_at"] == 2.0
+
+
+def test_prerequisite_scan_run_is_memory_only(monkeypatch, tmp_path) -> None:
+    request = RequestStub()
+    service = _service()
+    service.run_action.return_value = {
+        "agentId": "",
+        "agentName": "Backport",
+        "sessionId": "",
+        "assistantText": "done",
+        "parsedResult": {
+            "operation": "prerequisite_commits",
+            "status": "success",
+            "manifest": {"candidates": []},
+        },
+        "toolSnapshots": [],
+    }
+    run_store = MagicMock()
+    run_store.safe_slug.side_effect = lambda value: value
+    run_store.runs_root = tmp_path
+    monkeypatch.setattr(backport_api, "_ensure_backport_run_store", lambda _request: run_store)
+    monkeypatch.setattr(backport_api, "BackportService", lambda _services, **_kwargs: service)
+
+    class ImmediateThread:
+        def __init__(self, target, daemon, name) -> None:
+            self._target = target
+
+        def start(self) -> None:
+            self._target()
+
+    monkeypatch.setattr(backport_api.threading, "Thread", ImmediateThread)
+
+    created = backport_api.create_run(
+        payload=BackportRunRequest(
+            action="prerequisite_commits",
+            payload={"excel_path": "/tmp/input.xlsx", "config": {}},
+        ),
+        request=request,
+    )
+
+    assert created.status == "success"
+    assert created.action == "prerequisite_commits"
+    run_store.create_async_record.assert_not_called()
+    run_store.update_manifest.assert_not_called()

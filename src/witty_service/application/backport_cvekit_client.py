@@ -194,12 +194,23 @@ class BackportCvekitClient:
         return env
 
     def _run_cvekit(
+<<<<<<< HEAD
         self, args: list[str], cwd: Path
     ) -> subprocess.CompletedProcess[str]:
         if self._runtime_config is None:
             raise RuntimeError(
                 "Backport 运行环境未配置，请在 Backport 配置区选择运行模型。"
             )
+=======
+        self,
+        args: list[str],
+        cwd: Path,
+        *,
+        require_runtime_config: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        if require_runtime_config and self._runtime_config is None:
+            raise RuntimeError("Backport 运行环境未配置，请在 Backport 配置区选择运行模型。")
+>>>>>>> 18e90bd (feat(backport): 接入前置提交查找与确认流程)
         cmd_args = list(args)
         existing_options = {
             item.split("=", 1)[0]
@@ -210,15 +221,16 @@ class BackportCvekitClient:
         env = self._build_env()
         if self._archive_run_id:
             env["CVEKIT_TASK_ID"] = self._archive_run_id
-        for option, value in (
-            ("--llm-provider", runtime_config.llm_provider),
-            ("--llm-base-url", runtime_config.llm_base_url),
-            ("--llm-model-name", runtime_config.llm_model_name),
-            ("--backport-engine", runtime_config.backport_engine),
-            ("--format-mode", runtime_config.format_mode),
-        ):
-            if value and option not in existing_options:
-                cmd_args.extend([option, value])
+        if runtime_config is not None:
+            for option, value in (
+                ("--llm-provider", runtime_config.llm_provider),
+                ("--llm-base-url", runtime_config.llm_base_url),
+                ("--llm-model-name", runtime_config.llm_model_name),
+                ("--backport-engine", runtime_config.backport_engine),
+                ("--format-mode", runtime_config.format_mode),
+            ):
+                if value and option not in existing_options:
+                    cmd_args.extend([option, value])
 
         cmd = [str(self.resolve_cvekit_path()), *cmd_args]
         progress_path = cwd / f".cvekit-progress-{uuid.uuid4().hex}.json"
@@ -232,7 +244,7 @@ class BackportCvekitClient:
 
             def publish_progress() -> None:
                 try:
-                    payload_text = progress_path.read_text(encoding="utf-8")
+                    payload_text = progress_path.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     return
                 if payload_text == last_progress_payload[0]:
@@ -268,6 +280,10 @@ class BackportCvekitClient:
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+<<<<<<< HEAD
+=======
+                errors="replace",
+>>>>>>> 18e90bd (feat(backport): 接入前置提交查找与确认流程)
                 check=False,
             )
         finally:
@@ -312,7 +328,7 @@ class BackportCvekitClient:
             source_log.unlink()
         if result.returncode != 0:
             redacted_cmd = self._redact_command(cmd)
-            secrets = [runtime_config.api_key] if runtime_config.api_key else []
+            secrets = [runtime_config.api_key] if runtime_config and runtime_config.api_key else []
             raise RuntimeError(
                 "cvekit 执行失败\n"
                 f"command: {' '.join(redacted_cmd)}\n"
@@ -360,7 +376,7 @@ class BackportCvekitClient:
 
     @staticmethod
     def _read_report(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        with path.open("r", encoding="utf-8") as handle:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
             loaded = yaml.safe_load(handle) or {}
         if not isinstance(loaded, dict):
             raise RuntimeError(f"report 内容不是合法 YAML 对象: {path}")
@@ -661,6 +677,90 @@ class BackportCvekitClient:
 
     # ── 生成报告 ────────────────────────────────────────────────
 
+    def _write_base_config(
+        self,
+        path: Path,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        base_config: dict[str, Any] = {
+            "project": "linux",
+            "target_path": str(config.get("target_path") or ""),
+        }
+        normalized_message_source = self._normalize_commit_message_source(
+            str(config.get("commit_message_source") or "upstream")
+        )
+        for key, value in {
+            "project_url": config.get("project_url"),
+            "project_dir": config.get("project_dir"),
+            "source_branch": config.get("source_branch"),
+            "target_release": config.get("target_release"),
+            "patch_dataset_dir": config.get("patch_dataset_dir"),
+            "signer_name": config.get("signer_name"),
+            "signer_email": config.get("signer_email"),
+            "commit_message_template": config.get("commit_message_template"),
+            "commit_message_source": normalized_message_source,
+            "commit_sort": config.get("commit_sort"),
+        }.items():
+            if isinstance(value, str) and value.strip():
+                base_config[key] = value.strip()
+        target_config_layout, target_config_layout_opts = self._normalize_layout_fields(
+            str(config.get("target_config_layout") or "none"),
+            dict(config["target_config_layout_opts"])
+            if isinstance(config.get("target_config_layout_opts"), dict)
+            else None,
+        )
+        if target_config_layout and target_config_layout != "none":
+            base_config["target_config_layout"] = target_config_layout
+            if target_config_layout_opts:
+                base_config["target_config_layout_opts"] = target_config_layout_opts
+        linux_repo_path = str(config.get("linux_repo_path") or "").strip()
+        if normalized_message_source == "auto" and linux_repo_path:
+            base_config["linux_repo_path"] = linux_repo_path
+        with path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(base_config, handle, allow_unicode=True, sort_keys=False)
+        return base_config
+
+    @classmethod
+    def _merge_prerequisite_commits(
+        cls,
+        config_path: Path,
+        prerequisite_commits: list[dict[str, Any]],
+    ) -> int:
+        """把用户确认的前置提交注入 raw batch config，按完整 sha 去重后返回新增条数。"""
+        data, commits = cls._read_report(config_path)
+        selected: list[dict[str, Any]] = []
+        for candidate in prerequisite_commits:
+            if not isinstance(candidate, dict) or not candidate.get("commit"):
+                continue
+            selected.append(
+                {
+                    "commit": str(candidate["commit"]),
+                    "commit_title": str(candidate.get("title") or ""),
+                    "origin": "prerequisite",
+                    "required_by": list(candidate.get("required_by") or []),
+                    "capabilities": list(candidate.get("capabilities") or []),
+                }
+            )
+        existing = {
+            str(row.get("commit"))
+            for row in commits
+            if isinstance(row, dict) and row.get("commit")
+        }
+        added: list[dict[str, Any]] = []
+        seen = set(existing)
+        for row in selected:
+            key = str(row["commit"])
+            if key in seen:
+                continue
+            seen.add(key)
+            added.append(row)
+        if added:
+            next_report = dict(data)
+            next_report["commits"] = [*commits, *added]
+            with config_path.open("w", encoding="utf-8") as handle:
+                yaml.safe_dump(next_report, handle, allow_unicode=True, sort_keys=False)
+        return len(added)
+
     def generate_report(
         self,
         excel_path: str,
@@ -678,6 +778,7 @@ class BackportCvekitClient:
         commit_sort: str = "describe",
         target_config_layout: str = "none",
         target_config_layout_opts: dict[str, Any] | None = None,
+        prerequisite_commits: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         excel = Path(excel_path).expanduser().resolve()
         if not excel.exists():
@@ -712,6 +813,7 @@ class BackportCvekitClient:
         base_config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.parent.mkdir(parents=True, exist_ok=True)
 
+<<<<<<< HEAD
         base_config: dict[str, Any] = {
             "project": "linux",
             "target_path": str(target_repo),
@@ -746,6 +848,27 @@ class BackportCvekitClient:
             base_config["linux_repo_path"] = linux_repo_path.strip()
         with base_config_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(base_config, handle, allow_unicode=True, sort_keys=False)
+=======
+        base_config = self._write_base_config(
+            base_config_path,
+            {
+                "project_url": project_url,
+                "project_dir": project_dir,
+                "source_branch": source_branch,
+                "target_path": str(target_repo),
+                "target_release": target_release,
+                "patch_dataset_dir": patch_dataset_dir,
+                "signer_name": signer_name,
+                "signer_email": signer_email,
+                "commit_message_template": commit_message_template,
+                "commit_message_source": commit_message_source,
+                "linux_repo_path": linux_repo_path,
+                "commit_sort": commit_sort,
+                "target_config_layout": target_config_layout,
+                "target_config_layout_opts": target_config_layout_opts or {},
+            },
+        )
+>>>>>>> 18e90bd (feat(backport): 接入前置提交查找与确认流程)
         archived_config_path = archive_root / "input" / "config.json"
         try:
             archived_config = json.loads(
@@ -781,6 +904,9 @@ class BackportCvekitClient:
             ],
             run_dir,
         )
+
+        if prerequisite_commits:
+            self._merge_prerequisite_commits(config_path, prerequisite_commits)
 
         self._run_cvekit(
             [
@@ -854,6 +980,67 @@ class BackportCvekitClient:
         }
         self._run_store.cleanup_work_dir(run_dir)
         return response
+
+    def extract_config_commits(
+        self,
+        excel_path: str,
+        config: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        excel = Path(excel_path).expanduser().resolve()
+        if not excel.exists():
+            raise FileNotFoundError(f"excel_path 不存在: {excel}")
+        if excel.suffix.lower() not in {".xlsx", ".xls"}:
+            raise ValueError(f"excel_path 不是 Excel 文件: {excel}")
+
+        with tempfile.TemporaryDirectory(prefix="witty-backport-prerequisite-") as temp_dir:
+            work = Path(temp_dir)
+            base_config_path = work / "backport.base.yml"
+            config_path = work / "backport-batch.yml"
+            self._write_base_config(base_config_path, config)
+            self._run_cvekit(
+                [
+                    "--action",
+                    "backport-batch",
+                    "--backport-excel",
+                    str(excel),
+                    "-o",
+                    str(config_path),
+                    "--backport-config",
+                    str(base_config_path),
+                ],
+                work,
+                require_runtime_config=False,
+            )
+            if not config_path.exists():
+                raise RuntimeError(f"cvekit 未生成配置文件: {config_path}")
+            _, commits = self._read_report(config_path)
+            return commits
+
+    def prerequisite_commits(
+        self,
+        source_repo: str,
+        target_repo: str,
+        target_ref: str,
+        prereq_commits: list[str],
+    ) -> dict[str, Any]:
+        args = [
+            "--action",
+            "prerequisite-commits",
+            "--source-repo",
+            str(source_repo),
+            "--target-repo",
+            str(target_repo),
+            "--target-ref",
+            str(target_ref),
+        ]
+        for sha in prereq_commits:
+            args.extend(["--prereq-commit", str(sha)])
+        result = self._run_cvekit(
+            args,
+            Path(source_repo),
+            require_runtime_config=False,
+        )
+        return self._parse_json_output(result.stdout)
 
     def continue_report(
         self,
