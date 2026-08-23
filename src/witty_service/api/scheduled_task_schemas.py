@@ -56,6 +56,19 @@ class RunScheduledTaskRequest(BaseModel):
     session_id: str | None = Field(default=None, min_length=1)
 
 
+class ScheduledTaskSessionResponse(BaseModel):
+    """定时任务执行会话摘要：会话主体 + 关联 run 状态注脚。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    task_id: str
+    title: str | None
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+    last_run_status: ScheduledTaskRunStatus | None
+
+
 class ScheduledTaskResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -71,8 +84,21 @@ class ScheduledTaskResponse(BaseModel):
     enabled: bool
     created_at: UtcDatetime
     updated_at: UtcDatetime
-    # 仅当列表接口传入 include_runs=N 时填充；否则为空列表，保证向后兼容。
+
+
+class ScheduledTaskListResponse(ScheduledTaskResponse):
+    """列表接口专用响应：在任务基础上附带最近运行记录、会话摘要与在飞运行标记。
+
+    详情接口（get/update/enable/disable）不返回 recent_runs /
+    conversations / has_running_run，避免字段语义随端点漂移。
+    """
+
+    # 仅列表接口传入 include_runs=N 时填充；否则为空列表。
     recent_runs: list[ScheduledTaskRunResponse] = Field(default_factory=list)
+    # 该任务的执行会话摘要（侧栏会话中心化渲染数据源）。
+    conversations: list[ScheduledTaskSessionResponse] = Field(default_factory=list)
+    # 是否存在 running 状态的 run
+    has_running_run: bool = False
 
 
 class ScheduledTaskRunResponse(BaseModel):

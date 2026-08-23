@@ -8,10 +8,12 @@ from witty_service.api.auth import require_bearer_auth
 from witty_service.api.scheduled_task_schemas import (
     CreateScheduledTaskRequest,
     RunScheduledTaskRequest,
+    ScheduledTaskListResponse,
     ScheduledTaskResponse,
     ScheduledTaskRunResponse,
     ScheduledTaskRunsPageResponse,
     ScheduledTaskRunWithTaskResponse,
+    ScheduledTaskSessionResponse,
     ScheduledTaskTemplateResponse,
     UpdateScheduledTaskRequest,
 )
@@ -23,6 +25,7 @@ from witty_service.application.scheduled_task_service import (
 from witty_service.persistence.repositories import (
     ScheduledTaskRecord,
     ScheduledTaskRunRecord,
+    ScheduledTaskSessionRecord,
 )
 
 router = APIRouter(
@@ -71,10 +74,10 @@ def create_task(
         workspace_folder=payload.workspace_folder,
         enabled=payload.enabled,
     )
-    return _to_task_response(task)
+    return ScheduledTaskResponse.model_validate(task)
 
 
-@router.get("", response_model=list[ScheduledTaskResponse])
+@router.get("", response_model=list[ScheduledTaskListResponse])
 def list_tasks(
     agent_id: str | None = None,
     include_runs: int | None = Query(
@@ -84,14 +87,19 @@ def list_tasks(
         description="返回每个任务最近 N 条执行记录，一次请求消除 N+1 轮询",
     ),
     services: ServiceContainer = Depends(get_services),
-) -> list[ScheduledTaskResponse]:
-    tasks, runs_by_task = _task_service(services).list_tasks_with_runs(
+) -> list[ScheduledTaskListResponse]:
+    overview = _task_service(services).list_tasks_overview(
         agent_id=agent_id,
         include_runs=include_runs,
     )
     return [
-        _to_task_response(task, recent_runs=runs_by_task.get(task.id, []))
-        for task in tasks
+        _to_task_response(
+            task,
+            recent_runs=overview.runs_by_task.get(task.id, []),
+            conversations=overview.sessions_by_task.get(task.id, []),
+            has_running_run=task.id in overview.running_task_ids,
+        )
+        for task in overview.tasks
     ]
 
 
@@ -122,7 +130,7 @@ def get_task(
     services: ServiceContainer = Depends(get_services),
 ) -> ScheduledTaskResponse:
     task = _task_service(services).get_task(task_id)
-    return _to_task_response(task)
+    return ScheduledTaskResponse.model_validate(task)
 
 
 @router.patch("/{task_id}", response_model=ScheduledTaskResponse)
@@ -149,7 +157,7 @@ def update_task(
     if "workspace_folder" in provided:
         kwargs["workspace_folder"] = payload.workspace_folder
     task = _task_service(services).update_task(task_id, **kwargs)
-    return _to_task_response(task)
+    return ScheduledTaskResponse.model_validate(task)
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -169,7 +177,7 @@ def enable_task(
     services: ServiceContainer = Depends(get_services),
 ) -> ScheduledTaskResponse:
     task = _task_service(services).enable_task(task_id)
-    return _to_task_response(task)
+    return ScheduledTaskResponse.model_validate(task)
 
 
 @router.post("/{task_id}/disable", response_model=ScheduledTaskResponse)
@@ -178,7 +186,7 @@ def disable_task(
     services: ServiceContainer = Depends(get_services),
 ) -> ScheduledTaskResponse:
     task = _task_service(services).disable_task(task_id)
-    return _to_task_response(task)
+    return ScheduledTaskResponse.model_validate(task)
 
 
 @router.post(
@@ -231,13 +239,22 @@ def get_task_run(
 
 def _to_task_response(
     task: ScheduledTaskRecord,
-    recent_runs: list[ScheduledTaskRunRecord] | None = None,
-) -> ScheduledTaskResponse:
-    response = ScheduledTaskResponse.model_validate(task)
-    # recent_runs 为派生字段（ORM 记录上不存在），需单独填充。
+    recent_runs: list[ScheduledTaskRunRecord],
+    conversations: list[ScheduledTaskSessionRecord],
+    has_running_run: bool,
+) -> ScheduledTaskListResponse:
+    response = ScheduledTaskListResponse.model_validate(task)
+    # recent_runs / conversations / has_running_run 为派生字段（ORM 记录上
+    # 不存在），仅列表接口填充。
     response.recent_runs = (
         [_to_run_response(run) for run in recent_runs] if recent_runs else []
     )
+    response.conversations = (
+        [ScheduledTaskSessionResponse.model_validate(item) for item in conversations]
+        if conversations
+        else []
+    )
+    response.has_running_run = has_running_run
     return response
 
 
