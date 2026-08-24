@@ -1,0 +1,96 @@
+{
+  "name": "witty-service-dev",
+
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".",
+    "args": {
+      "NPM_REGISTRY": "https://registry.npmmirror.com",
+      "UV_VERSION": "0.8.8"
+    }
+  },
+
+  "workspaceMount": "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind,consistency=cached",
+  "workspaceFolder": "${localWorkspaceFolder}",
+
+  "runArgs": ["--network", "host"],
+
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker-host/docker.sock,type=bind",
+    "source=witty-venv,target=${containerWorkspaceFolder}/.venv,type=volume",
+    "source=witty-home,target=/home/vscode,type=volume"
+  ],
+
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+
+  "containerEnv": {
+    "DOCKER_HOST": "unix:///var/run/docker-host/docker.sock",
+    "AUTH_TOKEN": "dev-token",
+    "WITTY_WORKSPACE_ROOT": "${containerWorkspaceFolder}/agent-workspaces",
+    "WITTY_DOCKER_HOST": "127.0.0.1",
+    "WITTY_DOCKER_IMAGE": "witty-agent-server",
+    "WITTY_INSIGHT_ENABLED": "false",
+    "WITTY_LOG_LEVEL": "DEBUG"
+  },
+
+  "postCreateCommand": "bash ${containerWorkspaceFolder}/.devcontainer/scripts/post-create.sh",
+  "postStartCommand": "bash ${containerWorkspaceFolder}/.devcontainer/scripts/post-start.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.debugpy",
+        "charliermarsh.ruff",
+        "ms-python.mypy-type-checker",
+        "ms-azuretools.vscode-docker",
+        "tamasfe.even-better-toml",
+        "humao.rest-client"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python",
+        "python.analysis.extraPaths": ["${containerWorkspaceFolder}/src"],
+        "python.terminal.activateEnvironment": false,
+        "python.testing.pytestEnabled": true,
+        "python.testing.unittestEnabled": false,
+        "python.testing.pytestArgs": ["tests/unit"],
+
+        "editor.formatOnSave": true,
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.codeActionsOnSave": {
+            "source.organizeImports.ruff": "explicit",
+            "source.fixAll.ruff": "explicit"
+          }
+        },
+        "ruff.importStrategy": "fromEnvironment",
+        "ruff.lineLength": 88,
+
+        "mypy-type-checker.importStrategy": "fromEnvironment",
+
+        "files.eol": "\n",
+        "terminal.integrated.defaultProfile.linux": "bash",
+
+        "files.exclude": {
+          "**/__pycache__": true,
+          ".pytest_cache": true,
+          ".mypy_cache": true,
+          ".coverage": true
+        },
+        "search.exclude": {
+          "**/.venv": true,
+          "**/__pycache__": true,
+          "**/.mypy_cache": true,
+          "**/dist": true,
+          "**/build": true
+        },
+        "files.watcherExclude": {
+          "**/.venv/**": true,
+          "**/__pycache__/**": true,
+          "**/.mypy_cache/**": true
+        }
+      }
+    }
+  }
+}
