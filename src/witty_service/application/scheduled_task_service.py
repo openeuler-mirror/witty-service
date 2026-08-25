@@ -32,6 +32,7 @@ from witty_service.persistence.repositories import (
     ScheduledTaskRecord,
     ScheduledTaskRunRecord,
     ScheduledTaskRunWithTaskRecord,
+    ScheduledTaskSessionRecord,
     SqliteRepository,
 )
 
@@ -66,6 +67,16 @@ class ScheduledTaskTemplate:
     timezone: str
     content: str
     workspace_folder: str | None
+
+
+@dataclass(frozen=True)
+class TaskListOverview:
+    """列表聚合查询结果：任务 + 最近 N 条 run + 会话摘要 + 在飞任务集合。"""
+
+    tasks: list[ScheduledTaskRecord]
+    runs_by_task: dict[str, list[ScheduledTaskRunRecord]]
+    sessions_by_task: dict[str, list[ScheduledTaskSessionRecord]]
+    running_task_ids: set[str]
 
 
 BUILTIN_TEMPLATES: tuple[ScheduledTaskTemplate, ...] = (
@@ -239,20 +250,37 @@ class ScheduledTaskService:
     def list_tasks(self, agent_id: str | None = None) -> list[ScheduledTaskRecord]:
         return self._repository.list_scheduled_tasks(agent_id=agent_id)
 
-    def list_tasks_with_runs(
+    def list_tasks_overview(
         self,
         agent_id: str | None = None,
         include_runs: int | None = None,
-    ) -> tuple[list[ScheduledTaskRecord], dict[str, list[ScheduledTaskRunRecord]]]:
-        """返回任务列表及其各自最近 N 条运行记录（include_runs 为空时 runs 为空字典）。"""
+        sessions_per_task: int = 50,
+    ) -> TaskListOverview:
+        """列表聚合查询：任务 + 最近 N 条 run + 各任务执行会话摘要 + 在飞任务集合。
+
+        - runs_by_task：include_runs 为空时为空字典（列表接口 recent_runs 为空列表）；
+        - sessions_by_task：侧栏会话中心化渲染的数据源（含关联 run 状态注脚）；
+        - running_task_ids：存在 running run 的任务 id，用于 has_running_run。
+        """
         tasks = self.list_tasks(agent_id=agent_id)
-        if include_runs is None:
-            return tasks, {}
-        runs_by_task = self._repository.list_scheduled_task_runs_by_task_ids(
-            task_ids=[task.id for task in tasks],
-            limit_per_task=include_runs,
+        task_ids = [task.id for task in tasks]
+        runs_by_task: dict[str, list[ScheduledTaskRunRecord]] = {}
+        if include_runs is not None:
+            runs_by_task = self._repository.list_scheduled_task_runs_by_task_ids(
+                task_ids=task_ids,
+                limit_per_task=include_runs,
+            )
+        sessions_by_task = self._repository.list_scheduled_task_sessions_by_task_ids(
+            task_ids=task_ids,
+            limit_per_task=sessions_per_task,
         )
-        return tasks, runs_by_task
+        running_task_ids = self._repository.list_task_ids_with_running_runs(task_ids)
+        return TaskListOverview(
+            tasks=tasks,
+            runs_by_task=runs_by_task,
+            sessions_by_task=sessions_by_task,
+            running_task_ids=running_task_ids,
+        )
 
     def list_task_runs(
         self, task_id: str, limit: int = 100

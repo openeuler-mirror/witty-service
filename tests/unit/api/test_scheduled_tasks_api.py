@@ -13,11 +13,15 @@ from witty_service.api.scheduled_task_schemas import (
     UpdateScheduledTaskRequest,
 )
 from witty_service.api.schemas import ConversationSummaryResponse
-from witty_service.application.scheduled_task_service import ScheduledTaskService
+from witty_service.application.scheduled_task_service import (
+    ScheduledTaskService,
+    TaskListOverview,
+)
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import (
     ScheduledTaskRecord,
     ScheduledTaskRunRecord,
+    ScheduledTaskSessionRecord,
 )
 
 
@@ -57,6 +61,19 @@ def _run_record(**overrides: object) -> ScheduledTaskRunRecord:
     )
     data.update(overrides)
     return ScheduledTaskRunRecord(**data)  # type: ignore[arg-type]
+
+
+def _session_record(**overrides: object) -> ScheduledTaskSessionRecord:
+    data: dict[str, object] = dict(
+        id="session-1",
+        task_id="task-1",
+        title="追踪竞品动态",
+        created_at=_now(),
+        updated_at=_now(),
+        last_run_status="succeeded",
+    )
+    data.update(overrides)
+    return ScheduledTaskSessionRecord(**data)  # type: ignore[arg-type]
 
 
 def _services() -> MagicMock:
@@ -120,28 +137,34 @@ def test_create_task_schema_requires_interval_seconds() -> None:
 
 def test_list_tasks_filters_by_agent() -> None:
     services = _services()
-    services.scheduled_task_service.list_tasks_with_runs.return_value = (
-        [_task_record(), _task_record(id="task-2")],
-        {},
+    services.scheduled_task_service.list_tasks_overview.return_value = TaskListOverview(
+        tasks=[_task_record(), _task_record(id="task-2")],
+        runs_by_task={},
+        sessions_by_task={},
+        running_task_ids=set(),
     )
 
     resp = tasks_api.list_tasks(
         agent_id="agent-1", include_runs=None, services=services
     )
 
-    services.scheduled_task_service.list_tasks_with_runs.assert_called_once_with(
+    services.scheduled_task_service.list_tasks_overview.assert_called_once_with(
         agent_id="agent-1", include_runs=None
     )
     assert [item.id for item in resp] == ["task-1", "task-2"]
-    # 不传 include_runs 时 recent_runs 为空列表（向后兼容）
+    # 不传 include_runs 时 recent_runs 为空列表
     assert all(item.recent_runs == [] for item in resp)
+    assert all(item.conversations == [] for item in resp)
+    assert all(item.has_running_run is False for item in resp)
 
 
 def test_list_tasks_with_include_runs_aggregates() -> None:
     services = _services()
-    services.scheduled_task_service.list_tasks_with_runs.return_value = (
-        [_task_record(), _task_record(id="task-2")],
-        {"task-1": [_run_record()], "task-2": []},
+    services.scheduled_task_service.list_tasks_overview.return_value = TaskListOverview(
+        tasks=[_task_record(), _task_record(id="task-2")],
+        runs_by_task={"task-1": [_run_record()], "task-2": []},
+        sessions_by_task={"task-1": [_session_record()], "task-2": []},
+        running_task_ids={"task-1"},
     )
 
     resp = tasks_api.list_tasks(
@@ -150,11 +173,16 @@ def test_list_tasks_with_include_runs_aggregates() -> None:
         services=services,
     )
 
-    services.scheduled_task_service.list_tasks_with_runs.assert_called_once_with(
+    services.scheduled_task_service.list_tasks_overview.assert_called_once_with(
         agent_id="agent-1", include_runs=10
     )
     assert [r.id for r in resp[0].recent_runs] == ["run-1"]
     assert resp[1].recent_runs == []
+    # 会话摘要与 has_running_run 随列表接口填充
+    assert [c.id for c in resp[0].conversations] == ["session-1"]
+    assert resp[0].conversations[0].last_run_status == "succeeded"
+    assert resp[0].has_running_run is True
+    assert resp[1].has_running_run is False
 
 
 def test_get_task_returns_response() -> None:

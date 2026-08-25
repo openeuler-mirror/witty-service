@@ -110,6 +110,23 @@ class ScheduledTaskRunWithTaskRecord(ScheduledTaskRunRecord):
 
 
 @dataclass(slots=True)
+class ScheduledTaskSessionRecord:
+    """定时任务的执行会话摘要（侧栏会话中心化渲染用）。
+
+    ``last_run_status`` 来自关联 run 记录，同一会话存在多条 run 时取
+    created_at 最新的一条；run 被 ``max_run_records`` 裁剪后为 None，
+    由前端兜底显示。
+    """
+
+    id: str
+    task_id: str
+    title: str | None
+    created_at: datetime
+    updated_at: datetime
+    last_run_status: ScheduledTaskRunStatus | None
+
+
+@dataclass(slots=True)
 class SessionRecord:
     id: str
     agent_id: str
@@ -2138,6 +2155,87 @@ class SqliteRepository:
         for run_row in rows:
             result[run_row.task_id].append(self._to_scheduled_task_run_record(run_row))
         return result
+
+    def list_scheduled_task_sessions_by_task_ids(
+        self,
+        task_ids: list[str],
+        limit_per_task: int = 50,
+    ) -> dict[str, list[ScheduledTaskSessionRecord]]:
+        """一次查询返回多个任务各自的执行会话摘要（updated_at 降序）。
+
+        供 GET /scheduled-tasks 列表聚合：侧栏以会话为唯一实体渲染，
+        附带关联 run 状态作为状态注脚；
+        """
+        result: dict[str, list[ScheduledTaskSessionRecord]] = {
+            task_id: [] for task_id in task_ids
+        }
+        if not task_ids:
+            return result
+        with self._session_factory() as session:
+            ranked = (
+                session.query(
+                    SessionORM.id.label("session_id"),
+                    func.row_number()
+                    .over(
+                        partition_by=SessionORM.scheduled_task_id,
+                        order_by=SessionORM.updated_at.desc(),
+                    )
+                    .label("rn"),
+                )
+                .filter(SessionORM.scheduled_task_id.in_(task_ids))
+                .subquery()
+            )
+            run_status = (
+                session.query(ScheduledTaskRunORM.status)
+                .filter(ScheduledTaskRunORM.session_id == SessionORM.id)
+                .order_by(ScheduledTaskRunORM.created_at.desc())
+                .limit(1)
+                .correlate(SessionORM)
+                .scalar_subquery()
+            )
+            rows = (
+                session.query(SessionORM, run_status)
+                .join(ranked, ranked.c.session_id == SessionORM.id)
+                .filter(ranked.c.rn <= limit_per_task)
+                .order_by(SessionORM.updated_at.desc())
+                .all()
+            )
+        for row, last_status in rows:
+            result[row.scheduled_task_id].append(
+                ScheduledTaskSessionRecord(
+                    id=row.id,
+                    task_id=row.scheduled_task_id,
+                    title=row.title,
+                    created_at=row.created_at,
+                    updated_at=row.updated_at,
+                    last_run_status=(
+                        ScheduledTaskRunStatus(last_status)
+                        if last_status is not None
+                        else None
+                    ),
+                )
+            )
+        return result
+
+    def list_task_ids_with_running_runs(self, task_ids: list[str]) -> set[str]:
+        """返回存在 running 状态 run 的任务 id 集合。
+
+        供列表接口计算 has_running_run：run 先于 session 创建进入 running，
+        不能从会话侧推导，避免删除保护出现窗口期误判。
+        """
+        if not task_ids:
+            return set()
+        with self._session_factory() as session:
+            rows = (
+                session.query(ScheduledTaskRunORM.task_id)
+                .filter(
+                    ScheduledTaskRunORM.task_id.in_(task_ids),
+                    ScheduledTaskRunORM.status == ScheduledTaskRunStatus.running.value,
+                )
+                .distinct()
+                .all()
+            )
+        return {row[0] for row in rows}
 
     def list_scheduled_task_runs_page(
         self,
