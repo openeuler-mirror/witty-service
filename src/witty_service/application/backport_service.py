@@ -486,6 +486,7 @@ class BackportService:
         )
         if archive_run_id:
             self._cvekit_client.set_archive_run_id(archive_run_id)
+        lock_target = ""
         try:
             action_config: dict[str, Any] | None = None
             needs_config = (
@@ -494,6 +495,19 @@ class BackportService:
             )
             if needs_config:
                 action_config = self._extract_config(normalized_payload)
+            # 目标仓库跨进程锁:所有执行 cvekit 的 action 加锁,覆盖执行生命周期
+            # (同一 target_path 的并发操作互斥;无 target_path 的 action 跳过)
+            if needs_config:
+                try:
+                    lock_target = self._resolve_target_path(
+                        normalized_payload,
+                        action_config or {},
+                        operation=normalized_action,
+                    )
+                except DomainError:
+                    lock_target = ""
+                if lock_target:
+                    self._cvekit_client.set_lock_target(lock_target)
             if normalized_action in self._cvekit_runtime_actions():
                 self._cvekit_client.set_runtime_config(
                     self._resolve_cvekit_runtime_config(action_config or {})
@@ -511,7 +525,10 @@ class BackportService:
                 )
                 self._cvekit_client.set_conflict_reporter_url(conflict_reporter_url)
                 conflict_reporter_started = True
-            parsed_result = handler(normalized_payload)
+            # 目标仓库锁覆盖整个 run 操作(多次 cvekit 调用 + git 操作),
+            # 防止并发 run_all 在阶段间交错;锁可重入,_run_cvekit 嵌套进入不重复加锁
+            with self._cvekit_client.repository_lock():
+                parsed_result = handler(normalized_payload)
             self._persist_runtime_state(
                 normalized_action, normalized_payload, parsed_result
             )
@@ -539,6 +556,8 @@ class BackportService:
                 self._cvekit_client.set_runtime_config(None)
             if archive_run_id:
                 self._cvekit_client.set_archive_run_id(None)
+            if lock_target:
+                self._cvekit_client.set_lock_target(None)
 
     def _build_handlers(self) -> dict[str, Callable[[dict[str, Any]], dict[str, Any]]]:
         return {

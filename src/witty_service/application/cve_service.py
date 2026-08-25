@@ -212,9 +212,17 @@ class CveService:
     ) -> dict[str, Any]:
         branch_list = [item.strip() for item in branches.split(",") if item.strip()]
         sorted_branches = ",".join(sorted(branch_list))
-        cache_key = hashlib.md5(
-            "|".join([cve_id.strip(), sorted_branches]).encode(), usedforsecurity=False
+        clone_root = _clone_dir_path(clone_dir or self.get_config()["clone_dir"])
+        repo_dir = clone_root / "kernel"
+        current_cache_key = hashlib.md5(
+            f"{cve_id.strip()}|{sorted_branches}|{repo_dir}".encode(),
+            usedforsecurity=False,
         ).hexdigest()
+        legacy_cache_key = hashlib.md5(
+            "|".join([cve_id.strip(), sorted_branches]).encode(),
+            usedforsecurity=False,
+        ).hexdigest()
+        cache_key = current_cache_key
 
         home = Path.home()
         cache_path = home / ".cve_analyzer_cache" / "branches_analysis_cache.json"
@@ -222,22 +230,22 @@ class CveService:
         if cache_path.exists():
             try:
                 cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
-                raw_items = cache_data.get(cache_key, {}).get("data", [])
-                if isinstance(raw_items, list):
-                    cache_items = [item for item in raw_items if isinstance(item, dict)]
+                for candidate_key in (current_cache_key, legacy_cache_key):
+                    raw_items = cache_data.get(candidate_key, {}).get("data", [])
+                    if isinstance(raw_items, list):
+                        cache_key = candidate_key
+                        cache_items = [
+                            item for item in raw_items if isinstance(item, dict)
+                        ]
+                        break
             except (OSError, json.JSONDecodeError):
                 cache_items = []
 
+        # CVE workbench 请求不携带 Backport task/run/artifact 标识，不能从
+        # ~/.patchflow/logs/portgpt 全局目录回退挑选日志，否则会跨任务泄漏。
+        # 已归档日志必须通过其所属 task/run/artifact 的路径访问；本接口没有
+        # 关联记录时明确返回 missing。
         latest_log = ""
-        log_dir = home / ".cvekit" / "logs"
-        if log_dir.exists():
-            log_files = sorted(
-                log_dir.glob(f"linux-{cve_id.strip()}-*.log"),
-                key=lambda item: item.stat().st_mtime if item.exists() else 0,
-                reverse=True,
-            )
-            if log_files:
-                latest_log = str(log_files[0])
 
         branches_response: list[dict[str, Any]] = []
         for branch_name in branch_list:
@@ -264,13 +272,16 @@ class CveService:
             suggested_file = str(
                 item.get("Suggested adjustment files") or item.get("建议调整文件") or ""
             )
-            patch_path = (
-                suggested_file
-                if suggested_file and suggested_file not in {"N/A", "None"}
-                else conflict_point
+            patch_path = next(
+                (
+                    value
+                    for value in (suggested_file, conflict_point)
+                    if value and Path(value).is_file()
+                ),
+                conflict_point or suggested_file,
             )
             patch_file_name = Path(patch_path).name if patch_path else ""
-            patch_exists = bool(patch_path and Path(patch_path).exists())
+            patch_exists = bool(patch_path and Path(patch_path).is_file())
 
             original_path = ""
             backport_path = ""
@@ -362,10 +373,11 @@ class CveService:
         issue_number: str = "",
     ) -> dict[str, Any]:
         config = self.get_config()
-        repo_dir = (
-            Path(clone_dir.strip() or config.get("clone_dir", "")).expanduser()
-            / "kernel"
-        )
+        clone_root = _clone_dir_path(clone_dir or config["clone_dir"])
+        repo_dir = clone_root / "kernel"
+        path_hash = hashlib.md5(
+            str(repo_dir).encode(), usedforsecurity=False
+        ).hexdigest()[:6]
         branch_list = [item.strip() for item in branches.split(",") if item.strip()]
         fix_branch_suffixes = [
             item
@@ -405,10 +417,15 @@ class CveService:
                     if line.strip()
                 }
                 for suffix in fix_branch_suffixes:
-                    candidate = f"fix-{branch_name}-{suffix}"
-                    if candidate in local_branches:
-                        ready = True
-                        fix_branch = candidate
+                    for candidate in (
+                        f"fix-{branch_name}-{suffix}-{path_hash}",
+                        f"fix-{branch_name}-{suffix}",
+                    ):
+                        if candidate in local_branches:
+                            ready = True
+                            fix_branch = candidate
+                            break
+                    if ready:
                         break
                 reason = "local_fix_branch_exists" if ready else "fix_branch_missing"
 
@@ -433,7 +450,7 @@ class CveService:
         config = self.get_config()
         allowed_roots = [
             home / ".cve_analyzer_cache",
-            home / ".cvekit" / "logs",
+            home / ".patchflow" / "logs",
             home / "backports" / "patch_dataset",
         ]
         allowed = False
