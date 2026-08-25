@@ -5,10 +5,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from fastapi import HTTPException
 
 from witty_service.api import backport as backport_api
-from witty_service.api.backport_schemas import BackportConfigPayload, BackportRunRequest, TargetConfigLayoutOpts
+from witty_service.api.backport_schemas import (
+    BackportConfigPayload,
+    BackportRunRequest,
+    TargetConfigLayoutOpts,
+)
 
 
 class State:
@@ -88,10 +93,13 @@ def test_create_run_rejects_unsupported_action() -> None:
     assert exc_info.value.status_code == 400
 
 
-def test_create_and_get_run(monkeypatch) -> None:
+def test_create_and_get_run(monkeypatch, tmp_path) -> None:
     request = RequestStub()
+    request.app.state.services.workspace_store.base_dir = tmp_path
     service = _service()
-    monkeypatch.setattr(backport_api, "BackportService", lambda _services, **_kwargs: service)
+    monkeypatch.setattr(
+        backport_api, "BackportService", lambda _services, **_kwargs: service
+    )
 
     class ImmediateThread:
         def __init__(self, target, daemon, name) -> None:
@@ -102,8 +110,13 @@ def test_create_and_get_run(monkeypatch) -> None:
 
     monkeypatch.setattr(backport_api.threading, "Thread", ImmediateThread)
 
+    excel = tmp_path / "in.xlsx"
+    excel.write_text("fixture", encoding="utf-8")
     created = backport_api.create_run(
-        payload=BackportRunRequest(action="generate_report", payload={"x": 1}),
+        payload=BackportRunRequest(
+            action="generate_report",
+            payload={"excel_path": str(excel), "x": 1},
+        ),
         request=request,
     )
     fetched = backport_api.get_run(created.run_id, request=request)
@@ -113,8 +126,11 @@ def test_create_and_get_run(monkeypatch) -> None:
     assert fetched.result["agentId"] == "agent-1"
 
 
-def test_create_run_sets_paused_at_from_wrapped_parsed_result(monkeypatch) -> None:
+def test_create_run_sets_paused_at_from_wrapped_parsed_result(
+    monkeypatch, tmp_path
+) -> None:
     request = RequestStub()
+    request.app.state.services.workspace_store.base_dir = tmp_path
     service = _service()
     service.run_action.return_value = {
         "agentId": "agent-1",
@@ -124,8 +140,21 @@ def test_create_run_sets_paused_at_from_wrapped_parsed_result(monkeypatch) -> No
         "parsedResult": {"stage": "paused"},
         "toolSnapshots": [],
     }
-    monkeypatch.setattr(backport_api, "BackportService", lambda _services, **_kwargs: service)
-    monkeypatch.setattr(backport_api.time, "time", MagicMock(side_effect=[10.0, 10.0, 20.0, 20.0]))
+    monkeypatch.setattr(
+        backport_api, "BackportService", lambda _services, **_kwargs: service
+    )
+    monkeypatch.setattr(
+        backport_api.time, "time", MagicMock(side_effect=[10.0, 10.0, 20.0, 20.0])
+    )
+    # run_all 的 target 校验依赖真实 git 仓库，单测里短路掉
+    monkeypatch.setattr(
+        backport_api, "_validate_run_target", lambda run_store, run_id: None
+    )
+    monkeypatch.setattr(
+        backport_api,
+        "_read_run_target",
+        lambda run_store, run_id: {"repository": "repo", "branch": "main", "head": "h"},
+    )
 
     class ImmediateThread:
         def __init__(self, target, daemon, name) -> None:
@@ -136,12 +165,31 @@ def test_create_run_sets_paused_at_from_wrapped_parsed_result(monkeypatch) -> No
 
     monkeypatch.setattr(backport_api.threading, "Thread", ImmediateThread)
 
+    excel = tmp_path / "in.xlsx"
+    excel.write_text("fixture", encoding="utf-8")
+    run_store = backport_api._ensure_backport_run_store(request)
+    task_dir = run_store.create_task(
+        excel_path=excel,
+        target_repository="/repo/kernel",
+    )
+    (task_dir / "input" / "initial-report.yml").write_text(
+        yaml.safe_dump({"commits": [{"row_id": "1", "status": "pending"}]}),
+        encoding="utf-8",
+    )
+    run_store.update_manifest(
+        task_dir,
+        {"status": "ready", "current_report": "input/initial-report.yml"},
+    )
+
     created = backport_api.create_run(
-        payload=BackportRunRequest(action="run_all", payload={"x": 1}),
+        payload=BackportRunRequest(
+            action="run_all",
+            payload={"run_id": task_dir.name, "x": 1},
+        ),
         request=request,
     )
 
-    assert created.status == "success"
+    assert created.status == "paused"
     assert created.paused_at == 20.0
     assert request.app.state.backport_runs[created.run_id]["paused_at"] == 20.0
 
@@ -179,12 +227,14 @@ class TestTargetConfigLayoutSchema:
     def test_invalid_layout_rejected(self) -> None:
         """非法 layout 值被 Pydantic 拒绝"""
         import pydantic
+
         with pytest.raises(pydantic.ValidationError):
             BackportConfigPayload(target_config_layout="invalid")
 
     def test_invalid_default_level_rejected(self) -> None:
         """非法 default_level 值被 Pydantic 拒绝"""
         import pydantic
+
         with pytest.raises(pydantic.ValidationError):
             BackportConfigPayload(
                 target_config_layout_opts={"default_level": "INVALID"},
@@ -230,6 +280,7 @@ class TestTargetConfigLayoutSchema:
     def test_target_config_layout_opts_rejects_extra_fields(self) -> None:
         """extra 字段被 Pydantic 拒绝"""
         import pydantic
+
         with pytest.raises(pydantic.ValidationError):
             TargetConfigLayoutOpts(
                 default_level="L1-RECOMMEND",
@@ -242,7 +293,11 @@ class TestNormalizeLayoutFields:
 
     def test_invalid_string_layout_resets_to_none(self) -> None:
         from witty_service.application.backport_service import BackportService
-        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+
+        config = {
+            "target_config_layout": "anolis",
+            "target_config_layout_opts": {"default_level": "L2-OPTIONAL"},
+        }
         source = {"target_config_layout": "bad_value"}
         BackportService._normalize_layout_fields(config, source)
         assert config["target_config_layout"] == "none"
@@ -250,7 +305,11 @@ class TestNormalizeLayoutFields:
 
     def test_non_string_layout_resets_to_none(self) -> None:
         from witty_service.application.backport_service import BackportService
-        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+
+        config = {
+            "target_config_layout": "anolis",
+            "target_config_layout_opts": {"default_level": "L2-OPTIONAL"},
+        }
         source = {"target_config_layout": 123}
         BackportService._normalize_layout_fields(config, source)
         assert config["target_config_layout"] == "none"
@@ -258,7 +317,11 @@ class TestNormalizeLayoutFields:
 
     def test_non_dict_opts_resets_both(self) -> None:
         from witty_service.application.backport_service import BackportService
-        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+
+        config = {
+            "target_config_layout": "anolis",
+            "target_config_layout_opts": {"default_level": "L2-OPTIONAL"},
+        }
         source = {"target_config_layout_opts": "bad_opts"}
         BackportService._normalize_layout_fields(config, source)
         assert config["target_config_layout"] == "none"
@@ -266,7 +329,11 @@ class TestNormalizeLayoutFields:
 
     def test_invalid_opts_validation_resets_both(self) -> None:
         from witty_service.application.backport_service import BackportService
-        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+
+        config = {
+            "target_config_layout": "anolis",
+            "target_config_layout_opts": {"default_level": "L2-OPTIONAL"},
+        }
         source = {"target_config_layout_opts": {"default_level": "INVALID"}}
         BackportService._normalize_layout_fields(config, source)
         assert config["target_config_layout"] == "none"
@@ -274,8 +341,17 @@ class TestNormalizeLayoutFields:
 
     def test_extra_opts_fields_stripped(self) -> None:
         from witty_service.application.backport_service import BackportService
-        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
-        source = {"target_config_layout_opts": {"default_level": "L0-MANDATORY", "extra": "bad"}}
+
+        config = {
+            "target_config_layout": "anolis",
+            "target_config_layout_opts": {"default_level": "L2-OPTIONAL"},
+        }
+        source = {
+            "target_config_layout_opts": {
+                "default_level": "L0-MANDATORY",
+                "extra": "bad",
+            }
+        }
         BackportService._normalize_layout_fields(config, source)
         # Pydantic raises on extra fields, so opts resets to default and layout resets to none
         assert config["target_config_layout_opts"] == {"default_level": "L1-RECOMMEND"}
@@ -283,15 +359,26 @@ class TestNormalizeLayoutFields:
 
     def test_valid_values_preserved(self) -> None:
         from witty_service.application.backport_service import BackportService
-        config = {"target_config_layout": "none", "target_config_layout_opts": {"default_level": "L1-RECOMMEND"}}
-        source = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+
+        config = {
+            "target_config_layout": "none",
+            "target_config_layout_opts": {"default_level": "L1-RECOMMEND"},
+        }
+        source = {
+            "target_config_layout": "anolis",
+            "target_config_layout_opts": {"default_level": "L2-OPTIONAL"},
+        }
         BackportService._normalize_layout_fields(config, source)
         assert config["target_config_layout"] == "anolis"
         assert config["target_config_layout_opts"] == {"default_level": "L2-OPTIONAL"}
 
     def test_key_not_in_source_preserves_existing(self) -> None:
         from witty_service.application.backport_service import BackportService
-        config = {"target_config_layout": "anolis", "target_config_layout_opts": {"default_level": "L2-OPTIONAL"}}
+
+        config = {
+            "target_config_layout": "anolis",
+            "target_config_layout_opts": {"default_level": "L2-OPTIONAL"},
+        }
         source: dict = {}
         BackportService._normalize_layout_fields(config, source)
         assert config["target_config_layout"] == "anolis"
