@@ -1065,6 +1065,72 @@ class TestTargetConfigLayoutYaml:
         assert "target_config_layout" not in captured_config
         assert "target_config_layout_opts" not in captured_config
 
+
+# ── 前置提交查找 ─────────────────────────────────────────────
+
+
+def test_merge_prerequisite_commits_deduplicates_and_preserves_metadata(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "backport-batch.yml"
+    _write_report(config_path, commits=[{"commit": "aaaa", "commit_title": "original"}])
+
+    added = BackportCvekitClient._merge_prerequisite_commits(
+        config_path,
+        [
+            {"commit": "aaaa", "title": "duplicate"},
+            {
+                "commit": "bbbb",
+                "title": "provider",
+                "required_by": ["aaaa"],
+                "capabilities": ["symbol:helper"],
+            },
+        ],
+    )
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert added == 1
+    assert [row["commit"] for row in data["commits"]] == ["aaaa", "bbbb"]
+    assert data["commits"][1]["origin"] == "prerequisite"
+    assert data["commits"][1]["required_by"] == ["aaaa"]
+
+
+def test_prerequisite_commits_uses_read_only_cli_without_runtime_model(
+    tmp_path: Path,
+    fake_cvekit: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    client = BackportCvekitClient(runs_root=tmp_path / "runs")
+    captured: dict[str, Any] = {}
+
+    def fake_run(self, args, cwd, *, require_runtime_config=True):
+        captured.update(
+            args=args,
+            cwd=cwd,
+            require_runtime_config=require_runtime_config,
+        )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=json.dumps({"status": "ready", "candidates": []}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+    result = client.prerequisite_commits(
+        source_repo=str(source),
+        target_repo="/tmp/target",
+        target_ref="target-sha",
+        prereq_commits=["aaaa", "bbbb"],
+    )
+
+    assert result["status"] == "ready"
+    assert captured["require_runtime_config"] is False
+    assert captured["cwd"] == source
+    assert captured["args"].count("--prereq-commit") == 2
+
     def test_execute_selected_strips_old_layout_when_current_is_none(
         self, client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

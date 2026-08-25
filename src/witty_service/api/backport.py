@@ -279,10 +279,10 @@ def create_run(
     payload: BackportRunRequest,
     request: Request,
 ) -> BackportAsyncRunResponse:
-    if payload.action not in {"generate_report", "run_all"}:
+    if payload.action not in {"generate_report", "run_all", "prerequisite_commits"}:
         raise HTTPException(
             status_code=400,
-            detail="Only generate_report and run_all support async runs.",
+            detail="Only generate_report, run_all and prerequisite_commits support async runs.",
         )
 
     runs, runs_lock = _ensure_backport_runs(request)
@@ -291,7 +291,9 @@ def create_run(
         payload.payload.get("run_id") or payload.payload.get("_archive_run_id") or ""
     ).strip()
     run_id = (
-        uuid.uuid4().hex if payload.action == "generate_report" else requested_run_id
+        uuid.uuid4().hex
+        if payload.action in {"generate_report", "prerequisite_commits"}
+        else requested_run_id
     )
     if not run_id:
         raise HTTPException(
@@ -310,11 +312,24 @@ def create_run(
         try:
             if payload.action == "run_all":
                 _validate_run_target(run_store, run_id)
-            run_record = run_store.create_async_record(
-                run_id=run_id,
-                action=payload.action,
-                payload=payload.payload,
-            )
+            if payload.action == "prerequisite_commits":
+                # 纯 git 扫描没有 report artifact，不建 Task；记录仅存内存供轮询 getRun。
+                run_record = {
+                    "run_id": run_id,
+                    "action": payload.action,
+                    "status": "running",
+                    "result": None,
+                    "error": "",
+                    "progress": None,
+                    "pause_requested": False,
+                    "paused_at": None,
+                }
+            else:
+                run_record = run_store.create_async_record(
+                    run_id=run_id,
+                    action=payload.action,
+                    payload=payload.payload,
+                )
         except (FileNotFoundError, RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         # generate_report always creates a new Task and therefore chooses the id.
@@ -325,6 +340,7 @@ def create_run(
 
     services = request.app.state.services
     action = payload.action
+    is_scan = action == "prerequisite_commits"
     action_payload = dict(payload.payload)
     action_payload["_archive_run_id"] = run_id
     if action == "run_all":
@@ -405,6 +421,8 @@ def create_run(
                 if paused:
                     run_record["paused_at"] = time.time()
                 run_record["updated_at"] = time.time()
+                if is_scan:
+                    return
                 run_store.update_manifest(
                     run_store.runs_root / run_id,
                     {
@@ -477,6 +495,8 @@ def create_run(
                 run_record["status"] = "failed"
                 run_record["error"] = str(exc)
                 run_record["updated_at"] = time.time()
+                if is_scan:
+                    return
                 run_store.update_manifest(
                     run_store.runs_root / run_id,
                     {

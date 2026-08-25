@@ -37,6 +37,7 @@ commit {{commit_id}} {{source}}
 BACKPORT_REPOSITORY_CACHE_ENV = "BACKPORT_REPOSITORY_CACHE_DIR"
 BACKPORT_REPOSITORY_CACHE_DIR = "~/polymind-backport-repositories"
 DEFAULT_PATCH_DATASET_DIR = "~/patched_output"
+PREREQUISITE_REVIEW_STALE = "BACKPORT_PREREQUISITE_REVIEW_STALE"
 
 
 def _default_config() -> dict[str, Any]:
@@ -64,6 +65,7 @@ def _default_config() -> dict[str, Any]:
         "source_repo_state": None,
         "target_repo_state": None,
         "enable_conflict_summary": False,
+        "enable_prerequisite_scan": False,
         "cvekit_options": {},
     }
 
@@ -554,6 +556,7 @@ class BackportService:
             "try_resolve": self._run_try_resolve,
             "check_manual_patch": self._run_check_manual_patch,
             "apply_manual_patch": self._run_apply_manual_patch,
+            "prerequisite_commits": self._run_prerequisite_commits,
         }
 
     @staticmethod
@@ -1043,6 +1046,13 @@ class BackportService:
             config["patch_dataset_dir"],
         )
         try:
+            prerequisite_commits = payload.get("prerequisite_commits")
+            if isinstance(prerequisite_commits, list):
+                self._validate_prerequisite_review(
+                    payload.get("prerequisite_review"),
+                    excel_path=excel_path,
+                    config=config,
+                )
             return self._cvekit_client.generate_report(
                 excel_path=excel_path,
                 project_url=config["project_url"],
@@ -1059,16 +1069,90 @@ class BackportService:
                 commit_sort=config["commit_sort"],
                 target_config_layout=config["target_config_layout"],
                 target_config_layout_opts=config["target_config_layout_opts"],
+                prerequisite_commits=prerequisite_commits,
             )
-        except (
-            RuntimeError,
-            FileNotFoundError,
-            NotADirectoryError,
-            ValueError,
-        ) as error:
+        except DomainError as error:
+            logger.warning("generate_report prerequisite review rejected: %s", error)
+            return {
+                "operation": "generate_report",
+                "status": "failed",
+                "summary": error.message,
+                "diagnostics": {"code": error.code, **error.details},
+            }
+        except (RuntimeError, FileNotFoundError, NotADirectoryError, ValueError) as error:
             logger.exception("generate_report failed")
             return {
                 "operation": "generate_report",
+                "status": "failed",
+                "summary": str(error),
+                "diagnostics": {"error_text": str(error)},
+            }
+
+    def _run_prerequisite_commits(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = self._extract_config(payload)
+        excel_path = self._require_string(
+            payload,
+            "prerequisite_commits",
+            "excel_path",
+            "excelPath",
+        )
+        if not str(config["project_dir"] or "").strip():
+            raise DomainError(
+                code="BACKPORT_REPOSITORY_NOT_CONFIGURED",
+                message="前置提交查找需要配置 source 仓库路径（项目目录）。",
+                details={"action": "prerequisite_commits", "keys": ["config.project_dir"]},
+            )
+        if not str(config["target_path"] or "").strip():
+            raise DomainError(
+                code="BACKPORT_REPOSITORY_NOT_CONFIGURED",
+                message="前置提交查找需要配置 target 仓库路径（目标目录）。",
+                details={"action": "prerequisite_commits", "keys": ["config.target_path"]},
+            )
+        try:
+            original_commits = self._cvekit_client.extract_config_commits(excel_path, config)
+            shas = [
+                str(row["commit"])
+                for row in original_commits
+                if isinstance(row, dict) and row.get("commit")
+            ]
+            target_ref = BackportGitClient.resolve_ref(
+                config["target_path"],
+                config["target_release"] or "HEAD",
+            )
+            manifest = self._cvekit_client.prerequisite_commits(
+                source_repo=config["project_dir"],
+                target_repo=config["target_path"],
+                target_ref=target_ref,
+                prereq_commits=shas,
+            )
+            input_digest = str(manifest.get("input_digest") or "").strip()
+            manifest_target_ref = str(manifest.get("target_ref") or "").strip()
+            if not input_digest:
+                raise RuntimeError("Patchflow 前置提交结果缺少 input_digest。")
+            if manifest_target_ref != target_ref:
+                raise RuntimeError("Patchflow 前置提交结果的 target_ref 与请求基线不一致。")
+            manifest["review"] = self._build_prerequisite_review(
+                excel_path=excel_path,
+                config=config,
+                input_digest=input_digest,
+                target_ref=manifest_target_ref,
+            )
+            candidates = manifest.get("candidates") or []
+            return {
+                "operation": "prerequisite_commits",
+                "status": "success",
+                "summary": f"扫描完成，建议前置提交 {len(candidates)} 条",
+                "manifest": manifest,
+                "original_commits": original_commits,
+                "report": {
+                    "commits": original_commits,
+                    "commit_count": len(original_commits),
+                },
+            }
+        except (RuntimeError, FileNotFoundError, NotADirectoryError, ValueError) as error:
+            logger.exception("prerequisite_commits failed")
+            return {
+                "operation": "prerequisite_commits",
                 "status": "failed",
                 "summary": str(error),
                 "diagnostics": {"error_text": str(error)},
@@ -1952,9 +2036,99 @@ class BackportService:
                 return value.strip()
         return "<unknown>"
 
-    def _require_string(
-        self, payload: dict[str, Any], operation: str, *keys: str
-    ) -> str:
+    @staticmethod
+    def _build_prerequisite_review(
+        *,
+        excel_path: str,
+        config: dict[str, Any],
+        input_digest: str,
+        target_ref: str,
+    ) -> dict[str, str]:
+        excel = Path(excel_path).expanduser().resolve()
+        excel_hasher = hashlib.sha256()
+        with excel.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                excel_hasher.update(chunk)
+        snapshot = {
+            "excel_sha256": excel_hasher.hexdigest(),
+            "input_digest": input_digest.strip(),
+            "source_repo": str(
+                Path(str(config.get("project_dir") or "")).expanduser().resolve()
+            ),
+            "source_branch": str(config.get("source_branch") or "").strip(),
+            "target_repo": str(
+                Path(str(config.get("target_path") or "")).expanduser().resolve()
+            ),
+            "target_release": str(config.get("target_release") or "").strip(),
+            "target_ref": target_ref.strip(),
+        }
+        encoded = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return {**snapshot, "review_version": hashlib.sha256(encoded).hexdigest()}
+
+    def _validate_prerequisite_review(
+        self,
+        review: Any,
+        *,
+        excel_path: str,
+        config: dict[str, Any],
+    ) -> None:
+        if not isinstance(review, dict):
+            raise DomainError(
+                code=PREREQUISITE_REVIEW_STALE,
+                message="前置提交审阅缺少版本信息，请重新扫描。",
+            )
+        required = {
+            "excel_sha256",
+            "input_digest",
+            "source_repo",
+            "source_branch",
+            "target_repo",
+            "target_release",
+            "target_ref",
+            "review_version",
+        }
+        if any(not isinstance(review.get(key), str) for key in required) or any(
+            not str(review.get(key) or "").strip()
+            for key in (
+                "excel_sha256",
+                "input_digest",
+                "source_repo",
+                "target_repo",
+                "target_ref",
+                "review_version",
+            )
+        ):
+            raise DomainError(
+                code=PREREQUISITE_REVIEW_STALE,
+                message="前置提交审阅版本不完整，请重新扫描。",
+            )
+
+        target_ref = BackportGitClient.resolve_ref(
+            str(config.get("target_path") or ""),
+            str(config.get("target_release") or "HEAD"),
+        )
+        current = self._build_prerequisite_review(
+            excel_path=excel_path,
+            config=config,
+            input_digest=str(review["input_digest"]),
+            target_ref=target_ref,
+        )
+        if any(str(review.get(key)) != value for key, value in current.items()):
+            raise DomainError(
+                code=PREREQUISITE_REVIEW_STALE,
+                message="Excel 内容或仓库基线已变化，请重新扫描并审阅前置提交。",
+                details={
+                    "review_version": str(review.get("review_version") or ""),
+                    "current_version": current["review_version"],
+                },
+            )
+
+    def _require_string(self, payload: dict[str, Any], operation: str, *keys: str) -> str:
         value = self._get_string(payload, *keys)
         if value:
             return value

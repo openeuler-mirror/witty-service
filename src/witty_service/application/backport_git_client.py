@@ -53,6 +53,20 @@ class BackportGitClient:
         return result.stdout.strip()
 
     @staticmethod
+    def resolve_ref(target_path: str, ref: str = "HEAD") -> str:
+        repo = Path(target_path).expanduser().resolve()
+        BackportGitClient.ensure_git_repo(repo)
+        requested_ref = ref.strip() or "HEAD"
+        result = BackportGitClient._run_git(
+            repo,
+            ["rev-parse", "--verify", f"{requested_ref}^{{commit}}"],
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"git 无法解析目标 ref {requested_ref}: {detail}")
+        return result.stdout.strip()
+
+    @staticmethod
     def branches(path: Path) -> tuple[list[str], list[str]]:
         local_result = BackportGitClient._run_git(path, ["branch", "--format=%(refname:short)"])
         remote_result = BackportGitClient._run_git(path, ["branch", "-r", "--format=%(refname:short)"])
