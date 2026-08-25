@@ -1,0 +1,14 @@
+# The build context is .devcontainer/, so patterns are relative to this directory.
+# See devcontainer.json: "build": { "context": "." }
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

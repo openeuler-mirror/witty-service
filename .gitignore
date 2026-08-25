@@ -247,6 +247,7 @@ logs
 /_test_workspace
 /debug
 cache
+agent-workspaces/
 
 # configuration
 config.toml
