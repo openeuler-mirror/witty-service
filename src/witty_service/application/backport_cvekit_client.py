@@ -194,14 +194,6 @@ class BackportCvekitClient:
         return env
 
     def _run_cvekit(
-<<<<<<< HEAD
-        self, args: list[str], cwd: Path
-    ) -> subprocess.CompletedProcess[str]:
-        if self._runtime_config is None:
-            raise RuntimeError(
-                "Backport 运行环境未配置，请在 Backport 配置区选择运行模型。"
-            )
-=======
         self,
         args: list[str],
         cwd: Path,
@@ -210,7 +202,6 @@ class BackportCvekitClient:
     ) -> subprocess.CompletedProcess[str]:
         if require_runtime_config and self._runtime_config is None:
             raise RuntimeError("Backport 运行环境未配置，请在 Backport 配置区选择运行模型。")
->>>>>>> 18e90bd (feat(backport): 接入前置提交查找与确认流程)
         cmd_args = list(args)
         existing_options = {
             item.split("=", 1)[0]
@@ -280,10 +271,7 @@ class BackportCvekitClient:
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
-<<<<<<< HEAD
-=======
                 errors="replace",
->>>>>>> 18e90bd (feat(backport): 接入前置提交查找与确认流程)
                 check=False,
             )
         finally:
@@ -813,42 +801,6 @@ class BackportCvekitClient:
         base_config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.parent.mkdir(parents=True, exist_ok=True)
 
-<<<<<<< HEAD
-        base_config: dict[str, Any] = {
-            "project": "linux",
-            "target_path": str(target_repo),
-        }
-        normalized_message_source = self._normalize_commit_message_source(
-            commit_message_source
-        )
-        for key, value in {
-            "project_url": project_url,
-            "project_dir": project_dir,
-            "source_branch": source_branch,
-            "target_release": target_release,
-            "patch_dataset_dir": patch_dataset_dir,
-            "signer_name": signer_name,
-            "signer_email": signer_email,
-            "commit_message_template": commit_message_template,
-            "commit_message_source": normalized_message_source,
-            "commit_sort": commit_sort,
-        }.items():
-            if isinstance(value, str) and value.strip():
-                base_config[key] = value.strip()
-        target_config_layout, target_config_layout_opts = self._normalize_layout_fields(
-            target_config_layout, target_config_layout_opts
-        )
-        if target_config_layout and target_config_layout != "none":
-            base_config["target_config_layout"] = target_config_layout
-            if target_config_layout_opts and isinstance(
-                target_config_layout_opts, dict
-            ):
-                base_config["target_config_layout_opts"] = target_config_layout_opts
-        if normalized_message_source == "auto" and linux_repo_path.strip():
-            base_config["linux_repo_path"] = linux_repo_path.strip()
-        with base_config_path.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(base_config, handle, allow_unicode=True, sort_keys=False)
-=======
         base_config = self._write_base_config(
             base_config_path,
             {
@@ -868,7 +820,6 @@ class BackportCvekitClient:
                 "target_config_layout_opts": target_config_layout_opts or {},
             },
         )
->>>>>>> 18e90bd (feat(backport): 接入前置提交查找与确认流程)
         archived_config_path = archive_root / "input" / "config.json"
         try:
             archived_config = json.loads(
