@@ -2,8 +2,9 @@
 Integration tests for WebSocket Adaptor feature.
 These tests verify the complete flow from AgentManager through WebSocket client.
 """
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+
+from unittest.mock import MagicMock
+
 
 def test_agent_manager_uses_websocket_client():
     """
@@ -12,8 +13,10 @@ def test_agent_manager_uses_websocket_client():
     """
     # This test verifies the integration is wired correctly
     # The actual WebSocket behavior is tested in unit tests
-    from src.adapter.websocket_client_pool import WebSocketClientPool, AdaptorEndpoint
-    from src.adapter.websocket_client import WebSocketClient
+    from witty_service.adapter.websocket_client_pool import (
+        AdaptorEndpoint,
+        WebSocketClientPool,
+    )
 
     pool = WebSocketClientPool()
     endpoint = AdaptorEndpoint(
@@ -29,11 +32,12 @@ def test_agent_manager_uses_websocket_client():
     assert client is not None
     factory.assert_called_once_with("ws://localhost:8080")
 
+
 def test_websocket_protocol_types_match_spec():
     """
     Verify protocol types align with witty-agent-server v2.1 spec.
     """
-    from src.adapter.websocket_protocol import InboundEvent, OutboundMessage
+    from witty_service.adapter.websocket_protocol import InboundEvent, OutboundMessage
 
     # InboundEvent matches spec envelope
     event: InboundEvent = {

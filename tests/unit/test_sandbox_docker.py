@@ -26,13 +26,15 @@ def _reset_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 class FakeContainer:
     id: str = "container-123"
     status: str = "running"
-    attrs: dict[str, Any] = field(default_factory=lambda: {
-        "NetworkSettings": {
-            "Ports": {
-                "8080/tcp": [{"HostPort": "18080"}],
+    attrs: dict[str, Any] = field(
+        default_factory=lambda: {
+            "NetworkSettings": {
+                "Ports": {
+                    "8080/tcp": [{"HostPort": "18080"}],
+                },
             },
-        },
-    })
+        }
+    )
 
     def __post_init__(self) -> None:
         self.stop_called = False
@@ -64,6 +66,7 @@ class FakeContainers:
         if container_name in self._get_containers:
             return self._get_containers[container_name]
         from docker.errors import NotFound
+
         raise NotFound(f"container {container_name} not found")
 
 
@@ -93,6 +96,7 @@ class ReloadErrorContainer(FakeContainer):
 class GetErrorContainers(FakeContainers):
     def get(self, container_name: str) -> FakeContainer:
         from docker.errors import APIError
+
         raise APIError("docker daemon error")
 
 
@@ -158,6 +162,7 @@ def test_docker_runtime_start_mounts_workspace_to_witty_workspace(
     assert handle.metadata["host_port"] == 18080
     assert handle.metadata["base_url"] == "http://127.0.0.1:18080"
     assert handle.metadata["container_workspace_path"] == "/witty-workspace"
+
 
 def test_docker_runtime_start_with_environment_vars(tmp_path: Path) -> None:
     from witty_service.sandbox.docker import DockerSandboxBackend
@@ -548,13 +553,14 @@ def test_docker_runtime_start_propagates_container_get_error(
     tmp_path: Path,
 ) -> None:
     from docker.errors import APIError
+
     from witty_service.sandbox.docker import DockerSandboxBackend
 
     container = FakeContainer()
     client = FakeDockerClient(container)
     client.containers = GetErrorContainers(container)
 
-    backend = DockerSandboxBackend(client=client, image="witty-agent:test")
+    backend = DockerSandboxBackend(client=client, image="witty-agent")
     workspace_path = _workspace_dir(tmp_path)
 
     with pytest.raises(APIError, match="docker daemon error"):
@@ -629,6 +635,7 @@ def test_docker_runtime_try_find_container_removes_non_running() -> None:
 
 def test_docker_runtime_try_find_container_raises_on_api_error() -> None:
     from docker.errors import APIError
+
     from witty_service.sandbox.docker import DockerSandboxBackend
 
     container = FakeContainer()
@@ -718,18 +725,17 @@ def test_docker_runtime_factory_injects_env_configuration(
     assert backend.container_port == 19090
     assert backend.container_workspace_path == "/custom-workspace"
 
-def test_docker_runtime_factory_keeps_explicit_image_tag(
+
+def test_docker_runtime_factory_rejects_explicit_image_tag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # 镜像 tag 现在由 start() 的 image_tag kwarg 动态拼接，
+    # WITTY_DOCKER_IMAGE 必须是无 tag 的仓库名，带 tag 直接拒绝。
     monkeypatch.setenv("WITTY_DOCKER_IMAGE", "registry.example/witty-agent:v1")
     _reset_settings(monkeypatch)
 
-    backend = create_sandbox_backend("docker")
-
-    from witty_service.sandbox.docker import DockerSandboxBackend
-
-    assert isinstance(backend, DockerSandboxBackend)
-    assert backend.base_image == "registry.example/witty-agent:v1"
+    with pytest.raises(ValueError):
+        create_sandbox_backend("docker")
 
 
 def test_docker_runtime_factory_rejects_invalid_container_port_env(
@@ -873,7 +879,10 @@ def test_docker_runtime_start_falls_back_to_default_base_image(
         image_tag="latest",
     )
 
-    assert client.containers.run_calls[0]["image"] == "ghcr.io/openwitty/witty-agent-server:latest"
+    assert (
+        client.containers.run_calls[0]["image"]
+        == "ghcr.io/openwitty/witty-agent-server:latest"
+    )
 
 
 # =============================================================================
@@ -963,6 +972,7 @@ def test_docker_runtime_start_with_empty_env_not_overwritten(
     )
 
     assert client.containers.run_calls[0]["environment"] == {}
+
 
 def test_docker_runtime_start_default_env_is_empty(tmp_path: Path) -> None:
     from witty_service.sandbox.docker import DockerSandboxBackend
