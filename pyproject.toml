@@ -57,6 +57,10 @@ dev = [
   "mypy>=1.8",
   "python-semantic-release>=9.0",
 ]
+# dsh runtime（developer preview：锁精确版本，升级需独立评估兼容性）
+dsh = [
+  "deepseek-harness-sdk==0.1.1rc1",
+]
 
 [project.scripts]
 witty-service = "witty_service.cli:main"
@@ -114,6 +118,11 @@ show_error_codes = true
 ignore_missing_imports = false
 follow_imports = "silent"
 exclude = ["tests/*", "examples/*"]
+
+# deepseek-harness-sdk 未打包 py.typed 标记
+[[tool.mypy.overrides]]
+module = "deepseek_harness.*"
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 88
