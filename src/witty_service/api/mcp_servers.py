@@ -11,6 +11,7 @@ from witty_service.api.schemas import (
     UpdateMcpServerRequest,
 )
 from witty_service.api.services import ServiceContainer
+from witty_service.application.mcp_runtime_config import McpRuntimeConfigResolver
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import McpServerRecord
 
@@ -43,9 +44,12 @@ def create_mcp_server(
     services: ServiceContainer = Depends(get_services),
 ) -> McpServerResponse:
     mcp_server_name = _extract_server_name(payload.mcp_server_config)
+    mcp_server_config = McpRuntimeConfigResolver(services).sanitize_for_storage(
+        mcp_server_name, payload.mcp_server_config
+    )
     server = services.repository.create_mcp_server(
         mcp_server_name=mcp_server_name,
-        mcp_server_config=payload.mcp_server_config,
+        mcp_server_config=mcp_server_config,
     )
     return _to_mcp_server_response(server)
 
@@ -90,12 +94,27 @@ def update_mcp_server(
 
     mcp_server_name = payload.mcp_server_name
     if mcp_server_name is None and payload.mcp_server_config is not None:
-        mcp_server_name = _extract_server_name(payload.mcp_server_config)
+        if (
+            server.mcp_server_name == "cvekit_mcp"
+            and "cvekit_mcp" not in payload.mcp_server_config
+            and "command" in payload.mcp_server_config
+        ):
+            # 兼容历史扁平 cvekit 配置：其 command/args/env 不是 server name。
+            mcp_server_name = server.mcp_server_name
+        else:
+            mcp_server_name = _extract_server_name(payload.mcp_server_config)
 
     updated_server = services.repository.update_mcp_server(
         server_id=server_id,
         mcp_server_name=mcp_server_name,
-        mcp_server_config=payload.mcp_server_config,
+        mcp_server_config=(
+            McpRuntimeConfigResolver(services).sanitize_for_storage(
+                mcp_server_name or server.mcp_server_name,
+                payload.mcp_server_config,
+            )
+            if payload.mcp_server_config is not None
+            else None
+        ),
     )
     return _to_mcp_server_response(updated_server)
 

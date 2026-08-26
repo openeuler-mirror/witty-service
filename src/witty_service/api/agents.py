@@ -44,6 +44,7 @@ from witty_service.application.agent_manager import (
     AgentCreateRequest,
 )
 from witty_service.application.agent_template_service import AgentTemplateService
+from witty_service.application.mcp_runtime_config import McpRuntimeConfigResolver
 from witty_service.application.skill_manager import SkillManager
 from witty_service.domain.enums import AgentStatus
 from witty_service.domain.errors import DomainError
@@ -970,7 +971,11 @@ async def enable_mcp_server(
     adaptor_client = AdaptorHttpClient(
         base_url=services.repository.get_sandbox_state(agent_id).adapter_base_url
     )
-    runtime_mcp_config = mcp_server.mcp_server_config
+    runtime_mcp_config = McpRuntimeConfigResolver(services).resolve(
+        mcp_server.mcp_server_name,
+        mcp_server.mcp_server_config,
+        model_id=agent.model_id,
+    )
     if isinstance(runtime_mcp_config, dict) and isinstance(
         runtime_mcp_config.get(mcp_server.mcp_server_name), dict
     ):
