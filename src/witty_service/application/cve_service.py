@@ -231,7 +231,11 @@ class CveService:
             try:
                 cache_data = json.loads(cache_path.read_text(encoding="utf-8"))
                 for candidate_key in (current_cache_key, legacy_cache_key):
-                    raw_items = cache_data.get(candidate_key, {}).get("data", [])
+                    raw = cache_data.get(candidate_key)
+                    if isinstance(raw, dict):
+                        raw_items = raw.get("data", [])
+                    else:
+                        continue
                     if isinstance(raw_items, list):
                         cache_key = candidate_key
                         cache_items = [

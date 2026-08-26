@@ -103,6 +103,82 @@ def test_get_workbench_reads_current_cvekit_cache_key_and_conflict_patch(
     assert backport_patch["status"] == "无需回移植"
 
 
+def test_get_workbench_reads_legacy_cache_key_when_current_key_is_missing(
+    service: CveService, tmp_path: Path
+) -> None:
+    """当前 repo 维度 key 缺失时兼容读取旧格式缓存。"""
+    clone_dir = tmp_path / "Image"
+    (clone_dir / "kernel").mkdir(parents=True)
+    cve_id = "CVE-2026-64563"
+    branches = "OLK-6.6,OLK-5.10"
+    legacy_cache_key = hashlib.md5(
+        f"{cve_id}|OLK-5.10,OLK-6.6".encode(), usedforsecurity=False
+    ).hexdigest()
+    cache_dir = tmp_path / ".cve_analyzer_cache"
+    cache_dir.mkdir()
+    (cache_dir / "branches_analysis_cache.json").write_text(
+        json.dumps(
+            {
+                legacy_cache_key: {
+                    "data": [
+                        {
+                            "Target branch": "OLK-5.10",
+                            "Adaptation status": "success",
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.get_workbench(cve_id, branches, str(clone_dir))
+
+    branch = next(item for item in result["branches"] if item["name"] == "OLK-5.10")
+    assert result["cache_key"] == legacy_cache_key
+    assert branch["status"] == "success"
+
+
+def test_get_workbench_keeps_empty_current_cache_over_legacy_cache(
+    service: CveService, tmp_path: Path
+) -> None:
+    """当前 repo 已缓存空结果时，不能回退到未区分 repo 的旧缓存。"""
+    clone_dir = tmp_path / "Image"
+    repo_dir = clone_dir / "kernel"
+    repo_dir.mkdir(parents=True)
+    cve_id = "CVE-2026-64563"
+    branches = "OLK-5.10"
+    current_cache_key = hashlib.md5(
+        f"{cve_id}|{branches}|{repo_dir}".encode(), usedforsecurity=False
+    ).hexdigest()
+    legacy_cache_key = hashlib.md5(
+        f"{cve_id}|{branches}".encode(), usedforsecurity=False
+    ).hexdigest()
+    cache_dir = tmp_path / ".cve_analyzer_cache"
+    cache_dir.mkdir()
+    (cache_dir / "branches_analysis_cache.json").write_text(
+        json.dumps(
+            {
+                current_cache_key: {"data": []},
+                legacy_cache_key: {
+                    "data": [
+                        {
+                            "Target branch": "OLK-5.10",
+                            "Adaptation status": "legacy-result",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.get_workbench(cve_id, branches, str(clone_dir))
+
+    assert result["cache_key"] == current_cache_key
+    assert result["branches"][0]["status"] == ""
+
+
 def test_get_pr_readiness_accepts_cvekit_hashed_fix_branch(
     service: CveService, tmp_path: Path, monkeypatch
 ) -> None:
