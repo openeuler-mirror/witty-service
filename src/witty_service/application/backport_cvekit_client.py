@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,6 +22,11 @@ import yaml
 
 from witty_service.application.backport_git_client import BackportGitClient
 from witty_service.application.backport_run_store import BackportRunStore
+
+logger = logging.getLogger(__name__)
+
+# 目标仓库跨进程锁等待上限(秒);超时发布 repository_lock_timeout 并中止任务
+REPOSITORY_LOCK_TIMEOUT_SECONDS = 600
 
 
 @dataclass(slots=True)
@@ -89,6 +98,8 @@ class BackportCvekitClient:
         self._runtime_config: BackportRuntimeConfig | None = None
         self._progress_callback = progress_callback
         self._archive_run_id = ""
+        self._lock_target = ""
+        self._lock_held = 0
 
     # ── 初始化 ──────────────────────────────────────────────────
 
@@ -110,6 +121,156 @@ class BackportCvekitClient:
 
     def set_conflict_reporter_url(self, url: str) -> None:
         self._conflict_reporter_url = url.strip()
+
+    def set_lock_target(self, target_path: str | None) -> None:
+        """设置目标仓库锁上下文:_run_cvekit 执行期间自动加跨进程 flock。
+
+        同一规范化 target_path 的并发 cvekit 执行互斥(覆盖整个执行生命周期);
+        竞争时经 progress_callback 发布 repository_lock_waiting/acquired/timeout 事件。
+        由 service 层在 run 操作入口设置、finally 清除。
+        """
+        self._lock_target = str(target_path or "").strip()
+
+    # ── 目标仓库跨进程锁 ────────────────────────────────────────
+
+    @staticmethod
+    def _read_lock_owner(lock_path: Path) -> dict[str, str]:
+        """读取锁文件中的 owner 信息(task_id/operation),供竞争方展示。"""
+        try:
+            data = json.loads(lock_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {k: str(v) for k, v in data.items() if v}
+        except (OSError, json.JSONDecodeError):
+            pass
+        return {}
+
+    def _publish_lock_event(self, event: dict[str, Any]) -> None:
+        """发布仓库锁事件(经 progress_callback,与 MR 172 事件协议一致)。"""
+        if self._progress_callback is not None:
+            try:
+                self._progress_callback(event)
+            except Exception:
+                # 事件发布失败不得中断任务
+                logger.warning(
+                    "发布仓库锁事件失败: %s", event.get("event"), exc_info=True
+                )
+
+    @contextlib.contextmanager
+    def repository_lock(self):
+        """对 _lock_target 加跨进程 flock,覆盖整个 cvekit 执行生命周期。
+
+        公开 API:service 层跨类调用前必须先 set_lock_target()(时序耦合
+        由调用方保证,见 backport_service.run_action);可重入:service 层
+        在整个 run 操作期间持有(覆盖多次 cvekit 调用与 git 操作),
+        _run_cvekit 等嵌套进入时直接通过,不重复加锁。
+        竞争时发布 repository_lock_waiting(带 owner 与剩余超时)事件,
+        阻塞轮询等待;获得锁发布 acquired,超时发布 timeout 并抛错。
+        无竞争直接获得时也发布 acquired(service 侧对无竞争获取忽略展示)。
+        """
+        if not self._lock_target:
+            yield
+            return
+        if self._lock_held > 0:
+            # 可重入:同进程内已持有(service 层全程持有)
+            self._lock_held += 1
+            try:
+                yield
+            finally:
+                self._lock_held -= 1
+            return
+        lock_root = Path.home() / ".patchflow" / "locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        key = hashlib.sha1(
+            str(Path(self._lock_target).expanduser().resolve()).encode()
+        ).hexdigest()[:16]
+        lock_path = lock_root / f"{key}.lock"
+        owner_task = getattr(self._run_store, "_run_id", "") or ""
+        timeout_seconds = REPOSITORY_LOCK_TIMEOUT_SECONDS
+        self._lock_held = 1
+        try:
+            with open(lock_path, "a+", encoding="utf-8") as lock_file:
+                owner: dict[str, str] = {}
+                waited = 0
+                try:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    # 竞争:读 owner,发布 waiting,阻塞轮询等待(带超时)
+                    owner = self._read_lock_owner(lock_path)
+                    started = time.monotonic()
+                    self._publish_lock_event(
+                        {
+                            "event": "repository_lock_waiting",
+                            "wait_seconds": 0,
+                            "timeout_seconds": timeout_seconds,
+                            "owner": owner,
+                        }
+                    )
+                    while True:
+                        try:
+                            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except OSError:
+                            waited = int(time.monotonic() - started)
+                            if waited >= timeout_seconds:
+                                self._publish_lock_event(
+                                    {
+                                        "event": "repository_lock_timeout",
+                                        "wait_seconds": waited,
+                                        "timeout_seconds": timeout_seconds,
+                                        "owner": owner,
+                                    }
+                                )
+                                raise RuntimeError(
+                                    f"等待目标仓库锁超时({timeout_seconds}s): {self._lock_target}"
+                                ) from exc
+                            self._publish_lock_event(
+                                {
+                                    "event": "repository_lock_waiting",
+                                    "wait_seconds": waited,
+                                    "timeout_seconds": timeout_seconds,
+                                    "owner": owner,
+                                }
+                            )
+                            time.sleep(0.5)
+                # 已获得锁:写入 owner 信息并发布 acquired
+                lock_file.seek(0)
+                lock_file.truncate()
+                lock_file.write(
+                    json.dumps(
+                        {
+                            "task_id": owner_task,
+                            "operation": self._lock_target,
+                            "acquired_at": time.time(),
+                        }
+                    )
+                )
+                lock_file.flush()
+                self._publish_lock_event(
+                    {
+                        "event": "repository_lock_acquired",
+                        "wait_seconds": waited,
+                        "timeout_seconds": timeout_seconds,
+                        "owner": {
+                            "task_id": owner_task,
+                            "operation": self._lock_target,
+                        },
+                    }
+                )
+                try:
+                    yield
+                finally:
+                    # 先清空 owner(仍持锁),再释放:避免竞争者已写入的新 owner 被清空
+                    try:
+                        lock_file.seek(0)
+                        lock_file.truncate()
+                        lock_file.write("{}")
+                        lock_file.flush()
+                    except OSError:
+                        pass
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        finally:
+            self._lock_held = 0
 
     def set_runtime_config(self, runtime_config: BackportRuntimeConfig | None) -> None:
         self._runtime_config = runtime_config
@@ -157,7 +318,21 @@ class BackportCvekitClient:
 
     # ── 通用工具 ────────────────────────────────────────────────
 
-    def _build_env(self) -> dict[str, str]:
+    def _close_failed_run(self, run_ctx) -> None:
+        """登记记录异常收尾:标记 failed 并写 ended_at,避免永久遗留 running。"""
+        self._run_store.complete_cvekit_run(run_ctx, [], "failed")
+
+    @staticmethod
+    def _action_from_args(args: list[str]) -> str:
+        """从 cvekit 命令行提取 action,供 task 日志 metadata 的 operation。"""
+        for index, item in enumerate(args):
+            if item.startswith("--action="):
+                return item.split("=", 1)[1]
+            if item == "--action" and index + 1 < len(args):
+                return args[index + 1]
+        return "cvekit"
+
+    def _build_env(self, run_id: str | None = None) -> dict[str, str]:
         cvekit_bin_dir = self.resolve_cvekit_path().parent
         env: dict[str, str] = {
             "PATH": os.pathsep.join(
@@ -191,12 +366,18 @@ class BackportCvekitClient:
                 env["LLM_BASE_URL"] = self._runtime_config.llm_base_url
             if self._runtime_config.llm_model_name:
                 env["LLM_MODEL_NAME"] = self._runtime_config.llm_model_name
+        # 注入本次 cvekit run 的独立 run_id 与统一日志目录:cvekit 据此落盘;
+        # CVEKIT_TASK_ID(稳定 task 标识)由 _run_cvekit 补充
+        if run_id:
+            env["CVEKIT_RUN_ID"] = run_id
+        env["CVEKIT_LOG_DIR"] = str(Path.home() / ".patchflow" / "logs")
         return env
 
     def _run_cvekit(
         self,
         args: list[str],
         cwd: Path,
+        operation: str | None = None,
         *,
         require_runtime_config: bool = True,
     ) -> subprocess.CompletedProcess[str]:
@@ -209,7 +390,18 @@ class BackportCvekitClient:
             if isinstance(item, str) and item.startswith("--")
         }
         runtime_config = self._runtime_config
-        env = self._build_env()
+        # 每次调用独立 cvekit run ID(启动前登记,子进程崩溃也可恢复);
+        # CVEKIT_TASK_ID 保持 task 级稳定标识
+        task_id = getattr(self._run_store, "_run_id", "") or ""
+        run_ctx = self._run_store.begin_cvekit_run(
+            task_id, operation or self._action_from_args(cmd_args)
+        )
+        try:
+            env = self._build_env(run_ctx.cvekit_run_id if run_ctx else None)
+        except Exception:
+            # 启动前异常(build_env/resolve_cvekit_path 等):关闭登记记录
+            self._close_failed_run(run_ctx)
+            raise
         if self._archive_run_id:
             env["CVEKIT_TASK_ID"] = self._archive_run_id
         if runtime_config is not None:
@@ -223,7 +415,11 @@ class BackportCvekitClient:
                 if value and option not in existing_options:
                     cmd_args.extend([option, value])
 
-        cmd = [str(self.resolve_cvekit_path()), *cmd_args]
+        try:
+            cmd = [str(self.resolve_cvekit_path()), *cmd_args]
+        except Exception:
+            self._close_failed_run(run_ctx)
+            raise
         progress_path = cwd / f".cvekit-progress-{uuid.uuid4().hex}.json"
         env["CVEKIT_PROGRESS_FILE"] = str(progress_path)
         stop_progress = threading.Event()
@@ -264,56 +460,75 @@ class BackportCvekitClient:
             progress_thread.start()
 
         try:
-            result = subprocess.run(
-                cmd,
-                cwd=str(cwd),
-                env=env,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-            )
+            with self.repository_lock():
+                result = subprocess.run(
+                    cmd,
+                    cwd=str(cwd),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                )
+        except Exception:
+            self._close_failed_run(run_ctx)
+            raise
         finally:
             stop_progress.set()
             if progress_thread is not None:
                 progress_thread.join(timeout=1)
                 publish_progress()
             progress_path.unlink(missing_ok=True)
-        source_log_archive_dir = self._run_store.write_command_logs(
-            cwd=cwd,
-            command=self._redact_command(cmd),
-            returncode=result.returncode,
-            stdout=result.stdout or "",
-            stderr=result.stderr or "",
-        )
-        source_log_roots = {
-            (Path.home() / ".backport").resolve(),
-            (Path.home() / ".cvekit" / "backport_logs").resolve(),
-        }
-        source_log_paths = {
-            Path(value).expanduser().resolve()
-            for value in re.findall(
-                r"""(/[^\s"',]+\.log)""",
-                "\n".join((result.stdout or "", result.stderr or "")),
+        try:
+            source_log_archive_dir = self._run_store.write_command_logs(
+                cwd=cwd,
+                command=self._redact_command(cmd),
+                returncode=result.returncode,
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
             )
-        }
-        for source_log in sorted(source_log_paths):
-            if (
-                source_log.parent not in source_log_roots
-                or not source_log.name.startswith("backport-")
-                or not source_log.is_file()
-            ):
-                continue
-            archived_log = source_log_archive_dir / source_log.name
-            cleaned = self._run_store.redact(
-                source_log.read_text(encoding="utf-8", errors="replace"),
-                [self._runtime_config.api_key] if self._runtime_config else None,
+            source_log_root = (Path.home() / ".patchflow" / "logs").resolve()
+            source_log_paths = {
+                Path(value).expanduser().resolve()
+                for value in re.findall(
+                    r"""(/[^\s"',]+\.log)""",
+                    "\n".join((result.stdout or "", result.stderr or "")),
+                )
+            }
+            for source_log in sorted(source_log_paths):
+                if (
+                    not source_log.is_relative_to(source_log_root)
+                    or not source_log.name.startswith("patchflow-")
+                    or not source_log.is_file()
+                ):
+                    continue
+                # 新命名(patchflow-{ts}-{run_id8}-...)文件名已不含引擎段,归档时
+                # 以 {engine_dir}- 前缀保留引擎信息;batch 目录主日志保留原名,
+                # 供 report 的 log_path 字段按原名回退查找
+                engine_dir = source_log.parent.name
+                archived_name = (
+                    f"{engine_dir}-{source_log.name}"
+                    if engine_dir and engine_dir != "batch"
+                    else source_log.name
+                )
+                archived_log = source_log_archive_dir / archived_name
+                cleaned = self._run_store.redact(
+                    source_log.read_text(encoding="utf-8", errors="replace"),
+                    [self._runtime_config.api_key] if self._runtime_config else None,
+                )
+                self._run_store.write_text(archived_log, cleaned)
+                if not archived_log.is_file():
+                    raise RuntimeError(f"Backport 日志归档失败: {source_log}")
+            # task 级日志聚合(独立于 attempt 归档,失败不阻断业务)
+            self._run_store.complete_cvekit_run(
+                run_ctx,
+                sorted(source_log_paths),
+                "success" if result.returncode == 0 else "failed",
             )
-            self._run_store.write_text(archived_log, cleaned)
-            if not archived_log.is_file():
-                raise RuntimeError(f"Backport 日志归档失败: {source_log}")
-            source_log.unlink()
+        except Exception:
+            self._close_failed_run(run_ctx)
+            raise
         if result.returncode != 0:
             redacted_cmd = self._redact_command(cmd)
             secrets = [runtime_config.api_key] if runtime_config and runtime_config.api_key else []
@@ -615,6 +830,7 @@ class BackportCvekitClient:
                 "--stop-at-first-conflict",
             ],
             run_dir,
+            operation="stop_at_first_conflict_report",
         )
         updated_report_data, updated_commits = self._read_report(report_config_path)
         return run_dir, updated_report_data, updated_commits
@@ -854,6 +1070,7 @@ class BackportCvekitClient:
                 str(base_config_path),
             ],
             run_dir,
+            operation="generate_config",
         )
 
         if prerequisite_commits:
@@ -870,6 +1087,7 @@ class BackportCvekitClient:
                 "--stop-at-first-conflict",
             ],
             run_dir,
+            operation="generate_report",
         )
 
         if not report_path.exists():
@@ -1536,7 +1754,7 @@ class BackportCvekitClient:
             "--json",
         ]
         cmd.extend(self.build_cvekit_option_args(cvekit_options))
-        result = self._run_cvekit(cmd, attempt_dir)
+        result = self._run_cvekit(cmd, attempt_dir, operation="execute_selected")
         combined_output = "\n".join(
             part for part in [result.stdout, result.stderr] if part
         )
@@ -1819,6 +2037,7 @@ class BackportCvekitClient:
                 apply_value,
             ],
             attempt_dir,
+            operation="apply_row",
         )
         apply_result = self._parse_json_output(result.stdout)
 
@@ -1863,7 +2082,7 @@ class BackportCvekitClient:
             result={
                 "operation": "apply_row",
                 "status": "failed" if apply_status == "failed" else "success",
-                "batch_logfile": apply_result.get("batch_logfile"),
+                "log_path": apply_result.get("log_path"),
             },
             task_dir=archive_run_dir,
             archive_scope="run" if self._archive_run_id else "interaction",
@@ -1962,7 +2181,9 @@ class BackportCvekitClient:
                 cmd.extend(["--commit-message-source", commit_message_source])
             if commit_message_source == "auto" and linux_repo_path.strip():
                 cmd.extend(["--linux-repo-path", linux_repo_path.strip()])
-            result = self._run_cvekit(cmd, preview_config_path.parent)
+            result = self._run_cvekit(
+                cmd, preview_config_path.parent, operation="preview_commit_message"
+            )
         finally:
             if sanitized_config_path is not None:
                 sanitized_config_path.unlink(missing_ok=True)

@@ -528,7 +528,7 @@ def test_run_stop_at_first_conflict_report_creates_dir_and_invokes(
 ) -> None:
     called: dict[str, Any] = {}
 
-    def fake_run(self, args, cwd):
+    def fake_run(self, args, cwd, **kwargs):
         called["args"] = args
         cfg = next(a for a in args if a.endswith(".report.yml"))
         Path(cfg).write_text(
@@ -560,7 +560,7 @@ def test_check_row_cleans_temp_run_dir(
     )
     called: dict[str, Any] = {}
 
-    def fake_run(self, args, cwd):
+    def fake_run(self, args, cwd, **kwargs):
         called["run_dir"] = Path(cwd)
         cfg = next(a for a in args if a.endswith(".report.yml"))
         Path(cfg).write_text(
@@ -612,7 +612,7 @@ def test_generate_report_flow(
         staticmethod(lambda p: {}),
     )
 
-    def fake_run(self, args, cwd):
+    def fake_run(self, args, cwd, **kwargs):
         if "--stop-at-first-conflict" in args:
             for a in args:
                 if a.endswith("backport-batch.yml"):
@@ -697,7 +697,7 @@ def test_continue_report_runs_cvekit_when_pending(
         ],
     )
 
-    def fake_run(self, args, cwd):
+    def fake_run(self, args, cwd, **kwargs):
         cfg = next(a for a in args if a.endswith(".report.yml"))
         Path(cfg).write_text(
             yaml.safe_dump(
@@ -764,7 +764,7 @@ def test_recheck_conflict_success(
         base, commits=[{"row_id": "1", "has_conflict": True, "status": "pending"}]
     )
 
-    def fake_run(self, args, cwd):
+    def fake_run(self, args, cwd, **kwargs):
         cfg = next(a for a in args if a.endswith(".report.yml"))
         Path(cfg).write_text(
             yaml.safe_dump({"commits": [{"row_id": "1", "status": "success"}]}),
@@ -843,7 +843,7 @@ def test_execute_selected_success_and_diagnose(
     client._run_store.update_manifest(task_dir, {"current_run": 1})
     base = task_dir / "b.yml"
 
-    def run_ok(self, args, cwd):
+    def run_ok(self, args, cwd, **kwargs):
         config_path = args[args.index("--backport-config") + 1]
         assert "-e" in args
         assert config_path.endswith(".report.yml")
@@ -856,7 +856,7 @@ def test_execute_selected_success_and_diagnose(
             args=args, returncode=0, stdout="ok", stderr=""
         )
 
-    def run_diag(self, args, cwd):
+    def run_diag(self, args, cwd, **kwargs):
         cfg = next(a for a in args if a.endswith(".yml"))
         Path(cfg).write_text(
             yaml.safe_dump({"commits": [{"row_id": "1", "status": "failed"}]}),
@@ -937,7 +937,7 @@ def test_execute_selected_without_archive_run_uses_interaction(
     )
     client._run_store.set_run_id(None)
 
-    def fake_run(args, cwd):
+    def fake_run(args, cwd, **kwargs):
         config_path = Path(args[args.index("--backport-config") + 1])
         _write_report(
             config_path,
@@ -1030,7 +1030,7 @@ def test_try_resolve_with_blocking(
         ],
     )
 
-    def fake_run(self, args, cwd):
+    def fake_run(self, args, cwd, **kwargs):
         cfg = next(a for a in args if a.endswith(".yml"))
         Path(cfg).write_text(
             yaml.safe_dump(
@@ -1095,7 +1095,7 @@ def test_apply_row_success_and_failure(
         base, commits=[{"row_id": "1", "status": "pending", "patch_path": "/p"}]
     )
 
-    def run_ok(self, args, cwd):
+    def run_ok(self, args, cwd, **kwargs):
         return subprocess.CompletedProcess(
             args=args,
             returncode=0,
@@ -1103,7 +1103,7 @@ def test_apply_row_success_and_failure(
             stderr="",
         )
 
-    def run_fail(self, args, cwd):
+    def run_fail(self, args, cwd, **kwargs):
         return subprocess.CompletedProcess(
             args=args,
             returncode=0,
@@ -1152,7 +1152,7 @@ def test_apply_row_uses_working_report_when_exists(
     )
     seen: dict[str, Any] = {}
 
-    def run_ok(self, args, cwd):
+    def run_ok(self, args, cwd, **kwargs):
         config = Path(next(a for a in args if a.endswith(".yml")))
         seen.update(
             config=str(config),
@@ -1197,12 +1197,12 @@ def test_preview_commit_message_success_and_failure(
         "commit_message_warnings": ["w"],
     }
 
-    def run_ok(self, args, cwd):
+    def run_ok(self, args, cwd, **kwargs):
         return subprocess.CompletedProcess(
             args=args, returncode=0, stdout=json.dumps(payload), stderr=""
         )
 
-    def run_fail(self, args, cwd):
+    def run_fail(self, args, cwd, **kwargs):
         return subprocess.CompletedProcess(
             args=args,
             returncode=0,
@@ -1329,7 +1329,7 @@ class TestTargetConfigLayoutYaml:
 
         captured_base_config: dict[str, Any] = {}
 
-        def fake_run(self, args, cwd):
+        def fake_run(self, args, cwd, **kwargs):
             # 捕获 base_config 写入
             base_cfg_path = cwd / "input" / "backport.base.yml"
             if base_cfg_path.exists():
@@ -1402,7 +1402,7 @@ class TestTargetConfigLayoutYaml:
 
         captured_base_config: dict[str, Any] = {}
 
-        def fake_run(self, args, cwd):
+        def fake_run(self, args, cwd, **kwargs):
             base_cfg_path = cwd / "backport.base.yml"
             if base_cfg_path.exists():
                 captured_base_config.update(
@@ -1454,7 +1454,7 @@ class TestTargetConfigLayoutYaml:
 
         captured_config: dict[str, Any] = {}
 
-        def fake_run(self, args, cwd):
+        def fake_run(self, args, cwd, **kwargs):
             for a in args:
                 if a.endswith("report.report.yml"):
                     captured_config.update(
@@ -1502,7 +1502,7 @@ class TestTargetConfigLayoutYaml:
 
         captured_config: dict[str, Any] = {}
 
-        def fake_run(self, args, cwd):
+        def fake_run(self, args, cwd, **kwargs):
             for a in args:
                 if a.endswith(".yml") and "filtered" in a:
                     captured_config.update(
@@ -1551,7 +1551,7 @@ class TestTargetConfigLayoutYaml:
 
         captured_config: dict[str, Any] = {}
 
-        def fake_run(self, args, cwd):
+        def fake_run(self, args, cwd, **kwargs):
             for a in args:
                 if a.endswith(".yml") and "filtered" in a:
                     captured_config.update(
@@ -1603,7 +1603,7 @@ class TestTargetConfigLayoutYaml:
 
         captured_config: dict[str, Any] = {}
 
-        def fake_run(self, args, cwd):
+        def fake_run(self, args, cwd, **kwargs):
             for a in args:
                 if a.endswith(".report.yml"):
                     captured_config.update(
@@ -1654,7 +1654,7 @@ class TestTargetConfigLayoutYaml:
         captured_config_path: str = ""
         captured_config: dict[str, Any] = {}
 
-        def fake_run(self, args, cwd):
+        def fake_run(self, args, cwd, **kwargs):
             nonlocal captured_config_path
             for i, a in enumerate(args):
                 if a == "--backport-config" and i + 1 < len(args):

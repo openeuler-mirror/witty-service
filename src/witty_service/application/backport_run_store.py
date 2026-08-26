@@ -1,16 +1,32 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
+import logging
 import re
 import shutil
 import tempfile
 import threading
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 import yaml
+
+logger = logging.getLogger(__name__)
+
+
+class CvekitRunContext(NamedTuple):
+    """一次 cvekit 子进程调用的日志登记上下文(与 task.json logging 对应)。"""
+
+    task_id: str
+    sequence: int
+    cvekit_run_id: str
+    started_at: str
+    task_dir: Path | None
 
 
 class BackportRunStore:
@@ -23,6 +39,8 @@ class BackportRunStore:
     }
     _locks_guard: ClassVar[threading.Lock] = threading.Lock()
     _locks: ClassVar[dict[str, threading.RLock]] = {}
+    _flock_guard: ClassVar[threading.Lock] = threading.Lock()
+    _flock_holders: ClassVar[dict[str, dict[int, int]]] = {}
 
     def __init__(self, runs_root: str | Path) -> None:
         self.runs_root = Path(runs_root).expanduser().resolve()
@@ -79,6 +97,9 @@ class BackportRunStore:
         return value
 
     def set_run_id(self, run_id: str | None) -> None:
+        # 注意:_run_id 是共享单例状态(task 目录定位 + CVEKIT_RUN_ID 注入 +
+        # 归档产物命名均依赖它),当前设计约束为单请求串行使用;并发请求会
+        # 互相覆写导致错归档,调用方需自行保证互斥(既有设计,此处声明约束)。
         self._run_id = self.safe_slug(run_id or "", fallback="")
 
     def set_secrets(self, secrets: list[str]) -> None:
@@ -511,9 +532,13 @@ class BackportRunStore:
             f"{self.safe_slug(excel.stem, fallback='excel', max_length=40)}-"
             f"{self.safe_slug(repo_name, fallback='repository', max_length=40)}"
         )
+        # task ID 总长预算 96(与 safe_slug 默认 max_length 一致):
+        # prefix 至多 87,再拼 "-" 与 8 位 hex 后缀,保证 _task_dir/set_run_id
+        # 不截断,注入 CVEKIT_TASK_ID 与目录名一致
+        prefix = self.safe_slug(prefix, max_length=87)
         self.runs_root.mkdir(parents=True, exist_ok=True)
         while True:
-            task_id = f"{prefix}-{uuid.uuid4().hex[:6]}"
+            task_id = f"{prefix}-{uuid.uuid4().hex[:8]}"
             task_dir = self.runs_root / task_id
             try:
                 task_dir.mkdir()
@@ -599,7 +624,12 @@ class BackportRunStore:
         self, task_dir: Path, updates: dict[str, Any]
     ) -> dict[str, Any]:
         task_root = self._task_root_for(task_dir) or task_dir.resolve()
-        with self._lock_for(task_root):
+        # 与 begin/complete_cvekit_run 共用同一把 task 级锁(task.json 的所有
+        # read-modify-write 统一互斥,避免并发更新互相覆盖)
+        with (
+            self._task_log_lock(task_root.name),
+            self._lock_for(task_root),
+        ):
             manifest = self.read_manifest(task_root)
             manifest.update(updates)
             manifest["task_id"] = task_root.name
@@ -986,6 +1016,10 @@ class BackportRunStore:
             for path in sorted((task_dir / "cases").glob("*/case.json"))
             if not path.parent.is_symlink()
         ]
+        # 补充绝对 report 路径:manifest 中 current_report 为任务目录相对路径,
+        # 前端恢复任务时无法自行拼接服务端路径(浏览器不感知任务目录)
+        if task.get("current_report"):
+            task["current_report_path"] = str(task_dir / task["current_report"])
         return task
 
     def get_case(self, task_id: str, case_id: str) -> dict[str, Any] | None:
@@ -1151,6 +1185,276 @@ class BackportRunStore:
             self.write_text(archive_dir / log_name, cleaned + "\n")
         return archive_dir
 
+    # ── task 级日志分层(一个 task 多个 cvekit run)──────────────────────────
+
+    @staticmethod
+    def _new_cvekit_run_id() -> str:
+        """cvekit run ID,格式与 patchflow 自生成一致:{ts}-{8位hex}。"""
+        ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+        return f"{ts}-{uuid.uuid4().hex[:8]}"
+
+    def _task_all_log_rel(self, task_dir: Path) -> str:
+        """task-all 日志相对 ~/.patchflow/logs 的路径(避免环境绑定)。"""
+        task_id = task_dir.name
+        return f"witty/{task_id}/patchflow-{task_id[:8]}-{task_id[-8:]}-task-all.log"
+
+    def _task_all_log_path(self, task_dir: Path) -> Path:
+        return Path.home() / ".patchflow" / "logs" / self._task_all_log_rel(task_dir)
+
+    @contextlib.contextmanager
+    def _task_log_lock(self, task_id: str) -> Iterator[None]:
+        """task 级跨进程锁:保护 task-all 聚合与 task.json metadata 原子更新。
+
+        所有 task.json 的 read-modify-write(update_manifest/begin/complete)
+        必须经此锁;跨进程互斥(flock),进程内嵌套安全(持有计数)。
+        repository lock 缺失 target path 时可能不加锁,同 task 并行
+        防护统一由本锁承担。
+        """
+        thread_id = threading.get_ident()
+        with self._flock_guard:
+            holders = self._flock_holders.setdefault(task_id, {})
+            held = holders.get(thread_id, 0) > 0
+            holders[thread_id] = holders.get(thread_id, 0) + 1
+        try:
+            if held:
+                yield
+                return
+            lock_root = Path.home() / ".patchflow" / "locks"
+            lock_root.mkdir(parents=True, exist_ok=True)
+            lock_path = lock_root / f"task-log-{task_id}.lock"
+            with open(lock_path, "a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+        finally:
+            with self._flock_guard:
+                holders = self._flock_holders[task_id]
+                remaining = holders[thread_id] - 1
+                if remaining > 0:
+                    holders[thread_id] = remaining
+                else:
+                    del holders[thread_id]
+                if not holders:
+                    self._flock_holders.pop(task_id, None)
+
+    @staticmethod
+    def _ensure_logging_meta(manifest: dict[str, Any]) -> dict[str, Any]:
+        logging_meta = manifest.get("logging")
+        if not isinstance(logging_meta, dict):
+            logging_meta = {}
+        runs = logging_meta.get("cvekit_runs")
+        if not isinstance(runs, list):
+            runs = []
+        logging_meta["cvekit_runs"] = runs
+        return logging_meta
+
+    def begin_cvekit_run(self, task_id: str, operation: str) -> CvekitRunContext | None:
+        """每次 cvekit 子进程启动前登记:分配独立 run ID,写入 task metadata。
+
+        "生成并注入 run ID"与"登记 metadata"解耦:登记失败(task 非法/
+        写盘失败)仍返回带 run ID 的 context(task_dir=None 标记未登记),
+        保证 CVEKIT_RUN_ID 注入与 patchflow 文件名 run_id8 稳定;未登记
+        run 不参与 task-all 聚合。仅无 task 上下文时返回 None。
+        """
+        if not task_id:
+            return None
+        cvekit_run_id = self._new_cvekit_run_id()
+        started_at = self.now_iso()
+        task_dir: Path | None = None
+        try:
+            task_dir = self._task_dir(task_id)
+        except ValueError:
+            logger.warning("Cvekit run 登记失败(非法 task id): %s", task_id)
+        if task_dir is None:
+            return CvekitRunContext(
+                task_id=task_id,
+                sequence=0,
+                cvekit_run_id=cvekit_run_id,
+                started_at=started_at,
+                task_dir=None,
+            )
+        try:
+            with self._task_log_lock(task_id):
+                manifest = self.read_manifest(task_dir)
+                logging_meta = self._ensure_logging_meta(manifest)
+                if not logging_meta.get("task_all_log"):
+                    logging_meta["task_all_log"] = self._task_all_log_rel(task_dir)
+                runs = logging_meta["cvekit_runs"]
+                sequence = (
+                    max(
+                        (
+                            int(run.get("sequence") or 0)
+                            for run in runs
+                            if isinstance(run, dict)
+                        ),
+                        default=0,
+                    )
+                    + 1
+                )
+                runs.append(
+                    {
+                        "sequence": sequence,
+                        "cvekit_run_id": cvekit_run_id,
+                        "operation": operation,
+                        "status": "running",
+                        "started_at": started_at,
+                        "ended_at": None,
+                        "merged": False,
+                    }
+                )
+                manifest["logging"] = logging_meta
+                manifest["task_id"] = task_dir.name
+                manifest["updated_at"] = self.now_iso()
+                self.write_json(task_dir / "task.json", manifest)
+        except OSError as exc:
+            logger.warning("Cvekit run 登记失败(本次不聚合): %s", exc)
+            return CvekitRunContext(
+                task_id=task_id,
+                sequence=0,
+                cvekit_run_id=cvekit_run_id,
+                started_at=started_at,
+                task_dir=None,
+            )
+        return CvekitRunContext(
+            task_id=task_dir.name,
+            sequence=sequence,
+            cvekit_run_id=cvekit_run_id,
+            started_at=started_at,
+            task_dir=task_dir,
+        )
+
+    def complete_cvekit_run(
+        self,
+        context: CvekitRunContext | None,
+        source_logs: list[Path],
+        status: str,
+    ) -> None:
+        """子进程结束后聚合:入口 -all 日志脱敏追加到 task-all,标记 merged。
+
+        按 sequence 顺序聚合:只合并当前连续的下一个 run(乱序完成先挂起,
+        前面 run 完成时 drain),不能依赖完成顺序。幂等:已 merged 或
+        task-all 已含该 run 时不重复追加。聚合或 metadata 更新失败只告警
+        不抛错,源日志由调用方保留不删除。
+        """
+        if context is None or context.task_dir is None:
+            return
+        try:
+            with self._task_log_lock(context.task_id):
+                manifest = self.read_manifest(context.task_dir)
+                logging_meta = self._ensure_logging_meta(manifest)
+                entry = next(
+                    (
+                        run
+                        for run in logging_meta["cvekit_runs"]
+                        if isinstance(run, dict)
+                        and run.get("cvekit_run_id") == context.cvekit_run_id
+                    ),
+                    None,
+                )
+                if entry is None or entry.get("merged") is True:
+                    return
+                entry["status"] = status
+                entry["ended_at"] = self.now_iso()
+                self._merge_ready_runs(
+                    context.task_dir,
+                    logging_meta["cvekit_runs"],
+                    source_logs,
+                    context.cvekit_run_id,
+                )
+                manifest["logging"] = logging_meta
+                manifest["task_id"] = context.task_dir.name
+                manifest["updated_at"] = self.now_iso()
+                self.write_json(context.task_dir / "task.json", manifest)
+        except OSError as exc:
+            logger.warning(
+                "Cvekit run 聚合失败(保留原日志): %s (%s)",
+                context.cvekit_run_id,
+                exc,
+            )
+
+    def _find_run_all_logs(self, cvekit_run_id: str) -> list[Path]:
+        """按 run_id8 从日志根目录定位某 run 的入口 -all 源日志(聚合 drain 用)。"""
+        run_id8 = cvekit_run_id[-8:]
+        log_root = Path.home() / ".patchflow" / "logs"
+        found: list[Path] = []
+        for subdir in ("batch", "portgpt", "opencode", "mystique"):
+            found.extend(log_root.glob(f"{subdir}/patchflow-*-{run_id8}-all.log"))
+        return sorted(found)
+
+    def _merge_ready_runs(
+        self,
+        task_dir: Path,
+        runs: list[dict[str, Any]],
+        current_source_logs: list[Path],
+        current_run_id: str,
+    ) -> None:
+        """按 sequence 连续顺序聚合:本次调用先更新自身 status/ended_at,
+        再 drain 后续已结束未合并的 run(乱序完成时前面 run 补合并)。
+        调用方保证在 _task_log_lock 内。
+        """
+        task_all = self._task_all_log_path(task_dir)
+        existing = (
+            task_all.read_text(encoding="utf-8", errors="replace")
+            if task_all.is_file()
+            else ""
+        )
+        task_id = task_dir.name
+        while True:
+            merged_max = max(
+                (
+                    int(run.get("sequence") or 0)
+                    for run in runs
+                    if isinstance(run, dict) and run.get("merged") is True
+                ),
+                default=0,
+            )
+            ready = next(
+                (
+                    run
+                    for run in runs
+                    if isinstance(run, dict)
+                    and run.get("merged") is not True
+                    and run.get("status") not in (None, "running")
+                    and int(run.get("sequence") or 0) == merged_max + 1
+                ),
+                None,
+            )
+            if ready is None:
+                return
+            run_id = str(ready.get("cvekit_run_id") or "")
+            # 本次调用交付的源日志优先;drain 其他 run 时按 run_id8 重新定位
+            logs = [
+                path
+                for path in current_source_logs
+                if path.is_file()
+                and path.name.startswith("patchflow-")
+                and path.name.endswith("-all.log")
+            ]
+            if run_id != current_run_id:
+                logs = self._find_run_all_logs(run_id)
+            chunks: list[str] = []
+            for log in sorted(logs):
+                chunks.append(
+                    f"--- task run {ready.get('sequence')} | "
+                    f"{run_id} | {task_id} | "
+                    f"{ready.get('operation') or 'cvekit'} | {ready.get('status')} | "
+                    f"started={ready.get('started_at')} | "
+                    f"ended={ready.get('ended_at')} ---\n"
+                )
+                chunks.append(log.read_text(encoding="utf-8", errors="replace"))
+            if not chunks:
+                ready["merged"] = True
+                continue
+            content = self.redact("\n".join(chunks), self._secrets)
+            if run_id not in existing:
+                task_all.parent.mkdir(parents=True, exist_ok=True)
+                with task_all.open("a", encoding="utf-8") as fh:
+                    fh.write("\n" + content if existing else content)
+                existing = task_all.read_text(encoding="utf-8", errors="replace")
+            ready["merged"] = True
+
     def archive_case_attempt(
         self,
         *,
@@ -1254,14 +1558,42 @@ class BackportRunStore:
                     artifacts["resolved_patch"] = name
 
             operation = str(result.get("operation") or "")
-            log_source_value = result.get("batch_logfile") or rows[0].get(
-                "batch_logfile"
+            # 新 report 以 batch_log_path / log_path 分离主日志与引擎日志。
+            # 历史 report 的单独 log_path 是 batch 日志，logfile 则是引擎日志；
+            # 两者不可交叉作为回退，避免重复归档或漏掉旧引擎日志。
+            new_batch_log_path = result.get("batch_log_path") or rows[0].get(
+                "batch_log_path"
             )
+            log_source_value = (
+                new_batch_log_path
+                or result.get("batch_logfile")
+                or rows[0].get("batch_logfile")
+                or result.get("log_path")
+                or rows[0].get("log_path")
+            )
+            if not log_source_value:
+                logger.warning(
+                    "report 缺少 batch_log_path 字段,跳过 batch 日志归档: task=%s, scope=%s",
+                    self._run_id,
+                    archive_key,
+                )
             log_source = (
                 Path(str(log_source_value)).expanduser() if log_source_value else None
             )
             if log_source is not None and not log_source.is_file():
                 archived_source = attempt_dir / log_source.name
+                if not archived_source.is_file():
+                    # 引擎目录主日志归档时带 {engine}- 前缀,回退查找前缀变体
+                    prefixed_source = next(
+                        (
+                            p
+                            for p in attempt_dir.glob(f"*-{log_source.name}")
+                            if p.is_file()
+                        ),
+                        None,
+                    )
+                    if prefixed_source is not None:
+                        archived_source = prefixed_source
                 if archived_source.is_file():
                     log_source = archived_source
             if log_source is not None and log_source.is_file():
@@ -1270,15 +1602,16 @@ class BackportRunStore:
                     self._secrets,
                 ).strip()
                 if cleaned:
+                    run_suffix = f"-{self._run_id}" if self._run_id else ""
                     if operation == "apply_row":
-                        name = f"{artifact_prefix}-apply.log"
+                        name = f"{artifact_prefix}-apply{run_suffix}.log"
                     else:
                         engine = (
                             str(rows[0].get("backport_engine") or "").strip().lower()
                         )
                         invoked_value = rows[0].get("backport_engine_invoked")
                         used_engine = (
-                            bool(rows[0].get("logfile"))
+                            bool(rows[0].get("log_path") or rows[0].get("logfile"))
                             if invoked_value is None
                             else bool(invoked_value)
                         )
@@ -1287,33 +1620,48 @@ class BackportRunStore:
                             if engine and used_engine
                             else ""
                         )
-                        name = f"{artifact_prefix}-backport{suffix}.log"
+                        name = f"{artifact_prefix}-backport{suffix}{run_suffix}.log"
                     name = self._available_artifact_name(case_dir, name)
                     self.write_text(case_dir / name, cleaned + "\n")
                     artifacts[
                         "apply_log" if operation == "apply_row" else "backport_log"
                     ] = name
 
-            engine_log_value = rows[0].get("logfile")
-            engine_log = (
-                Path(str(engine_log_value)).expanduser() if engine_log_value else None
+            # 新 report 的 log_path 是当前 row 的引擎分段；历史 report 则使用
+            # logfile。attempt_dir 同时包含同批次其他 row 的日志，不能全量枚举。
+            engine_log_value = ""
+            if new_batch_log_path:
+                candidate = rows[0].get("log_path") or result.get("log_path")
+                if candidate and Path(str(candidate)).expanduser() != Path(
+                    str(new_batch_log_path)
+                ).expanduser():
+                    engine_log_value = candidate
+            else:
+                engine_log_value = rows[0].get("logfile") or result.get("logfile")
+            engine_log_source = (
+                Path(str(engine_log_value)).expanduser()
+                if engine_log_value
+                else None
             )
-            if engine_log is not None and not engine_log.is_file():
-                archived_engine_log = attempt_dir / engine_log.name
-                if archived_engine_log.is_file():
-                    engine_log = archived_engine_log
-            if (
-                engine_log is not None
-                and engine_log.is_file()
-                and engine_log != log_source
-            ):
-                engine = self.safe_slug(
-                    str(rows[0].get("backport_engine") or "engine"),
-                    fallback="engine",
-                )
+            engine = self.safe_slug(
+                str(rows[0].get("backport_engine") or ""), fallback="engine"
+            )
+            candidates: list[Path] = []
+            if engine_log_source is not None:
+                if engine_log_source.is_file():
+                    candidates = [engine_log_source]
+                else:
+                    # Mechanism A 将引擎日志搬到 attempt 时添加 {engine}- 前缀。
+                    for name in (f"{engine}-{engine_log_source.name}", engine_log_source.name):
+                        archived_source = attempt_dir / name
+                        if archived_source.is_file():
+                            candidates = [archived_source]
+                            break
+            run_suffix = f"-{self._run_id}" if self._run_id else ""
+            for idx, engine_log in enumerate(candidates):
                 name = self._available_artifact_name(
                     case_dir,
-                    f"{artifact_prefix}-{engine}.log",
+                    f"{artifact_prefix}-{engine}{run_suffix}.log",
                 )
                 cleaned = self.redact(
                     engine_log.read_text(encoding="utf-8", errors="replace"),
@@ -1321,7 +1669,9 @@ class BackportRunStore:
                 ).strip()
                 if cleaned:
                     self.write_text(case_dir / name, cleaned + "\n")
-                    artifacts["engine_log"] = name
+                    artifacts["engine_log" if idx == 0 else f"engine_log_{idx + 1}"] = (
+                        name
+                    )
 
             conflict_source = attempt_dir / "conflict-report.json"
             if conflict_source.is_file():
