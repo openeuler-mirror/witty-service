@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,7 +12,7 @@ from witty_service.persistence.repositories import McpServerRecord
 
 
 def _server_record(**overrides: object) -> McpServerRecord:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     data = {
         "id": "server-1",
         "mcp_server_name": "filesystem",
@@ -55,6 +55,35 @@ def test_create_mcp_server_extracts_name_from_config() -> None:
     )
     assert resp.id == "server-1"
     assert resp.mcp_server_name == "filesystem"
+
+
+def test_create_cvekit_mcp_does_not_persist_tokens() -> None:
+    services = _services()
+    services.repository.create_mcp_server.return_value = _server_record(
+        mcp_server_name="cvekit_mcp",
+        mcp_server_config={"cvekit_mcp": {"command": "python"}},
+    )
+
+    mcp_api.create_mcp_server(
+        payload=CreateMcpServerRequest(
+            mcp_server_config={
+                "cvekit_mcp": {
+                    "command": "python",
+                    "env": {
+                        "CVEKIT_LOG_DIR": "/tmp/cvekit",
+                        "GITCODE_TOKEN": "token",
+                        "GITEE_TOKEN": "legacy",
+                    },
+                }
+            }
+        ),
+        services=services,
+    )
+
+    persisted = services.repository.create_mcp_server.call_args.kwargs[
+        "mcp_server_config"
+    ]
+    assert persisted["cvekit_mcp"]["env"] == {"CVEKIT_LOG_DIR": "/tmp/cvekit"}
 
 
 def test_list_mcp_servers_returns_responses() -> None:
@@ -103,6 +132,41 @@ def test_update_mcp_server_extracts_name_from_config() -> None:
         mcp_server_config={"git": {"command": "git-mcp"}},
     )
     assert resp.mcp_server_name == "git"
+
+
+def test_update_flat_cvekit_mcp_config_keeps_server_name_and_strips_tokens() -> None:
+    services = _services()
+    services.repository.get_mcp_server.return_value = _server_record(
+        mcp_server_name="cvekit_mcp",
+        mcp_server_config={"command": "python"},
+    )
+    services.repository.update_mcp_server.return_value = _server_record(
+        mcp_server_name="cvekit_mcp",
+        mcp_server_config={"command": "python"},
+    )
+
+    mcp_api.update_mcp_server(
+        "server-1",
+        payload=UpdateMcpServerRequest(
+            mcp_server_config={
+                "command": "python",
+                "env": {
+                    "CVEKIT_LOG_DIR": "/tmp/cvekit",
+                    "GITCODE_TOKEN": "token",
+                },
+            }
+        ),
+        services=services,
+    )
+
+    services.repository.update_mcp_server.assert_called_once_with(
+        server_id="server-1",
+        mcp_server_name="cvekit_mcp",
+        mcp_server_config={
+            "command": "python",
+            "env": {"CVEKIT_LOG_DIR": "/tmp/cvekit"},
+        },
+    )
 
 
 def test_update_mcp_server_raises_when_missing() -> None:

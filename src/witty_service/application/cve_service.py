@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -83,9 +84,63 @@ class CveService:
             encoding="utf-8",
         )
 
+    def build_cvekit_mcp_runtime_config(
+        self, mcp_server_config: dict[str, Any]
+    ) -> dict[str, Any]:
+        """生成 cvekit MCP 的运行时配置，不修改持久化配置。"""
+        token = self.get_config().get("gitcode_token", "").strip()
+        if not token:
+            return self.sanitize_cvekit_mcp_storage_config(mcp_server_config)
+
+        return self._inject_gitcode_token_into_cvekit_mcp_config(
+            mcp_server_config, token
+        )
+
+    @staticmethod
+    def sanitize_cvekit_mcp_storage_config(
+        mcp_server_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        mcp_server_config = deepcopy(mcp_server_config)
+        if not isinstance(mcp_server_config, dict):
+            raise DomainError(
+                code="CVEKIT_MCP_CONFIG_INVALID",
+                message="cvekit_mcp configuration is invalid.",
+            )
+
+        entry = mcp_server_config.get("cvekit_mcp", mcp_server_config)
+        if not isinstance(entry, dict):
+            raise DomainError(
+                code="CVEKIT_MCP_CONFIG_INVALID",
+                message="cvekit_mcp configuration is invalid.",
+            )
+
+        env = entry.get("env")
+        if env is None:
+            env = {}
+            entry["env"] = env
+        elif not isinstance(env, dict):
+            raise DomainError(
+                code="CVEKIT_MCP_CONFIG_INVALID",
+                message="cvekit_mcp environment configuration is invalid.",
+            )
+
+        env.pop("GITCODE_TOKEN", None)
+        env.pop("GITEE_TOKEN", None)
+        return mcp_server_config
+
+    @classmethod
+    def _inject_gitcode_token_into_cvekit_mcp_config(
+        cls, mcp_server_config: dict[str, Any], token: str
+    ) -> dict[str, Any]:
+        runtime_config = cls.sanitize_cvekit_mcp_storage_config(mcp_server_config)
+        entry = runtime_config.get("cvekit_mcp", runtime_config)
+        entry["env"]["GITCODE_TOKEN"] = token
+        return runtime_config
+
     def update_token(self, token: str) -> None:
+        token = token.strip()
         config = self.get_config()
-        config["gitcode_token"] = token.strip()
+        config["gitcode_token"] = token
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
         self._config_path.write_text(
             json.dumps(config, ensure_ascii=False, indent=2),
