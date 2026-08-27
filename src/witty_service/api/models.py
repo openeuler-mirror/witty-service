@@ -9,6 +9,7 @@ from witty_service.api.schemas import (
     UpdateModelRequest,
 )
 from witty_service.api.services import ServiceContainer
+from witty_service.application.backport_service import BackportService
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import ModelRecord
 
@@ -80,6 +81,7 @@ def delete_model(
             message="Model was not found.",
             details={"model_id": model_id},
         )
+    BackportService(services).clear_model_reference(model_id)
     services.repository.delete_model(model_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
