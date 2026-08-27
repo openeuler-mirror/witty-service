@@ -12,7 +12,9 @@ from witty_agent_server.infra.clients.base import ClientBase
 logger = logging.getLogger(__name__)
 
 
-RuntimeType = Literal["openclaw", "opencode"]
+# "dsh"：DshRuntime 已实现事件映射层，但 RuntimeFactory 装配
+# （create_dsh_bundle）属后续 PR，该类型值暂不可经工厂构建。
+RuntimeType = Literal["openclaw", "opencode", "dsh"]
 
 
 class TurnEventType(StrEnum):

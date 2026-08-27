@@ -52,8 +52,11 @@ def _map_error_reason(exc: BaseException) -> str:
     return "harness-error"
 
 
-def _derive_dsh_session_id(session_key: str) -> str:
-    """session_key → dsh session id：``:`` 替换为 ``-``，避免路径字符问题。"""
+def derive_dsh_session_id(session_key: str) -> str:
+    """session_key → dsh session id：``:`` 替换为 ``-``，避免路径字符问题。
+
+    DshRuntime 依赖同一派生规则做子 session 事件过滤，保持公有。
+    """
     return session_key.replace(":", "-")
 
 
@@ -198,7 +201,7 @@ class DshClient(ClientBase):
 
     def create_session(self, *, session_key: str) -> None:
         """空操作：dsh session 在首次 prompt 时隐式创建，仅记录映射。"""
-        self._session_map[session_key] = _derive_dsh_session_id(session_key)
+        self._session_map[session_key] = derive_dsh_session_id(session_key)
 
     def delete_session(self, *, session_key: str) -> None:
         """尽力而为：删 session_root 下该 session 的落盘文件；删除映射。"""
@@ -352,7 +355,7 @@ class DshClient(ClientBase):
         session_id = self._session_map.get(session_key)
         if isinstance(session_id, str) and session_id:
             return session_id
-        session_id = _derive_dsh_session_id(session_key)
+        session_id = derive_dsh_session_id(session_key)
         self._session_map[session_key] = session_id
         return session_id
 
@@ -387,4 +390,4 @@ class DshClient(ClientBase):
                 )
 
 
-__all__ = ["DshClient", "DshClientError"]
+__all__ = ["DshClient", "DshClientError", "derive_dsh_session_id"]
