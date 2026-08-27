@@ -236,35 +236,6 @@ curl http://127.0.0.1:8000/healthz
 {"status": "ok"}
 ```
 
-**3. 创建 Agent**
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/agents \
-  -H 'content-type: application/json' \
-  -H 'authorization: Bearer dev-token' \
-  -d '{
-    "name": "my-agent",
-    "description": "我的第一个智能体",
-    "sandbox_type": "local_process",
-    "adapter_type": "openclaw",
-    "idle_timeout_seconds": 3600
-  }' | jq
-```
-
-**4. 发送消息**
-
-```bash
-AGENT_ID="<上一步返回的 id>"
-SESSION_ID="<上一步返回的 default_session_id>"
-
-curl -s -X POST "http://127.0.0.1:8000/agents/${AGENT_ID}/sessions/${SESSION_ID}/messages" \
-  -H 'content-type: application/json' \
-  -H 'authorization: Bearer dev-token' \
-  -d '{"content": "你好，请介绍一下你自己"}' | jq
-```
-
-> **提示：** 默认认证 Token 为 `dev-token`，生产环境请通过环境变量 `AUTH_TOKEN` 修改。
-
 ---
 
 ## 配置说明

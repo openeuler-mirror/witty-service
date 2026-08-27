@@ -236,33 +236,6 @@ Expected response:
 {"status": "ok"}
 ```
 
-**3. Create an agent.**
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/agents \
-  -H 'content-type: application/json' \
-  -H 'authorization: Bearer dev-token' \
-  -d '{
-    "name": "my-agent",
-    "description": "My first agent",
-    "sandbox_type": "local_process",
-    "adapter_type": "openclaw",
-    "idle_timeout_seconds": 3600
-  }' | jq
-```
-
-**4. Send a message.**
-
-```bash
-AGENT_ID="<id returned in the previous step>"
-SESSION_ID="<default_session_id returned in the previous step>"
-
-curl -s -X POST "http://127.0.0.1:8000/agents/${AGENT_ID}/sessions/${SESSION_ID}/messages" \
-  -H 'content-type: application/json' \
-  -H 'authorization: Bearer dev-token' \
-  -d '{"content": "Hello, please introduce yourself."}' | jq
-```
-
 > **Note**: The default authentication token is `dev-token`. For production environments, modify it using the `AUTH_TOKEN` environment variable.
 
 ---
