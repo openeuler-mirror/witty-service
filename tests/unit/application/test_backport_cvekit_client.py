@@ -710,6 +710,13 @@ def test_generate_report_from_commit_entries_archives_csv_and_raw_config(
     out = client.generate_report(
         excel_path=None,
         commit_entries=[{"commit": "abcdef1", "commit_title": "first title"}],
+        prerequisite_commits=[
+            {
+                "commit": "abcdef2",
+                "title": "required first",
+                "required_by": ["abcdef1"],
+            }
+        ],
         project_url="u",
         project_dir="d",
         source_branch="s",
@@ -730,7 +737,14 @@ def test_generate_report_from_commit_entries_archives_csv_and_raw_config(
         (task_dir / "input" / "backport-batch.yml").read_text(encoding="utf-8")
     )
     assert raw_config["commits"] == [
-        {"commit": "abcdef1", "commit_title": "first title"}
+        {"commit": "abcdef1", "commit_title": "first title"},
+        {
+            "commit": "abcdef2",
+            "commit_title": "required first",
+            "origin": "prerequisite",
+            "required_by": ["abcdef1"],
+            "capabilities": [],
+        },
     ]
 
 

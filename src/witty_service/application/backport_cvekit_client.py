@@ -1089,13 +1089,15 @@ class BackportCvekitClient:
             raw_config = {**base_config, "commits": commit_entries or []}
             with config_path.open("w", encoding="utf-8") as handle:
                 yaml.safe_dump(raw_config, handle, allow_unicode=True, sort_keys=False)
+
+        if prerequisite_commits:
+            self._merge_prerequisite_commits(config_path, prerequisite_commits)
+
+        if excel is None:
             self._run_store.write_text(
                 archive_root / "input" / "backport-batch.yml",
                 config_path.read_text(encoding="utf-8"),
             )
-
-        if prerequisite_commits:
-            self._merge_prerequisite_commits(config_path, prerequisite_commits)
 
         self._run_cvekit(
             [

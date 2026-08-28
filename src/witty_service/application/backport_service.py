@@ -2066,7 +2066,7 @@ class BackportService:
     def validate_commit_entries_for_payload(
         self, payload: dict[str, Any]
     ) -> list[dict[str, str]]:
-        """Validate a confirmation request before it creates an async Task."""
+        """Authoritatively validate confirmation input in the async worker."""
         config = self._extract_config(payload)
         entries = self._validated_payload_commit_entries(payload, config)
         if entries is None:
@@ -2076,6 +2076,26 @@ class BackportService:
                 details={"action": "generate_report", "keys": ["commit_entries"]},
             )
         return entries
+
+    def normalize_commit_entries_for_payload(
+        self, payload: dict[str, Any]
+    ) -> list[dict[str, str]]:
+        """Perform synchronous structural validation before allocating a Task."""
+        if "commit_entries" not in payload:
+            raise DomainError(
+                code="BACKPORT_ARGUMENT_REQUIRED",
+                message="commit_entries 不能为空。",
+                details={"action": "generate_report", "keys": ["commit_entries"]},
+            )
+        raw_entries = payload.get("commit_entries")
+        if not isinstance(raw_entries, list):
+            raise self._commit_import_error(
+                [{"field": "commit_entries", "message": "commit_entries 必须是数组。"}]
+            )
+        checked = validate_commit_entries(raw_entries)
+        if checked.errors:
+            raise self._commit_import_error(checked.errors)
+        return checked.entries
 
     @staticmethod
     def _commit_import_error(errors: list[dict[str, Any]]) -> DomainError:
@@ -2090,14 +2110,7 @@ class BackportService:
     ) -> list[dict[str, str]] | None:
         if "commit_entries" not in payload:
             return None
-        raw_entries = payload.get("commit_entries")
-        if not isinstance(raw_entries, list):
-            raise self._commit_import_error(
-                [{"field": "commit_entries", "message": "commit_entries 必须是数组。"}]
-            )
-        checked = validate_commit_entries(raw_entries)
-        if checked.errors:
-            raise self._commit_import_error(checked.errors)
+        checked_entries = self.normalize_commit_entries_for_payload(payload)
         source_path = str(config.get("project_dir") or "").strip()
         if not source_path:
             raise DomainError(
@@ -2106,7 +2119,7 @@ class BackportService:
                 details={"action": "commit_entries", "keys": ["config.project_dir"]},
             )
         missing: list[dict[str, Any]] = []
-        for index, entry in enumerate(checked.entries, start=1):
+        for index, entry in enumerate(checked_entries, start=1):
             try:
                 BackportGitClient.resolve_commit(source_path, entry["commit"])
             except (FileNotFoundError, NotADirectoryError, RuntimeError) as error:
@@ -2119,7 +2132,7 @@ class BackportService:
                 )
         if missing:
             raise self._commit_import_error(missing)
-        return checked.entries
+        return checked_entries
 
     @staticmethod
     def _describe_commit_row(row: dict[str, Any]) -> str:

@@ -126,6 +126,44 @@ def test_create_and_get_run(monkeypatch, tmp_path) -> None:
     assert fetched.result["agentId"] == "agent-1"
 
 
+def test_create_run_normalizes_commit_entries_without_sync_git_resolution(
+    monkeypatch, tmp_path
+) -> None:
+    request = RequestStub()
+    request.app.state.services.workspace_store.base_dir = tmp_path
+    service = _service()
+    entries = [{"commit": "abcdef1", "commit_title": "first title"}]
+    service.normalize_commit_entries_for_payload.return_value = entries
+    monkeypatch.setattr(
+        backport_api, "BackportService", lambda _services, **_kwargs: service
+    )
+
+    class ImmediateThread:
+        def __init__(self, target, daemon, name) -> None:
+            self._target = target
+
+        def start(self) -> None:
+            self._target()
+
+    monkeypatch.setattr(backport_api.threading, "Thread", ImmediateThread)
+
+    created = backport_api.create_run(
+        payload=BackportRunRequest(
+            action="generate_report",
+            payload={"commit_entries": entries, "config": {}},
+        ),
+        request=request,
+    )
+
+    assert created.status == "success"
+    service.normalize_commit_entries_for_payload.assert_called_once_with(
+        {"commit_entries": entries, "config": {}}
+    )
+    service.validate_commit_entries_for_payload.assert_not_called()
+    service.run_action.assert_called_once()
+    assert service.run_action.call_args.args[1]["commit_entries"] == entries
+
+
 def test_create_run_sets_paused_at_from_wrapped_parsed_result(
     monkeypatch, tmp_path
 ) -> None:

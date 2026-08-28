@@ -329,12 +329,13 @@ def create_run(
         payload.action in {"generate_report", "prerequisite_commits"}
         and "commit_entries" in payload.payload
     ):
-        # Preview results are advisory only. Validate the confirmation payload before
-        # a Task directory is allocated, then pass the normalized order downstream.
-        validated_entries = BackportService(
+        # Preview results are advisory only. Reject malformed confirmation input before
+        # a Task directory is allocated. Source-repository resolution can be slow, so
+        # it is performed once by the asynchronous worker before it creates artifacts.
+        normalized_entries = BackportService(
             request.app.state.services
-        ).validate_commit_entries_for_payload(payload.payload)
-        payload.payload["commit_entries"] = validated_entries
+        ).normalize_commit_entries_for_payload(payload.payload)
+        payload.payload["commit_entries"] = normalized_entries
 
     runs, runs_lock = _ensure_backport_runs(request)
     run_store = _ensure_backport_run_store(request)
