@@ -20,6 +20,7 @@ from witty_service.application.backport_conflict_reporter_manager import (
 from witty_service.application.backport_cvekit_client import (
     BackportCvekitClient,
     BackportRuntimeConfig,
+    CvekitCommandError,
 )
 from witty_service.application.backport_git_client import BackportGitClient
 from witty_service.domain.errors import DomainError
@@ -38,6 +39,43 @@ BACKPORT_REPOSITORY_CACHE_ENV = "BACKPORT_REPOSITORY_CACHE_DIR"
 BACKPORT_REPOSITORY_CACHE_DIR = "~/polymind-backport-repositories"
 DEFAULT_PATCH_DATASET_DIR = "~/patched_output"
 PREREQUISITE_REVIEW_STALE = "BACKPORT_PREREQUISITE_REVIEW_STALE"
+TARGET_REPOSITORY_LOCK_TIMEOUT = "TARGET_REPOSITORY_LOCK_TIMEOUT"
+
+
+def _operation_error_summary(error: Exception) -> str:
+    if (
+        isinstance(error, CvekitCommandError)
+        and error.error_code == TARGET_REPOSITORY_LOCK_TIMEOUT
+        and error.retryable
+    ):
+        return "目标仓库正被其他任务使用，等待超时。请稍后手动重试。"
+    return str(error)
+
+
+def _operation_error_diagnostics(error: Exception) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {"error_text": str(error)}
+    if isinstance(error, CvekitCommandError):
+        diagnostics.update(
+            {
+                "code": error.error_code,
+                "retryable": error.retryable,
+                "error_text": error.error_text,
+            }
+        )
+        if error.wait_seconds is not None:
+            diagnostics["wait_seconds"] = error.wait_seconds
+        if error.timeout_seconds is not None:
+            diagnostics["timeout_seconds"] = error.timeout_seconds
+    return diagnostics
+
+
+def _is_retryable_repository_lock_timeout(result: dict[str, Any]) -> bool:
+    diagnostics = result.get("diagnostics")
+    return (
+        isinstance(diagnostics, dict)
+        and diagnostics.get("code") == TARGET_REPOSITORY_LOCK_TIMEOUT
+        and diagnostics.get("retryable") is True
+    )
 
 
 def _default_config() -> dict[str, Any]:
@@ -749,6 +787,13 @@ class BackportService:
                         "row": row,
                     }
                 )
+                if _is_retryable_repository_lock_timeout(checked):
+                    return {
+                        **checked,
+                        "operation": "run_all",
+                        "stage": "failed",
+                        "artifacts": {"base_report_path": current_report_path},
+                    }
                 updated_rows = self._resolve_result_commits(checked)
                 if checked.get("status") == "failed":
                     failed_count += 1
@@ -799,6 +844,13 @@ class BackportService:
                         "row": row,
                     }
                 )
+                if _is_retryable_repository_lock_timeout(resolved):
+                    return {
+                        **resolved,
+                        "operation": "run_all",
+                        "stage": "failed",
+                        "artifacts": {"base_report_path": current_report_path},
+                    }
                 resolved_rows = self._resolve_result_commits(resolved)
                 unresolved = (
                     resolved.get("status") == "failed"
@@ -895,6 +947,13 @@ class BackportService:
                     "row": row,
                 }
             )
+            if _is_retryable_repository_lock_timeout(applied):
+                return {
+                    **applied,
+                    "operation": "run_all",
+                    "stage": "failed",
+                    "artifacts": {"base_report_path": current_report_path},
+                }
             applied_rows = self._resolve_result_commits(applied)
             if applied.get("status") == "failed" and was_unchecked:
                 self._emit_run_all_progress(
@@ -914,6 +973,13 @@ class BackportService:
                         "row": applied_rows[0] if applied_rows else row,
                     }
                 )
+                if _is_retryable_repository_lock_timeout(checked):
+                    return {
+                        **checked,
+                        "operation": "run_all",
+                        "stage": "failed",
+                        "artifacts": {"base_report_path": current_report_path},
+                    }
                 updated_rows = self._resolve_result_commits(checked)
                 if checked.get("status") == "failed":
                     failed_count += 1
@@ -1084,8 +1150,8 @@ class BackportService:
             return {
                 "operation": "generate_report",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
             }
 
     def _run_prerequisite_commits(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1154,8 +1220,8 @@ class BackportService:
             return {
                 "operation": "prerequisite_commits",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
             }
 
     def _run_load_report(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1180,8 +1246,8 @@ class BackportService:
             return {
                 "operation": "load_report",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
             }
 
     def _run_continue_report(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1210,8 +1276,8 @@ class BackportService:
             return {
                 "operation": "continue_report",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
             }
 
     def _run_recheck_conflict(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1252,8 +1318,8 @@ class BackportService:
             return {
                 "operation": "recheck_conflict",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
             }
 
     def _run_load_git_log(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1274,8 +1340,8 @@ class BackportService:
             return {
                 "operation": "load_git_log",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
             }
 
     def _run_load_git_show(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1304,8 +1370,8 @@ class BackportService:
             return {
                 "operation": "load_git_show",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
             }
 
     def _run_execute_selected(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1350,8 +1416,8 @@ class BackportService:
             return {
                 "operation": "execute_selected",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
             }
 
     def _run_apply_row(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1394,8 +1460,8 @@ class BackportService:
             return {
                 "operation": "apply_row",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
                 "report": {"commit_count": 1, "commits": [failed_row]},
             }
 
@@ -1440,16 +1506,16 @@ class BackportService:
                     **merged,
                     "operation": "check_row",
                     "status": "failed",
-                    "summary": str(error),
-                    "diagnostics": {"error_text": str(error)},
+                    "summary": _operation_error_summary(error),
+                    "diagnostics": _operation_error_diagnostics(error),
                 }
             except (RuntimeError, FileNotFoundError, ValueError):
                 logger.exception("failed to persist check_row failure")
                 return {
                     "operation": "check_row",
                     "status": "failed",
-                    "summary": str(error),
-                    "diagnostics": {"error_text": str(error)},
+                    "summary": _operation_error_summary(error),
+                    "diagnostics": _operation_error_diagnostics(error),
                     "report": {"commit_count": 1, "commits": [failed_row]},
                 }
 
@@ -1498,8 +1564,8 @@ class BackportService:
             return {
                 "operation": "try_resolve",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
                 "report": {"commit_count": 1, "commits": [failed_row]},
             }
 
@@ -1545,8 +1611,8 @@ class BackportService:
             return {
                 "operation": "preview_commit_message",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
             }
 
     def _run_check_manual_patch(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1578,8 +1644,8 @@ class BackportService:
             return {
                 "operation": "check_manual_patch",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
             }
 
     def _run_apply_manual_patch(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1611,8 +1677,8 @@ class BackportService:
             return {
                 "operation": "apply_manual_patch",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
             }
 
     def _run_load_patch_preview(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1648,8 +1714,8 @@ class BackportService:
             return {
                 "operation": "load_patch_preview",
                 "status": "failed",
-                "summary": str(error),
-                "diagnostics": {"error_text": str(error)},
+                "summary": _operation_error_summary(error),
+                "diagnostics": _operation_error_diagnostics(error),
             }
 
     # ── 辅助方法 ──────────────────────────────────────────────
