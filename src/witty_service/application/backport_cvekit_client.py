@@ -90,10 +90,13 @@ class BackportCvekitClient:
         self,
         *,
         runs_root: str | Path,
+        patchflow_state_root: str | Path | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._runs_root = Path(runs_root).expanduser().resolve()
-        self._run_store = BackportRunStore(self._runs_root)
+        self._run_store = BackportRunStore(
+            self._runs_root, patchflow_state_root=patchflow_state_root
+        )
         self._conflict_reporter_url = ""
         self._runtime_config: BackportRuntimeConfig | None = None
         self._progress_callback = progress_callback
@@ -178,7 +181,7 @@ class BackportCvekitClient:
             finally:
                 self._lock_held -= 1
             return
-        lock_root = Path.home() / ".patchflow" / "locks"
+        lock_root = self._run_store.locks_root
         lock_root.mkdir(parents=True, exist_ok=True)
         key = hashlib.sha1(
             str(Path(self._lock_target).expanduser().resolve()).encode()
@@ -370,7 +373,7 @@ class BackportCvekitClient:
         # CVEKIT_TASK_ID(稳定 task 标识)由 _run_cvekit 补充
         if run_id:
             env["CVEKIT_RUN_ID"] = run_id
-        env["CVEKIT_LOG_DIR"] = str(Path.home() / ".patchflow" / "logs")
+        env["CVEKIT_LOG_DIR"] = str(self._run_store.logs_root)
         return env
 
     def _run_cvekit(
@@ -488,7 +491,7 @@ class BackportCvekitClient:
                 stdout=result.stdout or "",
                 stderr=result.stderr or "",
             )
-            source_log_root = (Path.home() / ".patchflow" / "logs").resolve()
+            source_log_root = self._run_store.logs_root
             source_log_paths = {
                 Path(value).expanduser().resolve()
                 for value in re.findall(

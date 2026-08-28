@@ -10,6 +10,8 @@ from typing import Any, Literal
 MAX_COMMIT_IMPORT_BYTES = 1024 * 1024
 MAX_COMMIT_IMPORT_ENTRIES = 5000
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,}$")
+COMMIT_ID_HEADER_ALIASES = {"commithash", "commit", "hash", "sha", "commitid"}
+COMMIT_TITLE_HEADER_ALIASES = {"committitle", "title", "subject", "patchtitle"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +30,32 @@ class CommitImportResult:
         if self.rows:
             result["rows"] = self.rows
         return result
+
+
+def _normalize_header(value: str) -> str:
+    return "".join(
+        character for character in value.strip().lower() if character.isalnum()
+    )
+
+
+def _resolve_header_columns(row: list[str]) -> tuple[int, int] | None:
+    """Return commit/title indexes for a recognized two-column legacy header."""
+    if len(row) != 2:
+        return None
+    normalized = [_normalize_header(value) for value in row]
+    commit_indexes = [
+        index
+        for index, value in enumerate(normalized)
+        if value in COMMIT_ID_HEADER_ALIASES
+    ]
+    title_indexes = [
+        index
+        for index, value in enumerate(normalized)
+        if value in COMMIT_TITLE_HEADER_ALIASES
+    ]
+    if len(commit_indexes) != 1 or len(title_indexes) != 1:
+        return None
+    return commit_indexes[0], title_indexes[0]
 
 
 def parse_commit_import(
@@ -73,8 +101,12 @@ def parse_commit_import(
         for index, row in enumerate(rows, start=1)
         if any(cell.strip() for cell in row)
     ]
-    if numbered_rows and numbered_rows[0][1] == ["commit_id", "commit_title"]:
-        numbered_rows = numbered_rows[1:]
+    commit_index, title_index = 0, 1
+    if numbered_rows:
+        header_columns = _resolve_header_columns(numbered_rows[0][1])
+        if header_columns is not None:
+            commit_index, title_index = header_columns
+            numbered_rows = numbered_rows[1:]
 
     raw_entries: list[tuple[int, dict[str, str]]] = []
     preview_rows: list[dict[str, Any]] = []
@@ -83,8 +115,8 @@ def parse_commit_import(
         preview_rows.append(
             {
                 "row": row_number,
-                "commit": row[0] if row else "",
-                "commit_title": row[1] if len(row) > 1 else "",
+                "commit": row[commit_index] if len(row) > commit_index else "",
+                "commit_title": row[title_index] if len(row) > title_index else "",
             }
         )
         if len(row) != 2:
@@ -96,7 +128,12 @@ def parse_commit_import(
                 }
             )
             continue
-        raw_entries.append((row_number, {"commit": row[0], "commit_title": row[1]}))
+        raw_entries.append(
+            (
+                row_number,
+                {"commit": row[commit_index], "commit_title": row[title_index]},
+            )
+        )
     validated = validate_commit_entries(raw_entries)
     return CommitImportResult(
         entries=validated.entries,

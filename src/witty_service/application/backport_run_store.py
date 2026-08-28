@@ -17,6 +17,7 @@ from typing import Any, ClassVar, NamedTuple
 import yaml
 
 from witty_service.application.backport_commit_import import serialize_commit_entries
+from witty_service.application.patchflow_paths import resolve_patchflow_state_root
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,18 @@ class BackportRunStore:
     _flock_guard: ClassVar[threading.Lock] = threading.Lock()
     _flock_holders: ClassVar[dict[str, dict[int, int]]] = {}
 
-    def __init__(self, runs_root: str | Path) -> None:
+    def __init__(
+        self,
+        runs_root: str | Path,
+        *,
+        patchflow_state_root: str | Path | None = None,
+    ) -> None:
         self.runs_root = Path(runs_root).expanduser().resolve()
+        self.patchflow_state_root = resolve_patchflow_state_root(
+            patchflow_state_root
+        )
+        self.locks_root = self.patchflow_state_root / "locks"
+        self.logs_root = self.patchflow_state_root / "logs"
         self._run_id = ""
         self._work_dirs: list[tempfile.TemporaryDirectory[str]] = []
         self._secrets: list[str] = []
@@ -1256,7 +1267,7 @@ class BackportRunStore:
         return f"witty/{task_id}/patchflow-{task_id[:8]}-{task_id[-8:]}-task-all.log"
 
     def _task_all_log_path(self, task_dir: Path) -> Path:
-        return Path.home() / ".patchflow" / "logs" / self._task_all_log_rel(task_dir)
+        return self.logs_root / self._task_all_log_rel(task_dir)
 
     @contextlib.contextmanager
     def _task_log_lock(self, task_id: str) -> Iterator[None]:
@@ -1276,9 +1287,8 @@ class BackportRunStore:
             if held:
                 yield
                 return
-            lock_root = Path.home() / ".patchflow" / "locks"
-            lock_root.mkdir(parents=True, exist_ok=True)
-            lock_path = lock_root / f"task-log-{task_id}.lock"
+            self.locks_root.mkdir(parents=True, exist_ok=True)
+            lock_path = self.locks_root / f"task-log-{task_id}.lock"
             with open(lock_path, "a+", encoding="utf-8") as lock_file:
                 fcntl.flock(lock_file, fcntl.LOCK_EX)
                 try:
@@ -1434,10 +1444,9 @@ class BackportRunStore:
     def _find_run_all_logs(self, cvekit_run_id: str) -> list[Path]:
         """按 run_id8 从日志根目录定位某 run 的入口 -all 源日志(聚合 drain 用)。"""
         run_id8 = cvekit_run_id[-8:]
-        log_root = Path.home() / ".patchflow" / "logs"
         found: list[Path] = []
         for subdir in ("batch", "portgpt", "opencode", "mystique"):
-            found.extend(log_root.glob(f"{subdir}/patchflow-*-{run_id8}-all.log"))
+            found.extend(self.logs_root.glob(f"{subdir}/patchflow-*-{run_id8}-all.log"))
         return sorted(found)
 
     def _merge_ready_runs(

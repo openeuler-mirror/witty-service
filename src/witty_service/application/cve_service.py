@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import httpx
 
 from witty_service.api.services import ServiceContainer
+from witty_service.application.patchflow_paths import resolve_patchflow_state_root
 from witty_service.domain.errors import DomainError
 
 CVE_CLONE_DIR = "~/Image"
@@ -454,7 +455,7 @@ class CveService:
         config = self.get_config()
         allowed_roots = [
             home / ".cve_analyzer_cache",
-            home / ".patchflow" / "logs",
+            resolve_patchflow_state_root() / "logs",
             home / "backports" / "patch_dataset",
         ]
         allowed = False

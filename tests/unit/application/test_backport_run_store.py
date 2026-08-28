@@ -34,6 +34,33 @@ def test_create_task_archives_normalized_commit_csv(tmp_path: Path) -> None:
     assert store.read_manifest(task_dir)["name"] == "commits.csv"
 
 
+def test_patchflow_state_root_does_not_depend_on_writable_home(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state_root = tmp_path / "patchflow-state"
+    monkeypatch.setenv("HOME", "/proc")
+    monkeypatch.setenv("PATCHFLOW_STATE_ROOT", str(state_root))
+    store = BackportRunStore(tmp_path / "runs")
+    task_dir = _new_task(store, tmp_path)
+
+    store.begin_cvekit_run(task_dir.name, "generate_config")
+
+    assert store.locks_root == state_root / "locks"
+    assert store.logs_root == state_root / "logs"
+    assert (state_root / "locks" / f"task-log-{task_dir.name}.lock").is_file()
+
+
+def test_patchflow_state_root_defaults_to_dot_patchflow_under_home(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv("PATCHFLOW_STATE_ROOT")
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    store = BackportRunStore(tmp_path / "runs")
+
+    assert store.patchflow_state_root == tmp_path / ".patchflow"
+
+
 def test_create_task_oversized_names_bounded_within_96(tmp_path: Path) -> None:
     excel = tmp_path / (f"{'e' * 100}.xlsx")
     excel.write_text("fixture", encoding="utf-8")

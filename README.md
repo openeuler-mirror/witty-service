@@ -248,6 +248,7 @@ Witty-Service 通过环境变量进行配置，无需额外配置文件。
 |----------|------|--------|
 | `AUTH_TOKEN` | API 认证 Token | `dev-token` |
 | `WITTY_AGENT_SERVER_APP_DIR` | Local Process 模式下 witty-agent-server 代码目录 | 空 |
+| `PATCHFLOW_STATE_ROOT` | Patchflow 锁与日志的统一根目录 | `~/.patchflow` |
 
 ### Witty Insight 集成配置
 

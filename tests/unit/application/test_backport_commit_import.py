@@ -1,9 +1,54 @@
+import pytest
+
 from witty_service.application.backport_commit_import import (
     MAX_COMMIT_IMPORT_BYTES,
     parse_commit_import,
     serialize_commit_entries,
     validate_commit_entries,
 )
+
+
+@pytest.mark.parametrize(
+    "commit_header",
+    ["commit hash", "commit", "hash", "sha", "commit_id"],
+)
+@pytest.mark.parametrize(
+    "title_header",
+    ["commit title", "title", "subject", "patch title"],
+)
+def test_parse_csv_supports_legacy_header_aliases(
+    commit_header: str, title_header: str
+) -> None:
+    result = parse_commit_import(
+        f"{commit_header},{title_header}\nabcdef1,first title\n".encode(),
+        delimiter="csv",
+    )
+
+    assert result.errors == []
+    assert result.entries == [{"commit": "abcdef1", "commit_title": "first title"}]
+
+
+def test_parse_tsv_maps_reversed_legacy_headers_to_canonical_fields() -> None:
+    result = parse_commit_import(
+        b"subject\tsha\nfirst title\tabcdef1\n",
+        delimiter="tsv",
+    )
+
+    assert result.errors == []
+    assert result.entries == [{"commit": "abcdef1", "commit_title": "first title"}]
+    assert result.rows == [
+        {"row": 2, "commit": "abcdef1", "commit_title": "first title"}
+    ]
+
+
+def test_parse_normalizes_header_case_whitespace_and_separators() -> None:
+    result = parse_commit_import(
+        b" Commit-Hash ,PATCH_TITLE\nabcdef1,first title\n",
+        delimiter="csv",
+    )
+
+    assert result.errors == []
+    assert result.entries == [{"commit": "abcdef1", "commit_title": "first title"}]
 
 
 def test_parse_csv_supports_utf8_bom_header_and_quoted_titles() -> None:

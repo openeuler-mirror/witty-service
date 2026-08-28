@@ -340,6 +340,14 @@ def test_build_env_includes_joern_from_process_env(
     assert env["JOERN_PATH"] == "/opt/joern"
 
 
+def test_build_env_uses_isolated_patchflow_log_root(
+    client: BackportCvekitClient, tmp_path: Path
+) -> None:
+    env = client._build_env()
+
+    assert env["CVEKIT_LOG_DIR"] == str(tmp_path / ".patchflow" / "logs")
+
+
 # ── cvekit 执行 ───────────────────────────────────────────────────
 
 
@@ -567,9 +575,7 @@ def test_check_row_cleans_temp_run_dir(
             yaml.safe_dump({"commits": [{"row_id": "1", "status": "success"}]}),
             encoding="utf-8",
         )
-        return subprocess.CompletedProcess(
-            args=args, returncode=0, stdout="", stderr=""
-        )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
     out = client.check_row(base_report_path=str(base), row={"row_id": "1"})
@@ -696,7 +702,9 @@ def test_generate_report_from_commit_entries_archives_csv_and_raw_config(
                 Path(f"{raw_config}.report.yml"),
                 commits=[{"row_id": "1", "commit": "abcdef1"}],
             )
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="", stderr=""
+        )
 
     monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
     out = client.generate_report(

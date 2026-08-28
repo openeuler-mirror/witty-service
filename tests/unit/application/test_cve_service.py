@@ -52,6 +52,22 @@ def test_get_workbench_without_logs(service: CveService) -> None:
     assert artifact["viewable"] is False
 
 
+def test_read_artifact_allows_configured_patchflow_log_root(
+    service: CveService, tmp_path: Path, monkeypatch
+) -> None:
+    state_root = tmp_path / "isolated-patchflow"
+    monkeypatch.setenv("HOME", "/proc")
+    monkeypatch.setenv("PATCHFLOW_STATE_ROOT", str(state_root))
+    log_path = state_root / "logs" / "batch" / "patchflow-test.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("isolated log\n", encoding="utf-8")
+
+    artifact = service.read_artifact(str(log_path))
+
+    assert artifact["path"] == str(log_path)
+    assert artifact["content"] == "isolated log\n"
+
+
 def test_get_workbench_reads_current_cvekit_cache_key_and_conflict_patch(
     service: CveService, tmp_path: Path
 ) -> None:

@@ -10,6 +10,7 @@ Witty Service 统一配置管理
     # 工作空间配置
     WITTY_WORKSPACE_ROOT           工作空间根目录 (默认: ~/.witty)
     WITTY_AGENT_SERVER_APP_DIR     Agent服务器应用目录 (可选)
+    PATCHFLOW_STATE_ROOT           Patchflow 锁与日志根目录 (默认: ~/.patchflow)
 
     # 数据库配置
     WITTY_DATABASE_URL             数据库连接URL (默认: sqlite:///~/.witty/db/witty_service.sqlite3)

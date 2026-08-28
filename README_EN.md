@@ -250,6 +250,7 @@ Witty-Service is configured via environment variables, eliminating the need for 
 |----------|------|--------|
 | `AUTH_TOKEN` | API authentication token | `dev-token` |
 | `WITTY_AGENT_SERVER_APP_DIR` | The code directory of `witty-agent-server` in local process mode | - |
+| `PATCHFLOW_STATE_ROOT` | Shared root for Patchflow locks and logs | `~/.patchflow` |
 
 ### Docker Sandbox Configurations
 
