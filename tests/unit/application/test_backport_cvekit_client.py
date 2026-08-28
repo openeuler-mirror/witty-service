@@ -662,6 +662,70 @@ def test_generate_report_excel_missing(client: BackportCvekitClient) -> None:
         )
 
 
+def test_generate_report_from_commit_entries_archives_csv_and_raw_config(
+    client: BackportCvekitClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _git_repo(tmp_path / "repo")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "witty_service.application.backport_cvekit_client.BackportGitClient.ensure_git_repo",
+        staticmethod(lambda _path: None),
+    )
+    monkeypatch.setattr(
+        "witty_service.application.backport_cvekit_client.BackportGitClient.get_repo_state",
+        staticmethod(
+            lambda _path: {
+                "target_path": str(target),
+                "target_branch": "main",
+                "target_head": "h",
+                "target_status_clean": True,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "witty_service.application.backport_cvekit_client.BackportGitClient.collect_subject_map",
+        staticmethod(lambda _path: {}),
+    )
+
+    def fake_run(self, args, cwd, **kwargs):
+        del self, cwd, kwargs
+        calls.append(args)
+        if "--stop-at-first-conflict" in args:
+            raw_config = Path(args[args.index("--backport-config") + 1])
+            _write_report(
+                Path(f"{raw_config}.report.yml"),
+                commits=[{"row_id": "1", "commit": "abcdef1"}],
+            )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
+    out = client.generate_report(
+        excel_path=None,
+        commit_entries=[{"commit": "abcdef1", "commit_title": "first title"}],
+        project_url="u",
+        project_dir="d",
+        source_branch="s",
+        target_path=str(target),
+        target_release="r",
+        patch_dataset_dir="pd",
+        signer_name="n",
+        signer_email="e",
+        commit_message_template="",
+        commit_message_source="auto",
+        linux_repo_path="lr",
+    )
+
+    task_dir = Path(out["artifacts"]["run_dir"])
+    assert all("--backport-excel" not in args for args in calls)
+    assert (task_dir / "input" / "commits.csv").is_file()
+    raw_config = yaml.safe_load(
+        (task_dir / "input" / "backport-batch.yml").read_text(encoding="utf-8")
+    )
+    assert raw_config["commits"] == [
+        {"commit": "abcdef1", "commit_title": "first title"}
+    ]
+
+
 # ── continue_report ───────────────────────────────────────────────
 
 

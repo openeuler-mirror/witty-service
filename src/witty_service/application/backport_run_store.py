@@ -16,6 +16,8 @@ from typing import Any, ClassVar, NamedTuple
 
 import yaml
 
+from witty_service.application.backport_commit_import import serialize_commit_entries
+
 logger = logging.getLogger(__name__)
 
 
@@ -518,18 +520,24 @@ class BackportRunStore:
     def create_task(
         self,
         *,
-        excel_path: str | Path,
+        excel_path: str | Path | None = None,
+        commit_entries: list[dict[str, Any]] | None = None,
         target_repository: str,
         target_branch: str = "",
         target_head: str = "",
         config: dict[str, Any] | None = None,
     ) -> Path:
-        excel = Path(excel_path).expanduser()
+        has_excel = bool(excel_path)
+        has_entries = commit_entries is not None
+        if has_excel == has_entries:
+            raise ValueError("Backport Task 必须且只能使用 Excel 或提交清单作为输入。")
+        excel = Path(excel_path).expanduser() if has_excel else None
+        source_name = excel.name if excel is not None else "commits.csv"
         repo_name = Path(target_repository.rstrip("/")).name.removesuffix(".git")
         date = datetime.now(UTC).strftime("%Y%m%d")
         prefix = (
             f"{date}-"
-            f"{self.safe_slug(excel.stem, fallback='excel', max_length=40)}-"
+            f"{self.safe_slug(source_name.removesuffix('.csv').removesuffix('.xlsx'), fallback='commits', max_length=40)}-"
             f"{self.safe_slug(repo_name, fallback='repository', max_length=40)}"
         )
         # task ID 总长预算 96(与 safe_slug 默认 max_length 一致):
@@ -548,7 +556,13 @@ class BackportRunStore:
         (task_dir / "input").mkdir()
         (task_dir / "runs").mkdir()
         (task_dir / "cases").mkdir()
-        shutil.copy2(excel, task_dir / "input" / "source.xlsx")
+        if excel is not None:
+            shutil.copy2(excel, task_dir / "input" / "source.xlsx")
+        else:
+            self.write_text(
+                task_dir / "input" / "commits.csv",
+                serialize_commit_entries(commit_entries or []),
+            )
         if config is not None:
             self.write_json(
                 task_dir / "input" / "config.json", self._sanitize_config(config)
@@ -558,7 +572,7 @@ class BackportRunStore:
             task_dir / "task.json",
             {
                 "task_id": task_id,
-                "name": excel.name,
+                "name": source_name,
                 "status": "generating",
                 "current_run": None,
                 "current_report": None,
@@ -656,6 +670,11 @@ class BackportRunStore:
             excel_path = str(
                 payload.get("excel_path") or payload.get("excelPath") or ""
             )
+            commit_entries = (
+                payload.get("commit_entries")
+                if isinstance(payload.get("commit_entries"), list)
+                else None
+            )
             target_repository = str(
                 config.get("target_repo_input")
                 or config.get("target_path")
@@ -663,7 +682,8 @@ class BackportRunStore:
                 or "repository"
             )
             task_dir = self.create_task(
-                excel_path=excel_path,
+                excel_path=excel_path or None,
+                commit_entries=commit_entries,
                 target_repository=target_repository,
                 target_branch=str(
                     target_state.get("selected_branch")
@@ -951,6 +971,9 @@ class BackportRunStore:
             summary = (
                 task.get("summary") if isinstance(task.get("summary"), dict) else {}
             )
+            excel_input = task_dir / "input" / "source.xlsx"
+            commit_csv_input = task_dir / "input" / "commits.csv"
+            input_path = excel_input if excel_input.is_file() else commit_csv_input
             record.update(
                 {
                     "display_name": str(task.get("name") or task_dir.name),
@@ -961,7 +984,13 @@ class BackportRunStore:
                     )
                     if task.get("current_report")
                     else "",
-                    "excel_path": str(task_dir / "input" / "source.xlsx"),
+                    # Keep excel_path for existing consumers, but expose an
+                    # input-neutral path for new CSV-backed Tasks.
+                    "input_path": str(input_path) if input_path.is_file() else "",
+                    "excel_path": str(excel_input) if excel_input.is_file() else "",
+                    "commit_csv_path": (
+                        str(commit_csv_input) if commit_csv_input.is_file() else ""
+                    ),
                     "commit_count": int(summary.get("total") or 0),
                     "current_excel_version": 1,
                     "current_execution": int(task.get("current_run") or 0),
@@ -1051,6 +1080,17 @@ class BackportRunStore:
             raise FileNotFoundError("Backport report not found.")
         return path.name, path.read_text(encoding="utf-8")
 
+    def read_commit_csv(self, task_id: str) -> tuple[str, str]:
+        task_dir = self._task_dir(task_id)
+        path = task_dir / "input" / "commits.csv"
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or self._task_root_for(path) != task_dir
+        ):
+            raise FileNotFoundError("Backport commit CSV not found.")
+        return path.name, path.read_text(encoding="utf-8")
+
     def is_report_frozen(self, path: Path) -> bool:
         task_dir = self._task_root_for(path)
         match = re.fullmatch(r"(\d{3})-report\.yml", path.name)
@@ -1068,7 +1108,12 @@ class BackportRunStore:
             else:
                 request = request or {}
                 task_dir = self.create_task(
-                    excel_path=str(request.get("excel_path") or ""),
+                    excel_path=str(request.get("excel_path") or "") or None,
+                    commit_entries=(
+                        request.get("commit_entries")
+                        if isinstance(request.get("commit_entries"), list)
+                        else None
+                    ),
                     target_repository=str(request.get("target_path") or "repository"),
                     target_branch=str(request.get("target_release") or ""),
                     config=request,
@@ -1082,6 +1127,18 @@ class BackportRunStore:
             destination = task_dir / "input" / "source.xlsx"
             if excel_path.resolve() != destination.resolve():
                 shutil.copy2(excel_path, destination)
+        return 1
+
+    def archive_commit_entries(
+        self, run_dir: Path, commit_entries: list[dict[str, Any]]
+    ) -> int:
+        """Persist the normalized input for a new CSV/TSV import Task."""
+        if self._run_id:
+            task_dir = self._task_dir(self._run_id)
+            self.write_text(
+                task_dir / "input" / "commits.csv",
+                serialize_commit_entries(commit_entries),
+            )
         return 1
 
     def ensure_for_report(self, report_path: Path) -> Path:

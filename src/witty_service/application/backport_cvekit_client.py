@@ -967,7 +967,7 @@ class BackportCvekitClient:
 
     def generate_report(
         self,
-        excel_path: str,
+        excel_path: str | None,
         project_url: str,
         project_dir: str,
         source_branch: str,
@@ -983,13 +983,18 @@ class BackportCvekitClient:
         target_config_layout: str = "none",
         target_config_layout_opts: dict[str, Any] | None = None,
         prerequisite_commits: list[dict[str, Any]] | None = None,
+        commit_entries: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
-        excel = Path(excel_path).expanduser().resolve()
-        if not excel.exists():
-            raise FileNotFoundError(f"excel_path 不存在: {excel}")
-        excel_suffix = excel.suffix.lower()
-        if excel_suffix not in {".xlsx", ".xls"}:
-            raise ValueError(f"excel_path 不是 Excel 文件: {excel}")
+        if bool(excel_path) == (commit_entries is not None):
+            raise ValueError("generate_report 必须且只能使用 Excel 或提交清单作为输入。")
+        excel: Path | None = None
+        if excel_path:
+            excel = Path(excel_path).expanduser().resolve()
+            if not excel.exists():
+                raise FileNotFoundError(f"excel_path 不存在: {excel}")
+            excel_suffix = excel.suffix.lower()
+            if excel_suffix not in {".xlsx", ".xls"}:
+                raise ValueError(f"excel_path 不是 Excel 文件: {excel}")
 
         target_repo = Path(target_path).expanduser().resolve()
         BackportGitClient.ensure_git_repo(target_repo)
@@ -997,7 +1002,8 @@ class BackportCvekitClient:
         run_dir = self._run_store.create_run_dir(
             operation="generate_report",
             request={
-                "excel_path": str(excel),
+                "excel_path": str(excel) if excel is not None else "",
+                "commit_entries": commit_entries,
                 "project_url": project_url,
                 "project_dir": project_dir,
                 "source_branch": source_branch,
@@ -1009,7 +1015,10 @@ class BackportCvekitClient:
                 "target_config_layout_opts": target_config_layout_opts or {},
             },
         )
-        self._run_store.archive_excel(run_dir, excel)
+        if excel is not None:
+            self._run_store.archive_excel(run_dir, excel)
+        else:
+            self._run_store.archive_commit_entries(run_dir, commit_entries or [])
         archive_root = Path(self._run_store.artifacts(run_dir)["run_dir"])
         base_config_path = run_dir / "input" / "backport.base.yml"
         config_path = run_dir / "reports" / "backport-batch.yml"
@@ -1058,20 +1067,29 @@ class BackportCvekitClient:
             }
         self._run_store.write_json(archived_config_path, archived_config)
 
-        self._run_cvekit(
-            [
-                "--action",
-                "backport-batch",
-                "--backport-excel",
-                str(excel),
-                "-o",
-                str(config_path),
-                "--backport-config",
-                str(base_config_path),
-            ],
-            run_dir,
-            operation="generate_config",
-        )
+        if excel is not None:
+            self._run_cvekit(
+                [
+                    "--action",
+                    "backport-batch",
+                    "--backport-excel",
+                    str(excel),
+                    "-o",
+                    str(config_path),
+                    "--backport-config",
+                    str(base_config_path),
+                ],
+                run_dir,
+                operation="generate_config",
+            )
+        else:
+            raw_config = {**base_config, "commits": commit_entries or []}
+            with config_path.open("w", encoding="utf-8") as handle:
+                yaml.safe_dump(raw_config, handle, allow_unicode=True, sort_keys=False)
+            self._run_store.write_text(
+                archive_root / "input" / "backport-batch.yml",
+                config_path.read_text(encoding="utf-8"),
+            )
 
         if prerequisite_commits:
             self._merge_prerequisite_commits(config_path, prerequisite_commits)

@@ -67,6 +67,20 @@ class BackportGitClient:
         return result.stdout.strip()
 
     @staticmethod
+    def resolve_commit(repository_path: str, revision: str) -> str:
+        """Resolve a submitted SHA in the configured source repository."""
+        repo = Path(repository_path).expanduser().resolve()
+        BackportGitClient.ensure_git_repo(repo)
+        result = BackportGitClient._run_git(
+            repo,
+            ["rev-parse", "--verify", f"{revision.strip()}^{{commit}}"],
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"源仓库无法解析提交 {revision}: {detail}")
+        return result.stdout.strip()
+
+    @staticmethod
     def branches(path: Path) -> tuple[list[str], list[str]]:
         local_result = BackportGitClient._run_git(path, ["branch", "--format=%(refname:short)"])
         remote_result = BackportGitClient._run_git(path, ["branch", "-r", "--format=%(refname:short)"])

@@ -20,6 +20,20 @@ def test_create_task_id_ends_with_8_hex_digits(tmp_path: Path) -> None:
     assert len(task_dir.name) <= 96
 
 
+def test_create_task_archives_normalized_commit_csv(tmp_path: Path) -> None:
+    store = BackportRunStore(tmp_path / "runs")
+
+    task_dir = store.create_task(
+        commit_entries=[{"commit": "abcdef1", "commit_title": "title, with comma"}],
+        target_repository="https://github.com/example/kernel.git",
+    )
+
+    assert (task_dir / "input" / "commits.csv").read_text(encoding="utf-8") == (
+        'commit_id,commit_title\nabcdef1,"title, with comma"\n'
+    )
+    assert store.read_manifest(task_dir)["name"] == "commits.csv"
+
+
 def test_create_task_oversized_names_bounded_within_96(tmp_path: Path) -> None:
     excel = tmp_path / (f"{'e' * 100}.xlsx")
     excel.write_text("fixture", encoding="utf-8")

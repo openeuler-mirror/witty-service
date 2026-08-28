@@ -14,6 +14,10 @@ from urllib.parse import urlparse
 
 from witty_service.api.backport_schemas import TargetConfigLayoutOpts
 from witty_service.api.services import ServiceContainer
+from witty_service.application.backport_commit_import import (
+    serialize_commit_entries,
+    validate_commit_entries,
+)
 from witty_service.application.backport_conflict_reporter_manager import (
     ConflictReporterManager,
 )
@@ -1052,12 +1056,16 @@ class BackportService:
 
     def _run_generate_report(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
-        excel_path = self._require_string(
-            payload, "generate_report", "excel_path", "excelPath"
-        )
+        commit_entries = self._validated_payload_commit_entries(payload, config)
+        excel_path = self._get_string(payload, "excel_path", "excelPath")
+        if bool(excel_path) == (commit_entries is not None):
+            raise DomainError(
+                code="BACKPORT_ARGUMENT_REQUIRED",
+                message="generate_report 必须且只能提供 excel_path 或 commit_entries。",
+            )
         logger.info(
-            "Backport generate_report inputs: excel=%s project_dir=%s source_branch=%s target_path=%s target_release=%s patch_dataset_dir=%s",
-            excel_path,
+            "Backport generate_report inputs: source=%s project_dir=%s source_branch=%s target_path=%s target_release=%s patch_dataset_dir=%s",
+            excel_path or "commit_entries",
             config["project_dir"],
             config["source_branch"],
             config["target_path"],
@@ -1070,10 +1078,11 @@ class BackportService:
                 self._validate_prerequisite_review(
                     payload.get("prerequisite_review"),
                     excel_path=excel_path,
+                    commit_entries=commit_entries,
                     config=config,
                 )
             return self._cvekit_client.generate_report(
-                excel_path=excel_path,
+                excel_path=excel_path or None,
                 project_url=config["project_url"],
                 project_dir=config["project_dir"],
                 source_branch=config["source_branch"],
@@ -1089,6 +1098,7 @@ class BackportService:
                 target_config_layout=config["target_config_layout"],
                 target_config_layout_opts=config["target_config_layout_opts"],
                 prerequisite_commits=prerequisite_commits,
+                commit_entries=commit_entries,
             )
         except DomainError as error:
             logger.warning("generate_report prerequisite review rejected: %s", error)
@@ -1109,12 +1119,13 @@ class BackportService:
 
     def _run_prerequisite_commits(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
-        excel_path = self._require_string(
-            payload,
-            "prerequisite_commits",
-            "excel_path",
-            "excelPath",
-        )
+        commit_entries = self._validated_payload_commit_entries(payload, config)
+        excel_path = self._get_string(payload, "excel_path", "excelPath")
+        if bool(excel_path) == (commit_entries is not None):
+            raise DomainError(
+                code="BACKPORT_ARGUMENT_REQUIRED",
+                message="prerequisite_commits 必须且只能提供 excel_path 或 commit_entries。",
+            )
         if not str(config["project_dir"] or "").strip():
             raise DomainError(
                 code="BACKPORT_REPOSITORY_NOT_CONFIGURED",
@@ -1128,7 +1139,11 @@ class BackportService:
                 details={"action": "prerequisite_commits", "keys": ["config.target_path"]},
             )
         try:
-            original_commits = self._cvekit_client.extract_config_commits(excel_path, config)
+            original_commits = (
+                commit_entries
+                if commit_entries is not None
+                else self._cvekit_client.extract_config_commits(excel_path, config)
+            )
             shas = [
                 str(row["commit"])
                 for row in original_commits
@@ -1152,6 +1167,7 @@ class BackportService:
                 raise RuntimeError("Patchflow 前置提交结果的 target_ref 与请求基线不一致。")
             manifest["review"] = self._build_prerequisite_review(
                 excel_path=excel_path,
+                commit_entries=commit_entries,
                 config=config,
                 input_digest=input_digest,
                 target_ref=manifest_target_ref,
@@ -2047,6 +2063,64 @@ class BackportService:
             else []
         )
 
+    def validate_commit_entries_for_payload(
+        self, payload: dict[str, Any]
+    ) -> list[dict[str, str]]:
+        """Validate a confirmation request before it creates an async Task."""
+        config = self._extract_config(payload)
+        entries = self._validated_payload_commit_entries(payload, config)
+        if entries is None:
+            raise DomainError(
+                code="BACKPORT_ARGUMENT_REQUIRED",
+                message="commit_entries 不能为空。",
+                details={"action": "generate_report", "keys": ["commit_entries"]},
+            )
+        return entries
+
+    @staticmethod
+    def _commit_import_error(errors: list[dict[str, Any]]) -> DomainError:
+        return DomainError(
+            code="BACKPORT_COMMIT_IMPORT_INVALID",
+            message="提交清单校验失败。",
+            details={"errors": errors},
+        )
+
+    def _validated_payload_commit_entries(
+        self, payload: dict[str, Any], config: dict[str, Any]
+    ) -> list[dict[str, str]] | None:
+        if "commit_entries" not in payload:
+            return None
+        raw_entries = payload.get("commit_entries")
+        if not isinstance(raw_entries, list):
+            raise self._commit_import_error(
+                [{"field": "commit_entries", "message": "commit_entries 必须是数组。"}]
+            )
+        checked = validate_commit_entries(raw_entries)
+        if checked.errors:
+            raise self._commit_import_error(checked.errors)
+        source_path = str(config.get("project_dir") or "").strip()
+        if not source_path:
+            raise DomainError(
+                code="BACKPORT_REPOSITORY_NOT_CONFIGURED",
+                message="提交清单确认需要配置 source 仓库路径（项目目录）。",
+                details={"action": "commit_entries", "keys": ["config.project_dir"]},
+            )
+        missing: list[dict[str, Any]] = []
+        for index, entry in enumerate(checked.entries, start=1):
+            try:
+                BackportGitClient.resolve_commit(source_path, entry["commit"])
+            except (FileNotFoundError, NotADirectoryError, RuntimeError) as error:
+                missing.append(
+                    {
+                        "row": index,
+                        "field": "commit",
+                        "message": str(error),
+                    }
+                )
+        if missing:
+            raise self._commit_import_error(missing)
+        return checked.entries
+
     @staticmethod
     def _describe_commit_row(row: dict[str, Any]) -> str:
         for key in ("row_id", "commit", "input_commit", "title", "commit_title"):
@@ -2059,17 +2133,27 @@ class BackportService:
     def _build_prerequisite_review(
         *,
         excel_path: str,
+        commit_entries: list[dict[str, str]] | None = None,
         config: dict[str, Any],
         input_digest: str,
         target_ref: str,
     ) -> dict[str, str]:
-        excel = Path(excel_path).expanduser().resolve()
-        excel_hasher = hashlib.sha256()
-        with excel.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                excel_hasher.update(chunk)
+        source_fingerprint: dict[str, str]
+        if commit_entries is not None:
+            source_fingerprint = {
+                "commit_entries_sha256": hashlib.sha256(
+                    serialize_commit_entries(commit_entries).encode("utf-8")
+                ).hexdigest()
+            }
+        else:
+            excel = Path(excel_path).expanduser().resolve()
+            excel_hasher = hashlib.sha256()
+            with excel.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    excel_hasher.update(chunk)
+            source_fingerprint = {"excel_sha256": excel_hasher.hexdigest()}
         snapshot = {
-            "excel_sha256": excel_hasher.hexdigest(),
+            **source_fingerprint,
             "input_digest": input_digest.strip(),
             "source_repo": str(
                 Path(str(config.get("project_dir") or "")).expanduser().resolve()
@@ -2094,6 +2178,7 @@ class BackportService:
         review: Any,
         *,
         excel_path: str,
+        commit_entries: list[dict[str, str]] | None = None,
         config: dict[str, Any],
     ) -> None:
         if not isinstance(review, dict):
@@ -2102,7 +2187,7 @@ class BackportService:
                 message="前置提交审阅缺少版本信息，请重新扫描。",
             )
         required = {
-            "excel_sha256",
+            "commit_entries_sha256" if commit_entries is not None else "excel_sha256",
             "input_digest",
             "source_repo",
             "source_branch",
@@ -2114,7 +2199,7 @@ class BackportService:
         if any(not isinstance(review.get(key), str) for key in required) or any(
             not str(review.get(key) or "").strip()
             for key in (
-                "excel_sha256",
+                "commit_entries_sha256" if commit_entries is not None else "excel_sha256",
                 "input_digest",
                 "source_repo",
                 "target_repo",
@@ -2133,6 +2218,7 @@ class BackportService:
         )
         current = self._build_prerequisite_review(
             excel_path=excel_path,
+            commit_entries=commit_entries,
             config=config,
             input_digest=str(review["input_digest"]),
             target_ref=target_ref,
@@ -2140,7 +2226,7 @@ class BackportService:
         if any(str(review.get(key)) != value for key, value in current.items()):
             raise DomainError(
                 code=PREREQUISITE_REVIEW_STALE,
-                message="Excel 内容或仓库基线已变化，请重新扫描并审阅前置提交。",
+                message="提交输入或仓库基线已变化，请重新扫描并审阅前置提交。",
                 details={
                     "review_version": str(review.get("review_version") or ""),
                     "current_version": current["review_version"],
