@@ -1056,23 +1056,23 @@ class BackportService:
 
     def _run_generate_report(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
-        commit_entries = self._validated_payload_commit_entries(payload, config)
-        excel_path = self._get_string(payload, "excel_path", "excelPath")
-        if bool(excel_path) == (commit_entries is not None):
-            raise DomainError(
-                code="BACKPORT_ARGUMENT_REQUIRED",
-                message="generate_report 必须且只能提供 excel_path 或 commit_entries。",
-            )
-        logger.info(
-            "Backport generate_report inputs: source=%s project_dir=%s source_branch=%s target_path=%s target_release=%s patch_dataset_dir=%s",
-            excel_path or "commit_entries",
-            config["project_dir"],
-            config["source_branch"],
-            config["target_path"],
-            config["target_release"],
-            config["patch_dataset_dir"],
-        )
         try:
+            commit_entries = self._validated_payload_commit_entries(payload, config)
+            excel_path = self._get_string(payload, "excel_path", "excelPath")
+            if bool(excel_path) == (commit_entries is not None):
+                raise DomainError(
+                    code="BACKPORT_ARGUMENT_REQUIRED",
+                    message="generate_report 必须且只能提供 excel_path 或 commit_entries。",
+                )
+            logger.info(
+                "Backport generate_report inputs: source=%s project_dir=%s source_branch=%s target_path=%s target_release=%s patch_dataset_dir=%s",
+                excel_path or "commit_entries",
+                config["project_dir"],
+                config["source_branch"],
+                config["target_path"],
+                config["target_release"],
+                config["patch_dataset_dir"],
+            )
             prerequisite_commits = payload.get("prerequisite_commits")
             if isinstance(prerequisite_commits, list):
                 self._validate_prerequisite_review(
@@ -1101,7 +1101,7 @@ class BackportService:
                 commit_entries=commit_entries,
             )
         except DomainError as error:
-            logger.warning("generate_report prerequisite review rejected: %s", error)
+            logger.warning("generate_report rejected: %s", error)
             return {
                 "operation": "generate_report",
                 "status": "failed",
@@ -1119,26 +1119,26 @@ class BackportService:
 
     def _run_prerequisite_commits(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = self._extract_config(payload)
-        commit_entries = self._validated_payload_commit_entries(payload, config)
-        excel_path = self._get_string(payload, "excel_path", "excelPath")
-        if bool(excel_path) == (commit_entries is not None):
-            raise DomainError(
-                code="BACKPORT_ARGUMENT_REQUIRED",
-                message="prerequisite_commits 必须且只能提供 excel_path 或 commit_entries。",
-            )
-        if not str(config["project_dir"] or "").strip():
-            raise DomainError(
-                code="BACKPORT_REPOSITORY_NOT_CONFIGURED",
-                message="前置提交查找需要配置 source 仓库路径（项目目录）。",
-                details={"action": "prerequisite_commits", "keys": ["config.project_dir"]},
-            )
-        if not str(config["target_path"] or "").strip():
-            raise DomainError(
-                code="BACKPORT_REPOSITORY_NOT_CONFIGURED",
-                message="前置提交查找需要配置 target 仓库路径（目标目录）。",
-                details={"action": "prerequisite_commits", "keys": ["config.target_path"]},
-            )
         try:
+            commit_entries = self._validated_payload_commit_entries(payload, config)
+            excel_path = self._get_string(payload, "excel_path", "excelPath")
+            if bool(excel_path) == (commit_entries is not None):
+                raise DomainError(
+                    code="BACKPORT_ARGUMENT_REQUIRED",
+                    message="prerequisite_commits 必须且只能提供 excel_path 或 commit_entries。",
+                )
+            if not str(config["project_dir"] or "").strip():
+                raise DomainError(
+                    code="BACKPORT_REPOSITORY_NOT_CONFIGURED",
+                    message="前置提交查找需要配置 source 仓库路径（项目目录）。",
+                    details={"action": "prerequisite_commits", "keys": ["config.project_dir"]},
+                )
+            if not str(config["target_path"] or "").strip():
+                raise DomainError(
+                    code="BACKPORT_REPOSITORY_NOT_CONFIGURED",
+                    message="前置提交查找需要配置 target 仓库路径（目标目录）。",
+                    details={"action": "prerequisite_commits", "keys": ["config.target_path"]},
+                )
             original_commits = (
                 commit_entries
                 if commit_entries is not None
@@ -1183,6 +1183,14 @@ class BackportService:
                     "commits": original_commits,
                     "commit_count": len(original_commits),
                 },
+            }
+        except DomainError as error:
+            logger.warning("prerequisite_commits rejected: %s", error)
+            return {
+                "operation": "prerequisite_commits",
+                "status": "failed",
+                "summary": error.message,
+                "diagnostics": {"code": error.code, **error.details},
             }
         except (RuntimeError, FileNotFoundError, NotADirectoryError, ValueError) as error:
             logger.exception("prerequisite_commits failed")
@@ -2118,21 +2126,67 @@ class BackportService:
                 message="提交清单确认需要配置 source 仓库路径（项目目录）。",
                 details={"action": "commit_entries", "keys": ["config.project_dir"]},
             )
+        source_branch = str(config.get("source_branch") or "").strip()
+        resolved_entries: list[dict[str, str]] = []
         missing: list[dict[str, Any]] = []
+        try:
+            title_resolutions = BackportGitClient.resolve_commits_by_title(
+                source_path,
+                source_branch,
+                (entry["commit_title"] for entry in checked_entries),
+            )
+            title_lookup_error = ""
+        except (FileNotFoundError, NotADirectoryError, RuntimeError) as error:
+            title_resolutions = {}
+            title_lookup_error = str(error)
         for index, entry in enumerate(checked_entries, start=1):
-            try:
-                BackportGitClient.resolve_commit(source_path, entry["commit"])
-            except (FileNotFoundError, NotADirectoryError, RuntimeError) as error:
-                missing.append(
-                    {
-                        "row": index,
-                        "field": "commit",
-                        "message": str(error),
-                    }
+            title_resolution = title_resolutions.get(entry["commit_title"])
+            if title_resolution and title_resolution.commit:
+                resolved = title_resolution.commit
+                logger.info(
+                    "Backport commit row %s resolved by title on %s: %s -> %s",
+                    index,
+                    source_branch or "HEAD",
+                    entry["commit_title"],
+                    resolved,
                 )
+            else:
+                title_error = title_lookup_error or (
+                    title_resolution.error
+                    if title_resolution is not None
+                    else f"无法根据 commit_title 找到提交：{entry['commit_title']}"
+                )
+                try:
+                    resolved = BackportGitClient.resolve_commit(
+                        source_path, entry["commit"]
+                    )
+                    logger.info(
+                        "Backport commit row %s fell back to commit_id after title resolution failed: %s",
+                        index,
+                        title_error,
+                    )
+                except (
+                    FileNotFoundError,
+                    NotADirectoryError,
+                    RuntimeError,
+                ) as sha_error:
+                    missing.append(
+                        {
+                            "row": index,
+                            "field": "commit",
+                            "message": (
+                                f"标题解析失败：{title_error}；"
+                                f"commit_id 解析失败：{sha_error}"
+                            ),
+                        }
+                    )
+                    continue
+            resolved_entries.append(
+                {"commit": resolved, "commit_title": entry["commit_title"]}
+            )
         if missing:
             raise self._commit_import_error(missing)
-        return checked_entries
+        return resolved_entries
 
     @staticmethod
     def _describe_commit_row(row: dict[str, Any]) -> str:

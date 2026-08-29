@@ -115,6 +115,20 @@ def test_validate_rejects_multiline_title_and_limits() -> None:
     assert oversized.errors[0]["field"] == "file"
 
 
+@pytest.mark.parametrize("entry", [1, "abcdef1", [], (1,), ("1", {})])
+def test_validate_rejects_non_object_or_malformed_internal_entry(entry: object) -> None:
+    result = validate_commit_entries([entry])  # type: ignore[list-item]
+
+    assert result.entries == []
+    assert result.errors == [
+        {
+            "row": 1,
+            "field": "entry",
+            "message": "提交条目必须是对象，且包含 commit 与 commit_title。",
+        }
+    ]
+
+
 def test_validate_rejects_final_entries_larger_than_one_mib() -> None:
     result = validate_commit_entries(
         [{"commit": "abcdef1", "commit_title": "x" * MAX_COMMIT_IMPORT_BYTES}]

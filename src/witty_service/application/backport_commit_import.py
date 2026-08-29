@@ -172,9 +172,31 @@ def validate_commit_entries(
         row = index
         entry: Mapping[str, Any]
         if isinstance(item, tuple):
+            if (
+                len(item) != 2
+                or not isinstance(item[0], int)
+                or not isinstance(item[1], Mapping)
+            ):
+                errors.append(
+                    {
+                        "row": index,
+                        "field": "entry",
+                        "message": "提交条目必须是对象，且包含 commit 与 commit_title。",
+                    }
+                )
+                continue
             row, entry = item
-        else:
+        elif isinstance(item, Mapping):
             entry = item
+        else:
+            errors.append(
+                {
+                    "row": row,
+                    "field": "entry",
+                    "message": "提交条目必须是对象，且包含 commit 与 commit_title。",
+                }
+            )
+            continue
         commit = entry.get("commit")
         title = entry.get("commit_title")
         commit_text = commit.strip() if isinstance(commit, str) else ""
