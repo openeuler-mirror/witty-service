@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class CommitTitleResolution:
+    commit: str | None
+    error: str | None = None
 
 
 class BackportGitClient:
@@ -65,6 +73,88 @@ class BackportGitClient:
             detail = result.stderr.strip() or result.stdout.strip()
             raise RuntimeError(f"git 无法解析目标 ref {requested_ref}: {detail}")
         return result.stdout.strip()
+
+    @staticmethod
+    def resolve_commit(repository_path: str, revision: str) -> str:
+        """Resolve a submitted SHA in the configured source repository."""
+        repo = Path(repository_path).expanduser().resolve()
+        BackportGitClient.ensure_git_repo(repo)
+        result = BackportGitClient._run_git(
+            repo,
+            ["rev-parse", "--verify", f"{revision.strip()}^{{commit}}"],
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"源仓库无法解析提交 {revision}: {detail}")
+        return result.stdout.strip()
+
+    @staticmethod
+    def resolve_commits_by_title(
+        repository_path: str, source_branch: str, titles: Iterable[str]
+    ) -> dict[str, CommitTitleResolution]:
+        """Resolve all titles with the established Excel matching precedence.
+
+        Read the branch once per import rather than running a complete ``git log``
+        for every row. For each title, use exact match first, case-insensitive
+        exact match second, and require a unique case-insensitive contains match
+        only as the final fallback. Merge commits are excluded like cvekit.
+        """
+        repo = Path(repository_path).expanduser().resolve()
+        BackportGitClient.ensure_git_repo(repo)
+        ref = source_branch.strip() or "HEAD"
+        result = BackportGitClient._run_git(
+            repo,
+            ["log", ref, "--no-merges", "--format=%H%x1f%s"],
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"源仓库无法读取分支 {ref}: {detail}")
+        queries = {title.strip() for title in titles if title.strip()}
+        subjects: list[tuple[str, str, str]] = []
+        for line in result.stdout.splitlines():
+            if "\x1f" not in line:
+                continue
+            sha, subject = line.split("\x1f", 1)
+            normalized_subject = subject.strip()
+            subjects.append((sha.strip(), normalized_subject, normalized_subject.casefold()))
+
+        resolutions: dict[str, CommitTitleResolution] = {}
+        for title in queries:
+            normalized_title = title.casefold()
+            exact_matches = [sha for sha, subject, _ in subjects if subject == title]
+            if exact_matches:
+                resolutions[title] = CommitTitleResolution(exact_matches[0])
+                continue
+            case_insensitive_matches = [
+                sha for sha, _, subject in subjects if subject == normalized_title
+            ]
+            if case_insensitive_matches:
+                resolutions[title] = CommitTitleResolution(
+                    case_insensitive_matches[0]
+                )
+                continue
+            contains_matches = [
+                (sha, subject)
+                for sha, subject, normalized_subject in subjects
+                if normalized_title in normalized_subject
+            ]
+            if len(contains_matches) == 1:
+                resolutions[title] = CommitTitleResolution(
+                    contains_matches[0][0]
+                )
+                continue
+            if not contains_matches:
+                error = f"无法根据 commit_title 找到提交：{title}"
+            else:
+                candidates = [
+                    f"{sha}:{subject}" for sha, subject in contains_matches[:5]
+                ]
+                error = (
+                    f"commit_title 包含匹配到多个候选：{title}，"
+                    f"candidates={candidates}"
+                )
+            resolutions[title] = CommitTitleResolution(None, error)
+        return resolutions
 
     @staticmethod
     def branches(path: Path) -> tuple[list[str], list[str]]:

@@ -7,11 +7,21 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 
 from witty_service.api.auth import require_bearer_auth
 from witty_service.api.backport_schemas import (
     BackportAsyncRunResponse,
+    BackportCommitImportTextRequest,
     BackportConfigPayload,
     BackportConfigUpdateResponse,
     BackportRepositoryPrepareRequest,
@@ -22,6 +32,10 @@ from witty_service.api.backport_schemas import (
     BackportRuntimeStatusResponse,
 )
 from witty_service.api.services import ServiceContainer
+from witty_service.application.backport_commit_import import (
+    MAX_COMMIT_IMPORT_BYTES,
+    parse_commit_import,
+)
 from witty_service.application.backport_git_client import BackportGitClient
 from witty_service.application.backport_run_store import BackportRunStore
 from witty_service.application.backport_service import BackportService
@@ -137,6 +151,32 @@ def _validate_run_target(run_store: BackportRunStore, task_id: str) -> None:
                 }
             },
         )
+
+
+@router.post("/commit-imports/preview")
+async def preview_commit_import_file(file: UploadFile = File(...)) -> dict:
+    """Parse a local browser CSV file without persisting its original content."""
+    filename = file.filename or ""
+    if not filename.lower().endswith(".csv"):
+        return {
+            "entries": [],
+            "errors": [{"field": "file", "message": "仅支持 .csv 文件。"}],
+        }
+    declared_size = getattr(file, "size", None)
+    if isinstance(declared_size, int) and declared_size > MAX_COMMIT_IMPORT_BYTES:
+        return {
+            "entries": [],
+            "errors": [{"field": "file", "message": "导入内容不能超过 1 MiB。"}],
+        }
+    content = await file.read(MAX_COMMIT_IMPORT_BYTES + 1)
+    return parse_commit_import(content, delimiter="csv").as_dict()
+
+
+@router.post("/commit-imports/preview-text")
+def preview_commit_import_text(payload: BackportCommitImportTextRequest) -> dict:
+    return parse_commit_import(
+        payload.text.encode("utf-8"), delimiter=payload.delimiter
+    ).as_dict()
 
 
 @router.get("/config", response_model=BackportConfigPayload)
@@ -284,6 +324,18 @@ def create_run(
             status_code=400,
             detail="Only generate_report, run_all and prerequisite_commits support async runs.",
         )
+
+    if (
+        payload.action in {"generate_report", "prerequisite_commits"}
+        and "commit_entries" in payload.payload
+    ):
+        # Preview results are advisory only. Reject malformed confirmation input before
+        # a Task directory is allocated. Source-repository resolution can be slow, so
+        # it is performed once by the asynchronous worker before it creates artifacts.
+        normalized_entries = BackportService(
+            request.app.state.services
+        ).normalize_commit_entries_for_payload(payload.payload)
+        payload.payload["commit_entries"] = normalized_entries
 
     runs, runs_lock = _ensure_backport_runs(request)
     run_store = _ensure_backport_run_store(request)
@@ -589,6 +641,21 @@ def get_task_run_report(task_id: str, run_number: int, request: Request) -> Resp
         content=content,
         media_type="application/yaml",
         headers={"Content-Disposition": f'inline; filename="{name}"'},
+    )
+
+
+@router.get("/tasks/{task_id}/commits.csv")
+def download_task_commits_csv(task_id: str, request: Request) -> Response:
+    try:
+        name, content = _ensure_backport_run_store(request).read_commit_csv(task_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(
+            status_code=404, detail="Backport commit CSV not found."
+        ) from None
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
     )
 
 

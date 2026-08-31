@@ -90,6 +90,11 @@ class BackportRepositoryPrepareResponse(BaseModel):
     error: str = ""
 
 
+class BackportCommitImportTextRequest(BaseModel):
+    text: str = ""
+    delimiter: Literal["csv", "tsv"] = "csv"
+
+
 class BackportRunRequest(BaseModel):
     action: str
     payload: dict[str, Any] = Field(default_factory=dict)
