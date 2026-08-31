@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from witty_service.api.backport_schemas import TargetConfigLayoutOpts
+from witty_service.api.backport_schemas import (
+    DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+    TargetConfigLayoutOpts,
+)
 from witty_service.api.services import ServiceContainer
 from witty_service.application.backport_conflict_reporter_manager import (
     ConflictReporterManager,
@@ -26,14 +29,6 @@ from witty_service.application.backport_git_client import BackportGitClient
 from witty_service.domain.errors import DomainError
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_COMMIT_MESSAGE_TEMPLATE = """{{subject}}
-
-commit {{commit_id}} {{source}}
-
-{{body}}
-
-{{trailers}}"""
 
 BACKPORT_REPOSITORY_CACHE_ENV = "BACKPORT_REPOSITORY_CACHE_DIR"
 BACKPORT_REPOSITORY_CACHE_DIR = "~/polymind-backport-repositories"
