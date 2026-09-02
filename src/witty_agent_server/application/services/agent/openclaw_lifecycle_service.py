@@ -1,9 +1,11 @@
 import json
 import logging
+import os
 import subprocess
 import threading
 import time
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from subprocess import CompletedProcess, Popen, run
 
 from witty_agent_server.application.services.agent._process_utils import (
@@ -13,6 +15,7 @@ from witty_agent_server.application.services.agent._process_utils import (
     port_is_listening,
     start_stderr_drainer,
 )
+from witty_service.workspace_paths import agent_workspace_path
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +185,19 @@ class OpenClawLifecycleService:
             cmd.extend(["--profile", self._profile])
         return cmd
 
+    def _workspace_path(self) -> Path | None:
+        """Agent 专属 witty workspace（与 witty-service agent.workspace_path 同一约定）。"""
+        if not self._profile:
+            return None
+        return agent_workspace_path(self._profile)
+
+    def _openclaw_env(self) -> dict[str, str] | None:
+        """为 openclaw 子进程注入 OPENCLAW_WORKSPACE_DIR，作为 env 解析路径的兜底。"""
+        workspace = self._workspace_path()
+        if workspace is None:
+            return None
+        return {**os.environ, "OPENCLAW_WORKSPACE_DIR": str(workspace)}
+
     def probe_running(self) -> bool:
         if not self._profile:
             return False
@@ -250,6 +266,7 @@ class OpenClawLifecycleService:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
+            env=self._openclaw_env(),
         )
 
         self._stderr_drainer = start_stderr_drainer(
@@ -411,6 +428,12 @@ class OpenClawLifecycleService:
             if custom_compatibility:
                 command.extend(["--custom-compatibility", custom_compatibility])
 
+        # 统一 openclaw workspace 到 witty workspace：写入 agents.defaults.workspace，
+        # 运行时 config 优先于 env，是实际生效的杠杆。
+        workspace = self._workspace_path()
+        if workspace is not None:
+            command.extend(["--workspace", str(workspace)])
+
         result = self._run_command(command)
         if result.returncode != 0:
             raise OpenClawOnboardError(
@@ -524,9 +547,4 @@ class OpenClawLifecycleService:
 
     @staticmethod
     def _default_runner(command: list[str]) -> CompletedProcess[str]:
-        return run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        return run(command, check=False, capture_output=True, text=True)

@@ -12,7 +12,7 @@ from witty_agent_server.application.services.skill.errors import (
     OpenCodeSkillsQueryError,
     OpenCodeSkillsUninstallError,
 )
-from witty_service.config import get_settings
+from witty_service.workspace_paths import agent_workspace_path
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +23,7 @@ class OpenCodeSkillService(AgentSkillServiceBase):
     @classmethod
     def _get_xdg_config_home(cls, agent_id: str | None) -> Path:
         """返回 opencode 的 XDG_CONFIG_HOME 目录。"""
-        workspace_root = get_settings().workspace.root_path()
-        if agent_id:
-            return workspace_root / "agent-workspaces" / agent_id / "workspace"
-        return workspace_root / "agent-workspaces" / "_default" / "workspace"
+        return agent_workspace_path(agent_id or "_default")
 
     @classmethod
     def _get_skills_dir(cls, agent_id: str | None) -> Path:

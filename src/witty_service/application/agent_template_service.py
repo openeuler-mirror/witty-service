@@ -173,9 +173,8 @@ class AgentTemplateService:
         template_dir: Path,
     ) -> None:
         """逐个安装模板中定义的 skills。"""
-        openclaw_skills_dir = (
-            Path.home() / ".openclaw" / f"workspace-{agent.id}" / "skills"
-        )
+        # 统一到 agent 的 witty workspace（agent.workspace_path，即 artifact 校验/文件端点同源路径）
+        openclaw_skills_dir = Path(agent.workspace_path) / "skills"
         openclaw_skills_dir.mkdir(parents=True, exist_ok=True)
 
         repo = self._repository
