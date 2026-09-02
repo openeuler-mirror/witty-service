@@ -258,6 +258,25 @@ class BackportService:
             config["current_report_path"],
         )
 
+    def clear_model_reference(self, model_id: str) -> bool:
+        normalized_model_id = str(model_id or "").strip()
+        if not normalized_model_id:
+            return False
+
+        config = self.get_config()
+        configured_model_id = str(config.get("backport_model_id") or "").strip()
+        if configured_model_id != normalized_model_id:
+            return False
+
+        config["backport_model_id"] = ""
+        self.update_config(config)
+        logger.info(
+            "Cleared deleted Backport model reference: model_id=%s config_path=%s",
+            normalized_model_id,
+            self._config_path,
+        )
+        return True
+
     @property
     def config_path(self) -> str:
         return str(self._config_path)

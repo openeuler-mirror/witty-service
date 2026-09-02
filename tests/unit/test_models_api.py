@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from types import SimpleNamespace
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,7 +12,7 @@ from witty_service.persistence.repositories import ModelRecord
 
 
 def _model_record(**overrides: object) -> ModelRecord:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     data = {
         "id": "model-1",
         "name": "GPT",
@@ -90,11 +89,37 @@ def test_delete_model_raises_domain_error_when_missing() -> None:
 def test_delete_model_removes_existing_model() -> None:
     services = _services()
     services.repository.get_model.return_value = _model_record()
+    backport_service = MagicMock()
 
-    resp = models_api.delete_model("model-1", services=services)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            models_api,
+            "BackportService",
+            lambda _services: backport_service,
+        )
+        resp = models_api.delete_model("model-1", services=services)
 
     assert resp.status_code == 204
+    backport_service.clear_model_reference.assert_called_once_with("model-1")
     services.repository.delete_model.assert_called_once_with("model-1")
+
+
+def test_delete_model_does_not_delete_when_backport_cleanup_fails() -> None:
+    services = _services()
+    services.repository.get_model.return_value = _model_record()
+    backport_service = MagicMock()
+    backport_service.clear_model_reference.side_effect = OSError("config is read-only")
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            models_api,
+            "BackportService",
+            lambda _services: backport_service,
+        )
+        with pytest.raises(OSError, match="config is read-only"):
+            models_api.delete_model("model-1", services=services)
+
+    services.repository.delete_model.assert_not_called()
 
 
 def test_update_model_uses_provider_default_and_returns_response() -> None:
