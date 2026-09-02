@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
@@ -10,8 +11,8 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from fastapi import APIRouter, Depends, Request, Response, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import FileResponse, StreamingResponse
 
 from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.api.auth import require_bearer_auth
@@ -44,6 +45,7 @@ from witty_service.application.agent_manager import (
     AgentCreateRequest,
 )
 from witty_service.application.agent_template_service import AgentTemplateService
+from witty_service.application.artifact_paths import resolve_within_workspace
 from witty_service.application.mcp_runtime_config import McpRuntimeConfigResolver
 from witty_service.application.skill_manager import SkillManager
 from witty_service.domain.enums import AgentStatus
@@ -54,6 +56,9 @@ router = APIRouter(
     prefix="/agents", tags=["agents"], dependencies=[Depends(require_bearer_auth)]
 )
 logger = logging.getLogger(__name__)
+
+# 禁止浏览器对未知扩展名做 MIME 嗅探（产物文件端点纵深防御）。
+_EXTRA_FILE_RESPONSE_HEADERS = {"X-Content-Type-Options": "nosniff"}
 
 
 @dataclass(frozen=True)
@@ -464,6 +469,51 @@ def update_conversation(
         pinned=updated.pinned,
         created_at=updated.created_at,
         updated_at=updated.updated_at,
+    )
+
+
+@router.get("/{agent_id}/workspace/files")
+def get_workspace_file(
+    agent_id: str,
+    path: str = Query(min_length=1),
+    download: int = Query(default=0, ge=0, le=1),
+    services: ServiceContainer = Depends(get_services),
+) -> FileResponse:
+    """读取 agent workspace 内的文件（产物预览/下载）。
+
+    防穿越校验：拒绝绝对路径与 ``..`` 段，解析后必须仍在 workspace 内；
+    鉴权复用 agents 路由的 bearer 依赖。
+    """
+    manager = services.get_agent_manager_for_agent(agent_id)
+    agent = manager._check_and_update_agent_status_if_needed(agent_id)
+
+    requested = Path(path)
+    if requested.is_absolute() or ".." in requested.parts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file path.",
+        )
+    resolved = resolve_within_workspace(agent.workspace_path, path)
+    if resolved is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Path escapes workspace.",
+        )
+    if not resolved.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found.",
+        )
+    media_type = mimetypes.guess_type(str(resolved))[0]
+    if download:
+        return FileResponse(
+            resolved,
+            media_type=media_type,
+            filename=resolved.name,
+            headers=_EXTRA_FILE_RESPONSE_HEADERS,
+        )
+    return FileResponse(
+        resolved, media_type=media_type, headers=_EXTRA_FILE_RESPONSE_HEADERS
     )
 
 

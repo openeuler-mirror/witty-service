@@ -216,9 +216,27 @@ def _format_utc_datetime(dt: datetime) -> str | None:
     return dt.isoformat().replace("+00:00", "Z")
 
 
+def _artifact_item_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """把 ``artifact.*`` 事件 payload 组装为消息 ``artifacts`` 条目（camelCase）。"""
+    item: dict[str, Any] = {
+        "id": payload.get("id"),
+        "name": payload.get("name"),
+        "type": payload.get("type"),
+        "status": payload.get("status"),
+        "version": payload.get("version", 1),
+        "relativePath": payload.get("relative_path"),
+        "size": payload.get("size"),
+        "mime": payload.get("mime"),
+    }
+    if payload.get("content") is not None:
+        item["content"] = payload["content"]
+    return item
+
+
 def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[str, Any]:
     tool_calls: list[dict[str, Any]] = []
     tool_calls_by_id: dict[str, dict[str, Any]] = {}
+    artifacts: dict[str, dict[str, Any]] = {}
     thinking: list[str] = []
     usage: dict[str, Any] | None = None
     event_items: list[dict[str, Any]] = []
@@ -322,6 +340,19 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
                 "question_id": question_id,
             }
 
+        elif evt.event_type in (
+            "artifact.started",
+            "artifact.delta",
+            "artifact.completed",
+        ):
+            artifact = _artifact_item_from_payload(payload)
+            if artifact.get("id"):
+                artifacts[artifact["id"]] = {
+                    **artifacts.get(artifact["id"], {}),
+                    **artifact,
+                }
+                item["artifact"] = artifact
+
         event_items.append(item)
 
     msg_status = (
@@ -377,6 +408,8 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
         result["questionStatus"] = question_status
     if question_answers is not None:
         result["questionAnswers"] = question_answers
+    if artifacts:
+        result["artifacts"] = list(artifacts.values())
     return result
 
 
@@ -1006,7 +1039,7 @@ class SqliteRepository:
                     .filter(
                         MessageEventORM.message_id == message_id,
                         MessageEventORM.event_type.in_(
-                            ["message.delta", "thinking.delta"]
+                            ["message.delta", "thinking.delta", "tool.call.delta"]
                         ),
                     )
                     .limit(BATCH)

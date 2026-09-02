@@ -8,6 +8,11 @@ from enum import StrEnum
 from typing import Any, Literal, NotRequired, TypedDict
 
 from witty_agent_server.infra.clients.base import ClientBase
+from witty_agent_server.runtimes.artifact_detector import (
+    artifact_completed_event,
+    artifact_started_event,
+    extract_write_arguments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +20,9 @@ logger = logging.getLogger(__name__)
 # "dsh"：DshRuntime 已实现事件映射层，但 RuntimeFactory 装配
 # （create_dsh_bundle）属后续 PR，该类型值暂不可经工厂构建。
 RuntimeType = Literal["openclaw", "opencode", "dsh"]
+
+# 会产出 ``artifact.*`` 事件的工具名（统一由 ``_on_artifact_event`` 检测）。
+WRITE_TOOL_NAME = "write"
 
 
 class TurnEventType(StrEnum):
@@ -29,6 +37,9 @@ class TurnEventType(StrEnum):
     TOOL_CALL_STARTED = "tool.call.started"
     TOOL_CALL_DELTA = "tool.call.delta"
     TOOL_CALL_RESPONSE = "tool.call.response"
+    ARTIFACT_STARTED = "artifact.started"
+    ARTIFACT_DELTA = "artifact.delta"
+    ARTIFACT_COMPLETED = "artifact.completed"
     SESSION_USAGE = "session.usage"
     SESSION_RUNTIME_CHANGED = "session.runtime.changed"
     STREAM_ERROR = "stream.error"
@@ -70,11 +81,15 @@ class RuntimeBase(ABC):
         - ``_on_turn_begin()`` — 每轮开始时的状态初始化
         - ``_on_raw_event()`` — 每条原始事件映射前的预处理
         - ``_on_mapped_event()`` — 每条已去重的统一事件的后处理
+        - ``_on_artifact_event()`` — 按统一契约产出 ``artifact.*`` 事件
+        （默认实现即可，子类一般无需覆盖）
         """
         seen_started: set[str] = set()
         last_usage: dict[str, Any] | None = None
         client = self._ensure_client()
 
+        # 每轮独立的 write 工具参数缓存（供 completed 阶段构建 artifact）。
+        self._turn.artifact_inputs_by_call_id: dict[str, dict[str, Any]] = {}
         self._on_turn_begin(session_key, message)
 
         for raw in client.stream_turn(session_key=session_key, message=message):
@@ -95,6 +110,7 @@ class RuntimeBase(ABC):
                         last_usage = dict(payload)
 
                 yield from self._on_mapped_event(event)
+                yield from self._on_artifact_event(event)
 
     @abstractmethod
     def _map_events(self, raw: dict[str, Any]) -> Iterator[RuntimeTurnEvent]:
@@ -122,6 +138,49 @@ class RuntimeBase(ABC):
         Per-turn 状态应通过 ``self._turn`` 读写。
         """
         yield event
+
+    def _on_artifact_event(self, event: RuntimeTurnEvent) -> Iterator[RuntimeTurnEvent]:
+        """按统一契约检测 ``write`` 工具并产出 ``artifact.*`` 事件（默认实现）。
+
+        ``started`` 阶段把 ``write`` 参数（含 content）缓存到 per-turn 的
+        ``self._turn.artifact_inputs_by_call_id``（按 tool_call_id），供
+        ``completed`` 阶段内联构建；``response`` 阶段据 ``is_error`` 判断状态。
+        """
+        event_type = event.get("type")
+        payload = event.get("payload") or {}
+        # response 用 name，started 用 tool_name —— 统一读取。
+        tool_name = payload.get("name") or payload.get("tool_name")
+        if tool_name != WRITE_TOOL_NAME:
+            return
+
+        if event_type == TurnEventType.TOOL_CALL_STARTED:
+            arguments = payload.get("arguments")
+            call_id = payload.get("tool_call_id") or ""
+            # 统一经 extract_write_arguments 归一化后再缓存/再判定，确保 JSON
+            # 字符串形式的 arguments 也能在 completed 阶段复用同一份 dict，
+            # 避免只发 started 而丢 completed。
+            write_args = extract_write_arguments(arguments)
+            if write_args:
+                self._turn.artifact_inputs_by_call_id[call_id] = write_args
+            artifact_payload = artifact_started_event(write_args)
+            if artifact_payload is not None:
+                yield {
+                    "type": TurnEventType.ARTIFACT_STARTED,
+                    "payload": artifact_payload,
+                }
+            return
+
+        if event_type == TurnEventType.TOOL_CALL_RESPONSE:
+            call_id = payload.get("tool_call_id") or ""
+            write_args = self._turn.artifact_inputs_by_call_id.get(call_id, {})
+            artifact_payload = artifact_completed_event(
+                write_args, is_error=bool(payload.get("is_error"))
+            )
+            if artifact_payload is not None:
+                yield {
+                    "type": TurnEventType.ARTIFACT_COMPLETED,
+                    "payload": artifact_payload,
+                }
 
     def create_session(self, *, session_key: str) -> None:
         """创建 runtime 侧会话。"""

@@ -454,6 +454,86 @@ def test_tool_result_without_prior_call_uses_unknown_name() -> None:
     ]
 
 
+# ---------------------------------------------------------------------------
+# write 工具 → artifact.* 事件
+# ---------------------------------------------------------------------------
+
+_WRITE_ARGS = '{"file_path": "output/demo.html", "content": "<h1>hi</h1>"}'
+
+
+def _write_result_raw(*, is_error: bool = False) -> dict[str, Any]:
+    return _notification(
+        "s1",
+        "tool/result",
+        {
+            "message": {
+                "source": {"kind": "tool", "callId": "call-1"},
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "content": [
+                            {"type": "text", "text": "boom" if is_error else "written"}
+                        ],
+                        "isError": is_error,
+                    }
+                ],
+            }
+        },
+    )
+
+
+def test_tool_call_write_maps_to_started_with_arguments() -> None:
+    events = list(
+        DshRuntime._map_dsh_event(
+            _notification(
+                "s1",
+                "tool/call",
+                {"callId": "call-1", "name": "write", "arguments": _WRITE_ARGS},
+            ),
+            session_id="s1",
+        )
+    )
+    # artifact.* 事件已上收到 RuntimeBase._on_artifact_event（见 test_runtime_artifact_event.py），
+    # 静态映射层只负责标准 tool.call.*。
+    assert [e["type"] for e in events] == ["tool.call.started"]
+    started = events[0]["payload"]
+    assert started["stage"] == "started"
+    assert started["tool_name"] == "write"
+    assert started["arguments"] == {
+        "file_path": "output/demo.html",
+        "content": "<h1>hi</h1>",
+    }
+
+
+def test_tool_result_write_maps_to_response_with_content() -> None:
+    events = list(
+        DshRuntime._map_dsh_event(
+            _write_result_raw(),
+            session_id="s1",
+            tool_names_by_call_id={"call-1": "write"},
+        )
+    )
+    assert [e["type"] for e in events] == ["tool.call.response"]
+    response = events[0]["payload"]
+    assert response["stage"] == "response"
+    assert response["name"] == "write"
+    assert response["content"] == "written"
+    assert response["is_error"] is False
+
+
+def test_tool_result_write_error_marks_response_error() -> None:
+    events = list(
+        DshRuntime._map_dsh_event(
+            _write_result_raw(is_error=True),
+            session_id="s1",
+            tool_names_by_call_id={"call-1": "write"},
+        )
+    )
+    response = events[0]["payload"]
+    assert response["is_error"] is True
+    assert response["content"] == "boom"
+
+
 def test_turn_end_completed_maps_to_turn_completed_only() -> None:
     raw = _notification("s1", "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
 

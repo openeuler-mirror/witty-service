@@ -350,3 +350,82 @@ def test_run_turn_empty_thinking_filtered_by_extractor() -> None:
         "thinking.delta",
         "tool.call.started",
     ]
+
+
+# ---------------------------------------------------------------------------
+# write 工具 → artifact.* 事件
+# ---------------------------------------------------------------------------
+
+
+def _tool_stream_event(
+    *,
+    phase: str,
+    **data: Any,
+) -> dict[str, Any]:
+    return {
+        "type": "agent",
+        "payload": {
+            "stream": "tool",
+            "data": {"phase": phase, "toolName": "write", "toolCallId": "call-1", **data},
+        },
+    }
+
+
+def _write_turn_events(*, args: dict[str, Any], is_error: bool = False) -> list[dict[str, Any]]:
+    runtime = OpenClawGatewayRuntime(
+        client=StubGatewayClient(
+            [
+                _tool_stream_event(phase="start", args=args),
+                _tool_stream_event(
+                    phase="result",
+                    isError=is_error,
+                    result={"content": "wrote", "details": {"exitCode": 1 if is_error else 0}},
+                ),
+            ]
+        )
+    )
+    return list(runtime.run_turn(session_key="session-key", message="hello"))
+
+
+def test_run_turn_emits_artifact_events_for_write_tool() -> None:
+    events = _write_turn_events(
+        args={"file_path": "output/demo.html", "content": "<h1>hi</h1>"}
+    )
+
+    assert [e["type"] for e in events] == [
+        "tool.call.started",
+        "artifact.started",
+        "tool.call.response",
+        "artifact.completed",
+    ]
+    started = events[1]["payload"]
+    assert started["id"] == "output/demo.html"
+    assert started["status"] == "creating"
+    assert started["mime"] == "text/html"
+    assert "content" not in started
+    completed = events[3]["payload"]
+    assert completed["status"] == "ready"
+    assert completed["content"] == "<h1>hi</h1>"
+    assert completed["size"] == len("<h1>hi</h1>")
+
+
+def test_run_turn_write_failure_emits_artifact_error() -> None:
+    events = _write_turn_events(
+        args={"file_path": "output/demo.html", "content": "<h1>hi</h1>"},
+        is_error=True,
+    )
+
+    assert [e["type"] for e in events][-1] == "artifact.completed"
+    assert events[-1]["payload"]["status"] == "error"
+    assert "content" not in events[-1]["payload"]
+
+
+def test_run_turn_ignores_write_with_non_whitelisted_extension() -> None:
+    events = _write_turn_events(
+        args={"file_path": "src/main.txt", "content": "plain text"}
+    )
+
+    assert [e["type"] for e in events] == [
+        "tool.call.started",
+        "tool.call.response",
+    ]

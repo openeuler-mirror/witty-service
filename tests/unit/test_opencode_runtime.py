@@ -40,7 +40,7 @@ class _RecordingClient(ClientBase):
     def abort_session(self, *, session_key: str) -> None:
         self.calls.append(("abort_session", {"session_key": session_key}))
 
-    def stream_turn(self, *, session_key: str, message: str): 
+    def stream_turn(self, *, session_key: str, message: str):
         raise NotImplementedError
 
 
@@ -242,6 +242,142 @@ def test_map_opencode_event_question_asked_missing_id_yields_stream_error() -> N
     assert len(events) == 1
     assert events[0]["type"] == "stream.error"
     assert events[0]["payload"]["error"] == raw
+
+
+# =============================================================================
+# write 工具 → artifact.* 事件
+# =============================================================================
+
+
+class _StreamingClient(_RecordingClient):
+    def __init__(self, events: list[dict[str, Any]]) -> None:
+        self._events = events
+
+    def stream_turn(self, *, session_key: str, message: str):
+        del session_key, message
+        yield from self._events
+
+
+def _write_part(
+    *,
+    status: str,
+    output: str = "",
+    is_error: bool = False,
+) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "status": status,
+        "input": {"file_path": "output/demo.html", "content": "<h1>hi</h1>"},
+    }
+    if status in ("completed", "error"):
+        state["output"] = output
+        state["metadata"] = {"exit": -1 if is_error else 0}
+    elif status == "running" and output:
+        state["metadata"] = {"output": output}
+    return {
+        "type": "message.part.updated",
+        "part": {
+            "type": "tool",
+            "id": "part-1",
+            "callID": "call-1",
+            "tool": "write",
+            "state": state,
+        },
+    }
+
+
+def _write_turn_events(*, is_error: bool = False) -> list[dict[str, Any]]:
+    runtime = OpenCodeRuntime(
+        client=_StreamingClient(
+            [
+                _write_part(status="running"),
+                _write_part(
+                    status="error" if is_error else "completed",
+                    output="boom" if is_error else "wrote output/demo.html",
+                    is_error=is_error,
+                ),
+                {"type": "session.idle"},
+            ]
+        )
+    )
+    return list(runtime.run_turn(session_key="session-key", message="hello"))
+
+
+def test_run_turn_emits_artifact_events_for_write_tool() -> None:
+    events = _write_turn_events()
+
+    assert [e["type"] for e in events] == [
+        "tool.call.started",
+        "artifact.started",
+        "tool.call.response",
+        "artifact.completed",
+        "turn.completed",
+    ]
+    started = events[1]["payload"]
+    assert started["id"] == "output/demo.html"
+    assert started["status"] == "creating"
+    assert "content" not in started
+    completed = events[3]["payload"]
+    assert completed["status"] == "ready"
+    assert completed["content"] == "<h1>hi</h1>"
+    assert completed["size"] == len("<h1>hi</h1>")
+
+
+def test_run_turn_write_error_marks_artifact_error() -> None:
+    events = _write_turn_events(is_error=True)
+
+    assert events[3]["type"] == "artifact.completed"
+    assert events[3]["payload"]["status"] == "error"
+    assert "content" not in events[3]["payload"]
+
+
+def test_run_turn_write_with_streaming_output_still_emits_artifact_events() -> None:
+    # running 阶段即使带增量输出，也必须先发 started（否则拿不到 input，
+    # 统一 artifact 钩子会丢失 artifact.* 事件）。
+    runtime = OpenCodeRuntime(
+        client=_StreamingClient(
+            [
+                _write_part(status="running", output="partial output"),
+                _write_part(status="completed", output="wrote output/demo.html"),
+                {"type": "session.idle"},
+            ]
+        )
+    )
+    events = list(runtime.run_turn(session_key="session-key", message="hello"))
+
+    assert [e["type"] for e in events] == [
+        "tool.call.started",
+        "artifact.started",
+        "tool.call.response",
+        "artifact.completed",
+        "turn.completed",
+    ]
+    completed = events[3]["payload"]
+    assert completed["status"] == "ready"
+    assert completed["content"] == "<h1>hi</h1>"
+
+
+def test_run_turn_write_streams_delta_after_started() -> None:
+    # 已发过 started 后，带增量输出的后续 running 事件应走 tool.call.delta。
+    runtime = OpenCodeRuntime(
+        client=_StreamingClient(
+            [
+                _write_part(status="running"),
+                _write_part(status="running", output="partial output"),
+                _write_part(status="completed", output="wrote output/demo.html"),
+                {"type": "session.idle"},
+            ]
+        )
+    )
+    events = list(runtime.run_turn(session_key="session-key", message="hello"))
+
+    assert [e["type"] for e in events] == [
+        "tool.call.started",
+        "artifact.started",
+        "tool.call.delta",
+        "tool.call.response",
+        "artifact.completed",
+        "turn.completed",
+    ]
 
 
 # =============================================================================
