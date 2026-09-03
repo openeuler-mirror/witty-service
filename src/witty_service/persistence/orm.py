@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy import (
     Enum as SQLEnum,
@@ -255,6 +256,17 @@ class AgentLockORM(Base):
 
 class ModelORM(Base):
     __tablename__ = "models"
+
+    # B1: 至多一个模型 is_default=1 的 DB 级约束(部分唯一索引)。
+    # 需要"先清后写"配合(见 SqliteRepository._clear_other_default_models)。
+    __table_args__ = (
+        Index(
+            "uq_models_single_default",
+            "is_default",
+            unique=True,
+            sqlite_where=text("is_default = 1"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
