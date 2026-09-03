@@ -31,7 +31,6 @@ class RuntimeLifecyclePort(Protocol):
 
 @runtime_checkable
 class OpenClawLifecycleControlPort(RuntimeLifecyclePort, Protocol):
-
     def update_config(
         self, *, profile: str | None, gateway_port: int | None
     ) -> None: ...
@@ -73,6 +72,20 @@ class OpenCodeLifecycleControlPort(RuntimeLifecyclePort, Protocol):
     def mcp_set(self, name: str, config: dict[str, object]) -> None: ...
 
     def mcp_unset(self, name: str) -> None: ...
+
+
+@runtime_checkable
+class DshLifecycleControlPort(RuntimeLifecyclePort, Protocol):
+    def update_config(
+        self,
+        *,
+        agent_id: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        max_tokens: int | None = None,
+    ) -> None: ...
 
 
 @runtime_checkable

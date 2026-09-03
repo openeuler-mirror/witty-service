@@ -148,21 +148,44 @@ class DshClient(ClientBase):
         if changed:
             self._detach_harness()
 
+    def reset_model_config(self) -> None:
+        """将模型配置复位为默认值（切换 agent 时调用），防止上一 agent 的
+        凭据被沿用；任一字段真实变更即 detach 旧 harness。"""
+        updates = {
+            "_provider": _DEFAULT_PROVIDER,
+            "_model": _DEFAULT_MODEL,
+            "_api_key": None,
+            "_base_url": None,
+            "_max_tokens": None,
+        }
+        changed = False
+        for attr, value in updates.items():
+            if value != getattr(self, attr):
+                setattr(self, attr, value)
+                changed = True
+        if changed:
+            self._detach_harness()
+
     def ensure_harness(self) -> DeepSeekHarness:
-        """按当前配置懒建 harness（不 start；start 由 lifecycle 触发）。"""
-        if self._harness is None:
-            self._harness = DeepSeekHarness(
-                DeepSeekHarnessConfig(
-                    cwd=self._workspace_dir,
-                    session_root=self._session_root,
-                    provider=self._provider,
-                    model=self._model,
-                    max_tokens=self._max_tokens,
-                    api_key=self._api_key,
-                    base_url=self._base_url,
+        """按当前配置懒建 harness（不 start；start 由 lifecycle 触发）。
+
+        懒建是 check-then-act，持 ``_harness_lock`` 防并发 ensure 各自
+        建 harness 导致已建 harness（含已 start 的子进程）泄漏。
+        """
+        with self._harness_lock:
+            if self._harness is None:
+                self._harness = DeepSeekHarness(
+                    DeepSeekHarnessConfig(
+                        cwd=self._workspace_dir,
+                        session_root=self._session_root,
+                        provider=self._provider,
+                        model=self._model,
+                        max_tokens=self._max_tokens,
+                        api_key=self._api_key,
+                        base_url=self._base_url,
+                    )
                 )
-            )
-        return self._harness
+            return self._harness
 
     def close_harness(self) -> None:
         """关闭并丢弃当前 harness 及待回收 harness（stop 时调用；尽力而为）。"""
