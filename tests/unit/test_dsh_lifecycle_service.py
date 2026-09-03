@@ -112,16 +112,17 @@ def test_update_config_derives_instance_paths_and_pushes_to_client(
     svc, client = _make_lifecycle(monkeypatch, tmp_path, agent_id=None)
     svc.update_config(agent_id="a1", model="deepseek-x", max_tokens=4096)
 
-    instance_root = tmp_path / "dsh-instances" / "a1"
-    assert client._workspace_dir == str(instance_root / "workspace")
-    assert client._session_root == str(instance_root / "sessions")
+    assert client._workspace_dir == str(
+        (tmp_path / "agent-workspaces" / "a1" / "workspace").resolve()
+    )
+    assert client._session_root == str(tmp_path / "dsh-instances" / "a1" / "sessions")
     assert client._model == "deepseek-x"
     assert client._max_tokens == 4096
 
 
 @pytest.mark.parametrize(
     "bad_agent_id",
-    ["../evil", "a/b", "/abs/path", "..", ".", "a b", "a\\b"],
+    ["../evil", "a/b", "/abs/path", "..", ".", "a\\b"],
 )
 def test_update_config_rejects_unsafe_agent_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_agent_id: str
@@ -153,7 +154,9 @@ def test_update_config_change_detaches_running_harness(
     svc.start_server()  # 下次 start 用新配置重建
     new_harness = client.harness
     assert new_harness is not None and new_harness is not old_harness
-    assert client._workspace_dir == str(tmp_path / "dsh-instances" / "a2" / "workspace")
+    assert client._workspace_dir == str(
+        (tmp_path / "agent-workspaces" / "a2" / "workspace").resolve()
+    )
 
 
 def test_update_config_switch_agent_resets_model_credentials(
@@ -168,7 +171,9 @@ def test_update_config_switch_agent_resets_model_credentials(
 
     assert client._api_key is None
     assert client._model == "deepseek-v4-flash"
-    assert client._workspace_dir == str(tmp_path / "dsh-instances" / "a2" / "workspace")
+    assert client._workspace_dir == str(
+        (tmp_path / "agent-workspaces" / "a2" / "workspace").resolve()
+    )
 
 
 def test_update_config_with_unchanged_values_keeps_harness(
@@ -192,9 +197,8 @@ def test_start_server_creates_dirs_and_starts_harness(
     svc, client = _make_lifecycle(monkeypatch, tmp_path)
     svc.start_server()
 
-    instance_root = tmp_path / "dsh-instances" / "a1"
-    assert (instance_root / "workspace").is_dir()
-    assert (instance_root / "sessions").is_dir()
+    assert (tmp_path / "agent-workspaces" / "a1" / "workspace").is_dir()
+    assert (tmp_path / "dsh-instances" / "a1" / "sessions").is_dir()
     harness = client.harness
     assert harness is not None
     assert harness.start_calls == 1
@@ -435,6 +439,26 @@ def test_agent_service_start_sanitizes_api_key_from_config() -> None:
     assert svc.update_calls == [
         {"agent_id": "agent-sec", "model": "deepseek-x", "api_key": "sk-secret"}
     ]
+
+
+def test_agent_service_start_sanitizes_model_api_key_from_config() -> None:
+    """落库的 agent.config 同时剥离 model.api_key（model 子对象也含凭据）。"""
+    svc = FakeDshLifecycle(probe_returns=[True])
+    service = DshAgentService(lifecycle_service=svc)
+
+    service.start(
+        agent_id="agent-sec-model",
+        config={
+            "dsh": {"model": "deepseek-x"},
+            "model": {"name": "deepseek-x", "api_key": "sk-model-secret"},
+        },
+        reload=False,
+    )
+
+    assert service.agent.config == {
+        "dsh": {"model": "deepseek-x"},
+        "model": {"name": "deepseek-x"},
+    }
 
 
 def test_agent_service_start_without_config_still_pushes_agent_id() -> None:

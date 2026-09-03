@@ -3,10 +3,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import ClassVar
 
+from witty_agent_server.adapters.openclaw_adapter import create_openclaw_runtime
+from witty_agent_server.adapters.runtime_registry import RuntimeRegistry
 from witty_agent_server.application.materialization.openclaw_materializer import (
     OpenClawSpecMaterializer,
 )
 from witty_agent_server.application.runtime_bundle import RuntimeBundle
+from witty_agent_server.application.services.agent.dsh_agent_service import (
+    DshAgentService,
+)
+from witty_agent_server.application.services.agent.dsh_lifecycle_service import (
+    DshLifecycleService,
+)
 from witty_agent_server.application.services.agent.openclaw_agent_service import (
     OpenClawAgentService,
 )
@@ -19,11 +27,17 @@ from witty_agent_server.application.services.agent.opencode_agent_service import
 from witty_agent_server.application.services.agent.opencode_lifecycle_service import (
     OpenCodeLifecycleService,
 )
+from witty_agent_server.application.services.session.dsh_session_service import (
+    DshSessionService,
+)
 from witty_agent_server.application.services.session.openclaw_session_service import (
     OpenClawSessionService,
 )
 from witty_agent_server.application.services.session.opencode_session_service import (
     OpenCodeSessionService,
+)
+from witty_agent_server.application.services.skill.dsh_skill_service import (
+    DshSkillService,
 )
 from witty_agent_server.application.services.skill.openclaw_skill_client import (
     OpenClawSkillClient,
@@ -34,11 +48,13 @@ from witty_agent_server.application.services.skill.openclaw_skill_service import
 from witty_agent_server.application.services.skill.opencode_skill_service import (
     OpenCodeSkillService,
 )
-from witty_agent_server.adapters.openclaw_adapter import create_openclaw_runtime
-from witty_agent_server.adapters.runtime_registry import RuntimeRegistry
+from witty_agent_server.infra.clients.dsh_client import DshClient
+from witty_agent_server.infra.clients.openclaw_gateway_client import (
+    OpenClawGatewayClient,
+)
 from witty_agent_server.infra.clients.opencode_client import OpenCodeClient
 from witty_agent_server.infra.persistence.in_memory import InMemorySessionRepository
-from witty_agent_server.infra.clients.openclaw_gateway_client import OpenClawGatewayClient
+from witty_agent_server.runtimes.dsh_runtime import DshRuntime
 from witty_agent_server.runtimes.opencode_runtime import OpenCodeRuntime
 from witty_agent_server.runtimes.runtime_base import RuntimeType
 
@@ -138,9 +154,47 @@ class RuntimeFactory:
             materializer=None,
         )
 
+    @staticmethod
+    def create_dsh_bundle(
+        *,
+        client: DshClient | None = None,
+        lifecycle_service: DshLifecycleService | None = None,
+    ) -> RuntimeBundle:
+        shared_client = client or DshClient()
+        shared_lifecycle = lifecycle_service or DshLifecycleService(
+            client=shared_client
+        )
+
+        agent_service = DshAgentService(
+            lifecycle_service=shared_lifecycle,
+            client=shared_client,
+        )
+
+        runtime_registry = RuntimeRegistry()
+        repository = InMemorySessionRepository()
+        session_service = DshSessionService(
+            runtime_registry=runtime_registry,
+            repository=repository,
+        )
+        runtime = DshRuntime(client=shared_client)
+        session_service.register_runtime(runtime)
+
+        skill_service = DshSkillService()
+
+        return RuntimeBundle(
+            runtime_type="dsh",
+            runtime=runtime,
+            agent_service=agent_service,
+            session_service=session_service,
+            skill_service=skill_service,
+            lifecycle_service=shared_lifecycle,
+            materializer=None,
+        )
+
 
 RuntimeFactory.register("openclaw", RuntimeFactory.create_openclaw_bundle)
 RuntimeFactory.register("opencode", RuntimeFactory.create_opencode_bundle)
+RuntimeFactory.register("dsh", RuntimeFactory.create_dsh_bundle)
 
 
 __all__ = ["RuntimeFactory"]

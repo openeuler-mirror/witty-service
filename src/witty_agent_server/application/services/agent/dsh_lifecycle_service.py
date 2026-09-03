@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -10,12 +9,9 @@ from deepseek_harness.errors import HarnessError
 
 from witty_agent_server.infra.clients.dsh_client import DshClient
 from witty_service.config import get_settings
+from witty_service.workspace_paths import agent_workspace_path, validate_agent_id
 
 logger = logging.getLogger(__name__)
-
-# agent_id 作为实例目录路径片段：仅允许 slug 白名单（字母数字开头，
-# 后续字母数字 / 下划线 / 连字符），杜绝 "../"、"/" 等路径穿越。
-_AGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 class DshLifecycleError(Exception):
@@ -60,14 +56,13 @@ class DshLifecycleService:
         detach 语义即「若在运行则 stop，下次 start 用新配置」。
         """
         if agent_id:
-            if not _AGENT_ID_PATTERN.fullmatch(agent_id):
+            try:
+                validate_agent_id(agent_id)
+            except ValueError as exc:
                 raise DshLifecycleError(
                     action="update_config",
-                    message=(
-                        f"invalid agent_id {agent_id!r}: must match "
-                        r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
-                    ),
-                )
+                    message=f"invalid agent_id {agent_id!r}: {exc}",
+                ) from exc
             if agent_id != self._agent_id:
                 # 切换 agent：先复位模型配置，防止上一 agent 的凭据串用。
                 self._client.reset_model_config()
@@ -172,13 +167,26 @@ class DshLifecycleService:
                 )
 
     def _derive_instance_paths(self) -> tuple[Path, Path] | None:
-        """按 agent_id 推导 dsh 实例目录（workspace / sessions）。"""
+        """按 agent_id 推导 dsh 实例目录（workspace / sessions）。
+
+        ``workspace`` 与 ``agent.workspace_path``（单一事实来源
+        ``agent_workspace_path``）同源，使 dsh ``write`` 工具产物落入
+        artifact 归一化 / 工作区文件端点所校验的同一工作区；``sessions``
+        （会话 JSONL 转录）属运行时状态，与 opencode 的 data/state/cache
+        同理，不进入 AI 工作区，仍按 dsh 实例目录隔离。
+        """
         if not self._agent_id:
             return None
-        instance_root = (
-            get_settings().workspace.root_path() / "dsh-instances" / self._agent_id
+        workspace = agent_workspace_path(
+            self._agent_id, root=get_settings().workspace.root_path()
         )
-        return instance_root / "workspace", instance_root / "sessions"
+        session_root = (
+            get_settings().workspace.root_path()
+            / "dsh-instances"
+            / self._agent_id
+            / "sessions"
+        )
+        return workspace, session_root
 
 
 __all__: Sequence[str] = ("DshLifecycleError", "DshLifecycleService")

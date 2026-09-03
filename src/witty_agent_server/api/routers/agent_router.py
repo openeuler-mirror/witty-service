@@ -5,6 +5,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
 from witty_agent_server.application.models.errors import ErrorResponse
 from witty_agent_server.application.services.agent import (
     AgentService,
@@ -14,7 +15,6 @@ from witty_agent_server.application.services.skill.base import AgentSkillService
 from witty_agent_server.application.services.skill.errors import (
     AgentSkillServiceError,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,8 @@ def create_agent_router(
                 "mcp_server_name": body.get("mcp_server_name"),
                 "mcp_server_config": body.get("mcp_server_config"),
                 "openclaw": body.get("openclaw"),
-                "opencode": body.get("opencode")
+                "opencode": body.get("opencode"),
+                "dsh": body.get("dsh"),
             }
             response = agent_service.start(
                 agent_id=id,
@@ -269,7 +270,7 @@ def create_agent_router(
             body = await request.json()
             mcp_server_name = body.get("mcp_server_name")
             mcp_server_config = body.get("mcp_server_config")
-            
+
             resolved_agent_id = _resolve_request_agent_id(
                 agent_service=agent_service,
                 agent_id=id,
@@ -302,7 +303,7 @@ def create_agent_router(
         try:
             body = await request.json()
             mcp_server_name = body.get("mcp_server_name")
-            
+
             resolved_agent_id = _resolve_request_agent_id(
                 agent_service=agent_service,
                 agent_id=id,
