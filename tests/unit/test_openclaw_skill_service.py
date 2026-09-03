@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,6 +13,7 @@ from witty_agent_server.application.services.skill.errors import (
 from witty_agent_server.application.services.skill.openclaw_skill_service import (
     OpenClawSkillService,
 )
+from witty_service import workspace_paths as resolver_mod
 
 
 def test_install_skill_returns_runtime_file_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -35,6 +36,10 @@ def test_install_skill_returns_runtime_file_path(monkeypatch: pytest.MonkeyPatch
     )
     monkeypatch.setattr(subprocess, "run", run_mock)
     monkeypatch.setattr(Path, "home", lambda: home)
+    # 控制 workspace 根，使 env 注入可预测
+    mock_settings = MagicMock()
+    mock_settings.workspace.root_path.return_value = home
+    monkeypatch.setattr(resolver_mod, "get_settings", lambda: mock_settings)
 
     result = OpenClawSkillService(skill_client=skill_client).install_skill(
         agent_id="agent-1",
@@ -42,12 +47,20 @@ def test_install_skill_returns_runtime_file_path(monkeypatch: pytest.MonkeyPatch
     )
 
     assert result["filePath"] == str(installed_file_path)
-    run_mock.assert_called_once_with(
-        ["openclaw", "skills", "install", "4claw", "--profile", "agent-1"],
-        check=True,
-        capture_output=True,
-        text=True,
-        cwd=home,
+    run_mock.assert_called_once()
+    call_kwargs = run_mock.call_args.kwargs
+    assert call_kwargs["check"] is True
+    assert call_kwargs["cwd"] == home
+    assert run_mock.call_args.args[0] == [
+        "openclaw",
+        "skills",
+        "install",
+        "4claw",
+        "--profile",
+        "agent-1",
+    ]
+    assert call_kwargs["env"]["OPENCLAW_WORKSPACE_DIR"] == str(
+        (home / "agent-workspaces" / "agent-1" / "workspace").resolve()
     )
     skill_client.get_skills_status.assert_called_once_with(agent_id="agent-1")
 

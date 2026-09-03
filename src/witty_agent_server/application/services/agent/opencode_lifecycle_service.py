@@ -20,9 +20,12 @@ from witty_agent_server.application.services.agent._process_utils import (
     port_is_listening,
     start_stderr_drainer,
 )
-from witty_agent_server.infra.clients.opencode_client import OpenCodeClient, OpenCodeClientError
+from witty_agent_server.infra.clients.opencode_client import (
+    OpenCodeClient,
+    OpenCodeClientError,
+)
 from witty_service.config import get_settings
-
+from witty_service.workspace_paths import agent_workspace_path
 
 logger = logging.getLogger(__name__)
 
@@ -227,8 +230,7 @@ class OpenCodeLifecycleService:
         """返回 XDG_CONFIG_HOME 路径"""
         if not self._profile:
             return None
-        workspace_root = get_settings().workspace.root_path()
-        return workspace_root / "agent-workspaces" / self._profile / "workspace"
+        return agent_workspace_path(self._profile)
 
     def _opencode_config_path(self) -> Path | None:
         """返回 opencode 配置文件完整路径。
@@ -434,7 +436,7 @@ class OpenCodeLifecycleService:
 
     def stop(self) -> None:
         """优雅停止：``POST /instance/dispose`` → ``Popen.terminate()`` 兜底。
-        
+
         不变量：调用结束时分机进程**必须**已终止；若 dispose 与 fallback
         终止都未能杀死进程，显式 raise ``OpenCodeLifecycleError``。
         """
@@ -500,7 +502,7 @@ class OpenCodeLifecycleService:
 
         workspace_root = get_settings().workspace.root_path()
         inst_root = workspace_root / "opencode-instances" / profile
-        config_home = workspace_root / "agent-workspaces" / profile / "workspace"
+        config_home = agent_workspace_path(profile, root=workspace_root)
 
         xdg_dirs: dict[str, Path] = {
             "XDG_DATA_HOME": inst_root / "data",

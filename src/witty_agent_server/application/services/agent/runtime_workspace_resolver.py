@@ -3,7 +3,6 @@ from pathlib import Path
 from witty_agent_server.runtimes.runtime_base import RuntimeType
 from witty_service.config import get_settings
 
-
 AGENT_CONFIG_DIR_NAME = "agent-config"
 AGENT_SPEC_FILE_NAME = "agent-spec.yaml"
 OPENCLAW_TEMPLATE_FILE_NAME = "openclaw-template.json"

@@ -23,7 +23,7 @@ from witty_agent_server.application.services.skill.skill_client_port import (
 from witty_agent_server.infra.clients.openclaw_gateway_client import (
     OpenClawGatewayClientError,
 )
-
+from witty_service.workspace_paths import agent_workspace_path
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +41,16 @@ class OpenClawSkillService(AgentSkillServiceBase):
 
     @classmethod
     def _get_workspace_skills_dir(cls, agent_id: str | None) -> Path:
-        """获取 agent 专属的技能安装目录"""
+        """获取 agent 专属的技能安装目录（统一指向 witty agent workspace）"""
         if agent_id:
-            return Path.home() / ".openclaw" / f"workspace-{agent_id}" / "skills"
+            return cls._get_workspace_root(agent_id) / "skills"
         return cls.skills_dir
 
     @classmethod
     def _get_workspace_root(cls, agent_id: str | None) -> Path:
+        """Agent 专属 witty workspace（与 witty-service agent.workspace_path 同一约定）。"""
         if agent_id:
-            return Path.home() / ".openclaw" / f"workspace-{agent_id}"
+            return agent_workspace_path(agent_id)
         return cls.skills_dir.parent
 
     @classmethod
@@ -196,12 +197,21 @@ class OpenClawSkillService(AgentSkillServiceBase):
 
         install_target = source_path if source_path else skill_name
         is_local = self._is_local_path(install_target)
-        
+
         command = ["openclaw", "skills", "install", install_target]
-        
+
         if agent_id:
             command.extend(["--profile", agent_id])
-        
+
+        env = None
+        if agent_id:
+            env = {
+                **os.environ,
+                "OPENCLAW_WORKSPACE_DIR": str(
+                    self._get_workspace_root(agent_id)
+                ),
+            }
+
         try:
             result = subprocess.run(
                 command,
@@ -209,8 +219,9 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 capture_output=True,
                 text=True,
                 cwd=Path.home(),
+                env=env,
             )
-            
+
             logger.info(
                 "install_skill success, runtime_type=%s agent_id=%s target=%s stdout=%s",
                 self.runtime_type,
@@ -218,7 +229,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 install_target,
                 result.stdout.strip(),
             )
-            
+
             return {
                 "runtime_type": self.runtime_type,
                 "skill_name": skill_name,
@@ -230,7 +241,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
                     skill_name=skill_name,
                 ),
             }
-        
+
         except FileNotFoundError as exc:
             raise OpenClawSkillsInstallError(
                 runtime_type=self.runtime_type,
@@ -252,7 +263,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 skill_name=skill_name,
                 reason=str(exc),
             ) from exc
-    
+
     def _install_local_skill(self, skill_name: str, source_path: str) -> dict[str, Any]:
         src = Path(source_path).expanduser().resolve()
         try:
@@ -580,7 +591,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
     def _uninstall_local_skill(self, skill_name: str, agent_id: str | None = None) -> dict[str, Any]:
         skills_dir = self._get_workspace_skills_dir(agent_id)
         dst = skills_dir / skill_name
-        
+
         try:
             dst = self._validate_path_under_allowed_bases(dst, agent_id=agent_id)
         except ValueError as exc:
@@ -589,7 +600,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 skill_name=skill_name,
                 reason=str(exc),
             ) from exc
-        
+
         self._remove_path(dst)
 
         logger.info(

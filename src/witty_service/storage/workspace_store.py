@@ -3,6 +3,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from witty_service.workspace_paths import agent_workspace_path
+
 
 class WorkspaceStore:
     def __init__(
@@ -33,26 +35,8 @@ class WorkspaceStore:
             shutil.rmtree(workspace_path)
 
     def _agent_workspace_path(self, agent_id: str) -> Path:
-        self._validate_agent_id(agent_id)
-        workspace_path = self.base_dir / "agent-workspaces" / agent_id / "workspace"
-        resolved_workspace_path = workspace_path.resolve()
-        resolved_base_dir = self.base_dir.resolve()
-        if not resolved_workspace_path.is_relative_to(resolved_base_dir):
-            raise ValueError(f"Workspace path escapes base_dir: {agent_id!r}")
-        return workspace_path
-
-    @staticmethod
-    def _validate_agent_id(agent_id: str) -> None:
-        if not agent_id:
-            raise ValueError("agent_id must not be empty")
-        if agent_id in {".", ".."}:
-            raise ValueError(f"Invalid agent_id: {agent_id!r}")
-        if any(separator in agent_id for separator in ("/", "\\")):
-            raise ValueError(f"Invalid agent_id: {agent_id!r}")
-
-        agent_path = Path(agent_id)
-        if agent_path.is_absolute() or agent_path.parts != (agent_id,) or agent_path.name != agent_id:
-            raise ValueError(f"Invalid agent_id: {agent_id!r}")
+        # 路径推导与校验均委托给唯一事实来源 agent_workspace_path（含 validate_agent_id）。
+        return agent_workspace_path(agent_id, root=self.base_dir)
 
 
 class LocalWorkspaceStore(WorkspaceStore):

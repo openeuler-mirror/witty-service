@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,7 +12,7 @@ from witty_service.domain.agent_template import AgentTemplate, AgentTemplateSkil
 from witty_service.persistence.repositories import AgentRecord
 
 
-def _agent_record() -> AgentRecord:
+def _agent_record(workspace_path: str = "/tmp/agent-1") -> AgentRecord:
     now = datetime.now(UTC)
     return AgentRecord(
         id="agent-1",
@@ -21,7 +22,7 @@ def _agent_record() -> AgentRecord:
         adapter_type="http",
         status="running",
         sandbox_id=None,
-        workspace_path="/tmp/agent-1",
+        workspace_path=workspace_path,
         idle_timeout_seconds=300,
         model_id=None,
         mcp_server_list=[],
@@ -162,13 +163,11 @@ def test_repo_name_from_url(git_url: str, expected: str) -> None:
 def test_install_template_skills_records_inline_skill(tmp_path, monkeypatch) -> None:
     repo = MagicMock()
     service = AgentTemplateService(repo, MagicMock())
-    agent = _agent_record()
+    agent = _agent_record(workspace_path=str(tmp_path / "ws"))
     template = AgentTemplate(
         name="Template Agent",
         skills=[AgentTemplateSkill(name="helper", inline="# Helper")],
     )
-    home = tmp_path / "home"
-    monkeypatch.setattr("pathlib.Path.home", lambda: home)
     monkeypatch.setattr(
         "witty_service.application.agent_template_service.uuid.uuid4",
         lambda: "skill-id",
@@ -193,10 +192,5 @@ def test_install_template_skills_records_inline_skill(tmp_path, monkeypatch) -> 
         skill_md_url=None,
     )
     assert (
-        home
-        / ".openclaw"
-        / "workspace-agent-1"
-        / "skills"
-        / ".inline_skills"
-        / "helper.md"
+        Path(tmp_path / "ws") / "skills" / ".inline_skills" / "helper.md"
     ).exists()
