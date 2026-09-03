@@ -18,6 +18,7 @@ import yaml
 from witty_service.application.backport_cvekit_client import (
     BackportCvekitClient,
     BackportRuntimeConfig,
+    CvekitCommandError,
 )
 
 # ── 夹具 & 工具 ──────────────────────────────────────────────────
@@ -110,6 +111,85 @@ def test_redact_command(cmd: list[str], expected: list[str]) -> None:
 )
 def test_parse_json_output(raw: str, expected: dict) -> None:
     assert BackportCvekitClient._parse_json_output(raw) == expected
+
+
+def test_run_cvekit_preserves_structured_lock_error(
+    client: BackportCvekitClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "status": "failed",
+        "message": "TARGET_REPOSITORY_LOCK_TIMEOUT: busy with sk-test",
+        "error_code": "TARGET_REPOSITORY_LOCK_TIMEOUT",
+        "retryable": True,
+        "wait_seconds": 2.1,
+        "timeout_seconds": 2,
+    }
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0],
+            returncode=1,
+            stdout=json.dumps(payload),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(CvekitCommandError) as raised:
+        client._run_cvekit(["--action", "backport-batch", "--json"], tmp_path)
+
+    assert raised.value.error_code == "TARGET_REPOSITORY_LOCK_TIMEOUT"
+    assert raised.value.retryable is True
+    assert raised.value.wait_seconds == 2.1
+    assert raised.value.timeout_seconds == 2
+    assert "sk-test" not in str(raised.value)
+
+
+def test_build_env_forwards_only_configured_lock_settings(
+    client: BackportCvekitClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_settings = {
+        "CVEKIT_LOCK_DIR": "/tmp/cvekit-locks",
+        "CVEKIT_CACHE_LOCK_TIMEOUT": "30",
+        "CVEKIT_REPOSITORY_LOCK_TIMEOUT": "900",
+        "CVEKIT_LOCK_POLL_INTERVAL": "0.5",
+        "CVEKIT_LOCK_LOG_INTERVAL": "10",
+    }
+    for key in lock_settings:
+        monkeypatch.delenv(key, raising=False)
+    assert all(key not in client._build_env() for key in lock_settings)
+
+    for key, value in lock_settings.items():
+        monkeypatch.setenv(key, value)
+
+    env = client._build_env()
+
+    assert {key: env[key] for key in lock_settings} == lock_settings
+
+
+def test_run_cvekit_keeps_legacy_error_for_unstructured_output(
+    client: BackportCvekitClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0],
+            returncode=1,
+            stdout="legacy failure",
+            stderr="details",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="cvekit 执行失败") as raised:
+        client._run_cvekit(["--action", "backport-batch"], tmp_path)
+
+    assert not isinstance(raised.value, CvekitCommandError)
 
 
 def test_read_report_ok(tmp_path: Path) -> None:

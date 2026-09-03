@@ -39,6 +39,27 @@ class BackportRuntimeConfig:
     format_mode: str = "changed"
 
 
+class CvekitCommandError(RuntimeError):
+    """A failed cvekit command with stable machine-readable diagnostics."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str,
+        retryable: bool = False,
+        wait_seconds: float | None = None,
+        timeout_seconds: float | None = None,
+        error_text: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.retryable = retryable
+        self.wait_seconds = wait_seconds
+        self.timeout_seconds = timeout_seconds
+        self.error_text = error_text or message
+
+
 class BackportCvekitClient:
     REFRESH_META_SCHEMA_VERSION = 1
     CVEKIT_OPTION_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -349,7 +370,15 @@ class BackportCvekitClient:
                 ]
             ),
         }
-        for key in ("LANG", "LINUX_REPO_USE_CACHE_ONLY"):
+        for key in (
+            "LANG",
+            "LINUX_REPO_USE_CACHE_ONLY",
+            "CVEKIT_LOCK_DIR",
+            "CVEKIT_CACHE_LOCK_TIMEOUT",
+            "CVEKIT_REPOSITORY_LOCK_TIMEOUT",
+            "CVEKIT_LOCK_POLL_INTERVAL",
+            "CVEKIT_LOCK_LOG_INTERVAL",
+        ):
             value = os.environ.get(key)
             if value:
                 env[key] = value
@@ -535,11 +564,37 @@ class BackportCvekitClient:
         if result.returncode != 0:
             redacted_cmd = self._redact_command(cmd)
             secrets = [runtime_config.api_key] if runtime_config and runtime_config.api_key else []
+            redacted_stdout = self._run_store.redact(result.stdout or "", secrets)
+            redacted_stderr = self._run_store.redact(result.stderr or "", secrets)
+            error_payload = self._parse_json_output(result.stdout or "")
+            error_code = str(error_payload.get("error_code") or "").strip()
+            if error_code:
+                message = self._run_store.redact(
+                    str(
+                        error_payload.get("message")
+                        or error_payload.get("error")
+                        or error_code
+                    ),
+                    secrets,
+                )
+                error_text = "\n".join(
+                    part
+                    for part in (redacted_stdout.strip(), redacted_stderr.strip())
+                    if part
+                )
+                raise CvekitCommandError(
+                    message,
+                    error_code=error_code,
+                    retryable=error_payload.get("retryable") is True,
+                    wait_seconds=error_payload.get("wait_seconds"),
+                    timeout_seconds=error_payload.get("timeout_seconds"),
+                    error_text=error_text,
+                )
             raise RuntimeError(
                 "cvekit 执行失败\n"
                 f"command: {' '.join(redacted_cmd)}\n"
-                f"stdout: {self._run_store.redact(result.stdout or '', secrets)}\n"
-                f"stderr: {self._run_store.redact(result.stderr or '', secrets)}"
+                f"stdout: {redacted_stdout}\n"
+                f"stderr: {redacted_stderr}"
             )
         return result
 

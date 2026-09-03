@@ -6,11 +6,20 @@ from pydantic import BaseModel, Field
 
 DEFAULT_COMMIT_MESSAGE_TEMPLATE = """{{subject}}
 
+{{body_prefix}}
+
 commit {{commit_id}} {{source}}
+{{body_separator}}
 
 {{body}}
 
 {{trailers}}"""
+
+COMMIT_MESSAGE_TEMPLATE_DESCRIPTION = (
+    "Commit message 模板；{{subject}} 必填，可选变量包括 {{commit_id}}、{{source}}、"
+    "{{body_prefix}}、{{body_separator}}、{{body}}、{{trailers}}、{{reference}}、"
+    "{{upstream_commit_id}} 和 {{openeuler_commit_id}}。变量之外的文字会原样保留。"
+)
 
 
 class TargetConfigLayoutOpts(BaseModel):
@@ -30,7 +39,10 @@ class BackportConfigPayload(BaseModel):
     patch_dataset_dir: str = ""
     signer_name: str = ""
     signer_email: str = ""
-    commit_message_template: str = DEFAULT_COMMIT_MESSAGE_TEMPLATE
+    commit_message_template: str = Field(
+        default=DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+        description=COMMIT_MESSAGE_TEMPLATE_DESCRIPTION,
+    )
     commit_message_source: str = "upstream"
     linux_repo_path: str = "~/Image/linux"
     commit_sort: str = "describe"
