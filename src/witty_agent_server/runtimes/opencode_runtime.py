@@ -172,28 +172,31 @@ class OpenCodeRuntime(RuntimeBase):
                 return None
 
             if status == "running":
-                # 有增量输出 → tool.call.delta
-                if isinstance(state, dict):
-                    output = state.get("metadata", {}).get("output", "")
-                    if output:
-                        return {
-                            "type": TurnEventType.TOOL_CALL_DELTA,
-                            "payload": {
-                                "stage": "delta",
-                                "name": tool_name,
-                                "tool_call_id": tool_call_id,
-                                "content": output,
-                                "status": "running",
-                            },
-                        }
-
-                # 无增量输出 → tool.call.started（每个 callID 只发一次）
+                # 每个 callID 只在首条 running 事件产一次 started；write 等工具
+                # 的输入参数依赖 started（input 在 running 才填充）。即便首条
+                # running 就带增量输出，也必须先发 started，否则统一 artifact
+                # 钩子拿不到参数、会丢失 artifact.* 事件。
                 if (
                     started_tool_call_ids is not None
                     and tool_call_id
                     and tool_call_id in started_tool_call_ids
                 ):
+                    # 已发过 started：有增量输出 → tool.call.delta
+                    if isinstance(state, dict):
+                        output = state.get("metadata", {}).get("output", "")
+                        if output:
+                            return {
+                                "type": TurnEventType.TOOL_CALL_DELTA,
+                                "payload": {
+                                    "stage": "delta",
+                                    "name": tool_name,
+                                    "tool_call_id": tool_call_id,
+                                    "content": output,
+                                    "status": "running",
+                                },
+                            }
                     return None
+
                 if started_tool_call_ids is not None and tool_call_id:
                     started_tool_call_ids.add(tool_call_id)
 

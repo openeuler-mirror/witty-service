@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
@@ -483,7 +484,7 @@ def test_stale_generating_messages_and_compaction(
 
     with session_factory() as session:
         row = session.get(MessageORM, message_id)
-        row.last_stream_at = datetime.now(timezone.utc) - timedelta(
+        row.last_stream_at = datetime.now(UTC) - timedelta(
             seconds=120,
         )
         session.commit()
@@ -562,8 +563,8 @@ def test_skill_repository_and_skills_lifecycle(repo: SqliteRepository) -> None:
         metadata={"title": "Terminal Helper"},
         skill_source="git",
         skill_md_url="https://example.com/SKILL.md",
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
     )
 
     repo.update_skills(repository.repo_id, [skill])
@@ -1004,3 +1005,108 @@ def test_assemble_message_question_standalone_replied(repo: SqliteRepository) ->
         "question_id": "que_solo",
         "answers": [["yes"]],
     }
+
+
+# ---------------------------------------------------------------------------
+# _assemble_message artifact 事件处理
+# ---------------------------------------------------------------------------
+
+
+def _artifact_payload(
+    path: str, *, status: str, content: str | None = None
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": path,
+        "name": path.rsplit("/", 1)[-1],
+        "type": "html" if path.endswith(".html") else "image",
+        "status": status,
+        "version": 1,
+        "relative_path": path,
+        "size": len(content) if content is not None else None,
+        "mime": "text/html" if path.endswith(".html") else "image/png",
+    }
+    if content is not None:
+        payload["content"] = content
+    return payload
+
+
+def _create_artifact_message(
+    repo: SqliteRepository,
+    events: list[tuple[str, dict[str, Any]]],
+) -> None:
+    _create_agent(repo)
+    _create_session(repo)
+    message_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="done",
+        status=MessageStatus.completed,
+    )
+    for seq_no, (event_type, payload) in enumerate(events, start=1):
+        repo.create_message_event_with_retry(
+            agent_id="agent-1",
+            session_id="session-1",
+            message_id=message_id,
+            event_type=event_type,
+            payload_json=payload,
+            seq_no=seq_no,
+        )
+
+
+def test_assemble_message_artifact_events_aggregated_by_id(
+    repo: SqliteRepository,
+) -> None:
+    """artifact.started + artifact.completed 聚合为消息 artifacts 字段（camelCase）。"""
+    _create_artifact_message(
+        repo,
+        [
+            ("artifact.started", _artifact_payload("output/demo.html", status="creating")),
+            (
+                "artifact.completed",
+                _artifact_payload(
+                    "output/demo.html", status="ready", content="<h1>hi</h1>"
+                ),
+            ),
+        ],
+    )
+
+    messages, _ = repo.get_messages_with_events("session-1")
+    msg = messages[0]
+
+    assert msg["artifacts"] == [
+        {
+            "id": "output/demo.html",
+            "name": "demo.html",
+            "type": "html",
+            "status": "ready",
+            "version": 1,
+            "relativePath": "output/demo.html",
+            "size": len("<h1>hi</h1>"),
+            "mime": "text/html",
+            "content": "<h1>hi</h1>",
+        }
+    ]
+    started_item = msg["events"][0]
+    assert started_item["type"] == "artifact.started"
+    assert started_item["artifact"]["status"] == "creating"
+    assert started_item["artifact"]["relativePath"] == "output/demo.html"
+
+
+def test_assemble_message_artifact_error_keeps_error_status(
+    repo: SqliteRepository,
+) -> None:
+    """write 失败的 artifact.completed（error）保留 error 状态且无 content。"""
+    _create_artifact_message(
+        repo,
+        [
+            ("artifact.started", _artifact_payload("output/logo.png", status="creating")),
+            ("artifact.completed", _artifact_payload("output/logo.png", status="error")),
+        ],
+    )
+
+    messages, _ = repo.get_messages_with_events("session-1")
+    msg = messages[0]
+
+    assert msg["artifacts"][0]["status"] == "error"
+    assert "content" not in msg["artifacts"][0]

@@ -47,6 +47,7 @@ from witty_service.sandbox.base import (
 )
 from witty_service.storage.runtime_backup import RuntimeBackupStore
 
+from .artifact_paths import normalize_artifact_event
 from .runtime_config import OpenclawConfig, OpencodeConfig, RuntimeConfig
 from .session_manager import SessionManager
 
@@ -1376,6 +1377,18 @@ class AgentManager:
                         event_dict["type"],
                     )
                     continue
+                normalized_event = normalize_artifact_event(
+                    event_dict, workspace_path=agent.workspace_path
+                )
+                if normalized_event is None:
+                    self._logger.info(
+                        "dropped artifact event outside workspace: agent_id=%s session_id=%s event_type=%s",
+                        agent_id,
+                        session_id,
+                        event_dict["type"],
+                    )
+                    continue
+                event_dict = normalized_event
                 self._logger.info(
                     f"received event: {json.dumps(event_dict, indent=2, ensure_ascii=False)}"
                 )
@@ -1503,6 +1516,19 @@ class AgentManager:
                             event_dict["type"],
                         )
                         continue
+
+                    normalized_event = normalize_artifact_event(
+                        event_dict, workspace_path=agent.workspace_path
+                    )
+                    if normalized_event is None:
+                        self._logger.info(
+                            "dropped artifact event outside workspace: agent_id=%s session_id=%s event_type=%s",
+                            agent_id,
+                            session_id,
+                            event_dict["type"],
+                        )
+                        continue
+                    event_dict = normalized_event
 
                     if assistant_msg_id is None:
                         assistant_msg_id = self._repository.create_message(
