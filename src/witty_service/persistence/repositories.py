@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from sqlalchemy import func
+from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -1385,6 +1385,23 @@ class SqliteRepository:
             is_default=is_default,
         )
 
+    @staticmethod
+    def _clear_other_default_models(session: Session, model_id: str) -> None:
+        """B1: 把除 model_id 之外的所有 is_default=1 行清为 0。
+
+        - 显式不带 onupdate:仅改 is_default,保持被清行 updated_at 不变(避免隐藏副作用)。
+        - synchronize_session="evaluate": 同步更新已加载进 session 的对象,避免身份映射
+          残留陈旧值;不依赖 SQLite 的 RETURNING(兼容旧版 SQLite)。
+        - 必须在"把目标置默认之前"调用(先清后写),配合 uq_models_single_default
+          部分唯一索引,确保任何时刻都至多一个 is_default=1。
+        """
+        session.execute(
+            update(ModelORM)
+            .where(ModelORM.is_default.is_(True), ModelORM.id != model_id)
+            .values(is_default=False, updated_at=ModelORM.updated_at)
+            .execution_options(synchronize_session="evaluate"),
+        )
+
     def create_model_with_id(
         self,
         *,
@@ -1400,6 +1417,10 @@ class SqliteRepository:
         is_default: bool = False,
     ) -> ModelRecord:
         with self._session_factory() as session:
+            # 先清后写:在插入新默认前清掉其它默认,配合 uq_models_single_default
+            # 唯一索引,避免瞬时两个 is_default=1。
+            if is_default:
+                self._clear_other_default_models(session, model_id)
             row = ModelORM(
                 id=model_id,
                 name=name,
@@ -1471,6 +1492,10 @@ class SqliteRepository:
                 row.max_tokens = max_tokens
             if temperature is not None:
                 row.temperature = temperature
+            # B1 先清后写:在把本模型置为默认之前清掉其它默认,配合
+            # uq_models_single_default 唯一索引,避免瞬时两个 is_default=1。
+            if is_default:
+                self._clear_other_default_models(session, model_id)
             if is_default is not None:
                 row.is_default = is_default
             row.updated_at = datetime.now(UTC)
