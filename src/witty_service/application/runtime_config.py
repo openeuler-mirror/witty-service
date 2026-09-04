@@ -3,6 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+# 模型注册表的 provider 是通用厂商名（deepseek/zhipuai/...），而 dsh
+# harness initialize 的 provider 是其适配器 id。二者命名空间不同，
+# 这里做别名映射，免 start 时被 harness 以 "no adapter registered" 拒绝。
+_DSH_PROVIDER_ALIASES: dict[str, str] = {"deepseek": "deepseek-official"}
+
+# 经别名解析后允许的 provider 集合。不在白名单内的 provider 在
+# build_start_payload 阶段显式拒绝，避免静默透传后于 start 时必现失败。
+_DSH_ALLOWED_PROVIDERS: frozenset[str] = frozenset({"deepseek-official"})
+
 
 class RuntimeConfig(Protocol):
     """Runtime 配置策略接口。
@@ -103,3 +112,47 @@ class OpenclawConfig(RuntimeConfig):
 
     def port_metadata_key(self) -> str:
         return "gateway_port"
+
+
+@dataclass
+class DshConfig(RuntimeConfig):
+    adapter_type: str = "dsh"
+    memory_limit: str = "512m"
+
+    def build_env(self) -> dict[str, str]:
+        return {"WITTY_RUNTIME_DEFAULT": "dsh"}
+
+    def build_start_payload(
+        self,
+        *,
+        model_id: str | None,
+        model_info: dict[str, Any],
+        profile: str,
+        gateway_port: int,
+    ) -> dict[str, Any]:
+        del profile, gateway_port  # dsh 无 HTTP gateway/控制端口
+        provider = model_info.get("provider")
+        resolved_provider = _DSH_PROVIDER_ALIASES.get(provider, provider)
+        # 仅放过白名单内的 provider , 暂时仅支持 deepseek
+        if (
+            resolved_provider is not None
+            and resolved_provider not in _DSH_ALLOWED_PROVIDERS
+        ):
+            raise ValueError(
+                f"unsupported dsh provider {provider!r}: bundled dsh runtime "
+                f"only supports {sorted(_DSH_ALLOWED_PROVIDERS)}"
+            )
+        return {
+            "model_id": model_id,
+            "model": model_info,
+            "dsh": {
+                "provider": resolved_provider,
+                "model": model_info.get("name") or model_id,
+                "api_key": model_info.get("api_key"),
+                "base_url": model_info.get("api_base_url"),
+                "max_tokens": model_info.get("max_tokens"),
+            },
+        }
+
+    def port_metadata_key(self) -> str:
+        return "dsh_port"

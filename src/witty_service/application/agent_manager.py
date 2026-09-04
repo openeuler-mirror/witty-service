@@ -31,6 +31,22 @@ def _log_prefix(agent_id: str | None = None, session_id: str | None = None) -> s
     return ""
 
 
+def redact_start_payload(payload: Any) -> Any:
+    """递归脱敏 `/agent/start` payload 中的敏感字段（如 ``api_key``），用于日志打印。
+
+    各 runtime 子对象（model / dsh / opencode / openclaw ...）可能内嵌凭据，
+    打印前统一遮蔽，避免密钥进日志。
+    """
+    if isinstance(payload, dict):
+        return {
+            key: ("***" if key == "api_key" else redact_start_payload(value))
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [redact_start_payload(value) for value in payload]
+    return payload
+
+
 from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.adapter.websocket_client import WebSocketClient
 from witty_service.adapter.websocket_client_pool import (
@@ -48,7 +64,7 @@ from witty_service.sandbox.base import (
 from witty_service.storage.runtime_backup import RuntimeBackupStore
 
 from .artifact_paths import normalize_artifact_event
-from .runtime_config import OpenclawConfig, OpencodeConfig, RuntimeConfig
+from .runtime_config import DshConfig, OpenclawConfig, OpencodeConfig, RuntimeConfig
 from .session_manager import SessionManager
 
 INVALID_AGENT_TRANSITION = "INVALID_AGENT_TRANSITION"
@@ -355,6 +371,7 @@ class AgentManager:
     _RUNTIME_CONFIGS: ClassVar[dict[str, RuntimeConfig]] = {
         "opencode": OpencodeConfig(),
         "openclaw": OpenclawConfig(),
+        "dsh": DshConfig(),
     }
 
     def __init__(
@@ -396,6 +413,7 @@ class AgentManager:
             "api_key": model.api_key,
             "api_base_url": model.api_base_url,
             "compatibility": model.compatibility,
+            "max_tokens": getattr(model, "max_tokens", None),
         }
 
     def _get_runtime_gateway_port(self, agent_id: str, adapter_type: str) -> int | None:
@@ -756,7 +774,10 @@ class AgentManager:
                     profile=profile_name,
                     gateway_port=gateway_port,
                 )
-                logger.debug(f"{prefix}/agent/start payload: %s", start_payload)
+                logger.debug(
+                    f"{prefix}/agent/start payload: %s",
+                    redact_start_payload(start_payload),
+                )
                 start_response = client.post("/agent/start", json=start_payload)
                 start_response.raise_for_status()
                 logger.info(
@@ -1023,7 +1044,7 @@ class AgentManager:
             )
             logger.debug(
                 f"{prefix}/agent/start payload for resume from paused: %s",
-                start_payload,
+                redact_start_payload(start_payload),
             )
             try:
                 started_agent = await adaptor_client.post(
@@ -1201,7 +1222,8 @@ class AgentManager:
                 gateway_port=gateway_port,
             )
             logger.debug(
-                f"{prefix}/agent/start payload for recovery: %s", start_payload
+                f"{prefix}/agent/start payload for recovery: %s",
+                redact_start_payload(start_payload),
             )
             try:
                 started_agent = await adaptor_client.post(

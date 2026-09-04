@@ -17,8 +17,7 @@ from witty_agent_server.runtimes.artifact_detector import (
 logger = logging.getLogger(__name__)
 
 
-# "dsh"：DshRuntime 已实现事件映射层，但 RuntimeFactory 装配
-# （create_dsh_bundle）属后续 PR，该类型值暂不可经工厂构建。
+# "dsh"：DshRuntime 事件映射 + RuntimeFactory.create_dsh_bundle 装配均已就绪。
 RuntimeType = Literal["openclaw", "opencode", "dsh"]
 
 # 会产出 ``artifact.*`` 事件的工具名（统一由 ``_on_artifact_event`` 检测）。

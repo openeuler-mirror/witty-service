@@ -132,11 +132,14 @@ class DshAgentService(AgentServiceBase):
 
     @staticmethod
     def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
-        """拷贝 config 并剥离敏感字段（dsh.api_key），避免响应回显凭据。"""
+        """拷贝 config 并剥离敏感字段（dsh.api_key / model.api_key），避免响应/落库回显凭据。"""
         sanitized = dict(config)
-        dsh_cfg = sanitized.get("dsh")
-        if isinstance(dsh_cfg, dict):
-            sanitized["dsh"] = {k: v for k, v in dsh_cfg.items() if k != "api_key"}
+        for section in ("dsh", "model"):
+            section_cfg = sanitized.get(section)
+            if isinstance(section_cfg, dict):
+                sanitized[section] = {
+                    k: v for k, v in section_cfg.items() if k != "api_key"
+                }
         return sanitized
 
     def stop(self, *, agent_id: str | None = None) -> Agent:

@@ -368,16 +368,16 @@ class RuntimeSettings:
 
     环境变量:
         WITTY_RUNTIME_DEFAULT: 当前实例运行的 runtime 类型, 默认 openclaw
-        WITTY_RUNTIME_SUPPORTED: 镜像支持的所有 runtime 类型, 默认 openclaw,opencode
+        WITTY_RUNTIME_SUPPORTED: 镜像支持的所有 runtime 类型, 默认 openclaw,opencode,dsh
     """
 
     default_type: str = "openclaw"
-    supported: tuple[str, ...] = ("openclaw", "opencode")
+    supported: tuple[str, ...] = ("openclaw", "opencode", "dsh")
 
     @classmethod
     def from_env(cls) -> "RuntimeSettings":
         default_type = os.getenv("WITTY_RUNTIME_DEFAULT", "openclaw")
-        raw_supported = os.getenv("WITTY_RUNTIME_SUPPORTED", "openclaw,opencode")
+        raw_supported = os.getenv("WITTY_RUNTIME_SUPPORTED", "openclaw,opencode,dsh")
         supported = tuple(
             item.strip() for item in raw_supported.split(",") if item.strip()
         )
