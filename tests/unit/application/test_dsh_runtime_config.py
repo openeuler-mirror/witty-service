@@ -34,12 +34,14 @@ def test_dsh_config_build_start_payload_carries_model_config() -> None:
     payload = DshConfig().build_start_payload(
         model_id="model-1",
         model_info=model_info,
-        profile="profile-x",
+        agent_key="profile-x",
         gateway_port=12345,
     )
     assert payload["model_id"] == "model-1"
     assert payload["model"] == model_info
     assert payload["dsh"] == {
+        # workspace_key = 外层 witty agent uuid，agent-server 侧用于 workspace 隔离
+        "workspace_key": "profile-x",
         # 注册表 vendor 名 deepseek → dsh harness 适配器 id deepseek-official
         "provider": "deepseek-official",
         "model": "deepseek-v4-flash",
@@ -55,6 +57,6 @@ def test_dsh_config_rejects_unknown_provider() -> None:
         DshConfig().build_start_payload(
             model_id=None,
             model_info={"name": "glm-5.2", "provider": "zhipuai"},
-            profile="p",
+            agent_key="p",
             gateway_port=1,
         )

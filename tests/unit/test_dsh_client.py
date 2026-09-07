@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -445,38 +446,129 @@ def test_create_session_records_derived_mapping_without_prompt() -> None:
 def test_delete_session_removes_files_and_mapping(tmp_path: Path) -> None:
     """删除本 session 落盘文件；review-1：精确边界匹配，不误删 90/99
     数字前缀碰撞 session 的数据。"""
-    session_root = tmp_path / "sessions"
-    session_root.mkdir()
+    home = tmp_path / "dsh-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
     for name in (
         f"{_SESSION_ID}.jsonl",
         "agent-1-session-90.jsonl",
         "agent-1-session-99.meta.json",
     ):
-        (session_root / name).write_text("{}", encoding="utf-8")
+        (sessions / name).write_text("{}", encoding="utf-8")
     for name in (_SESSION_ID, "agent-1-session-90"):
-        nested = session_root / name
+        nested = sessions / name
         nested.mkdir()
         (nested / "session.jsonl").write_text("{}", encoding="utf-8")
-    unrelated = session_root / "other-session.jsonl"
+    unrelated = sessions / "other-session.jsonl"
     unrelated.write_text("{}", encoding="utf-8")
 
     harness_client = _FakeHarnessClient()
     client = _client(harness_client)
-    client.update_config(session_root=str(session_root))
+    client.update_config(dsh_home=str(home))
     client.create_session(session_key=_SESSION_KEY)
 
     client.delete_session(session_key=_SESSION_KEY)
 
-    assert not (session_root / f"{_SESSION_ID}.jsonl").exists()
-    assert not (session_root / _SESSION_ID).exists()
-    assert (session_root / "agent-1-session-90.jsonl").exists()
-    assert (session_root / "agent-1-session-90").exists()
-    assert (session_root / "agent-1-session-99.meta.json").exists()
+    assert not (sessions / f"{_SESSION_ID}.jsonl").exists()
+    assert not (sessions / _SESSION_ID).exists()
+    assert (sessions / "agent-1-session-90.jsonl").exists()
+    assert (sessions / "agent-1-session-90").exists()
+    assert (sessions / "agent-1-session-99.meta.json").exists()
     assert unrelated.exists()
     assert _SESSION_KEY not in client._session_map
 
 
-def test_delete_session_without_session_root_only_clears_mapping() -> None:
+def test_delete_session_removes_rc1_nested_home_files(tmp_path: Path) -> None:
+    """0.1.2rc1 真机嵌套布局回归（review R9）：session 落盘为
+    ``sessions/<workspace-slug>/<sid>/...`` 与
+    ``storages/session_projcache/sessions/<sid>.json``。递归精确删除命中项，
+    保留同前缀碰撞的其它 session（90/99），并清理变空目录。"""
+    home = tmp_path / "dsh-home"
+    slug = home / "sessions" / "ws-slug"
+    sid_dir = slug / _SESSION_ID
+    sid_dir.mkdir(parents=True)
+    (sid_dir / "session.jsonl.zstd").write_text("{}", encoding="utf-8")
+    (sid_dir / "meta.json").write_text("{}", encoding="utf-8")
+    projcache = home / "storages" / "session_projcache" / "sessions"
+    projcache.mkdir(parents=True)
+    (projcache / f"{_SESSION_ID}.json").write_text("{}", encoding="utf-8")
+
+    # 前缀碰撞：不应被删除的其它 session（嵌套目录 + 扁平文件名）。
+    other_dir = slug / "agent-1-session-90"
+    other_dir.mkdir()
+    (other_dir / "session.jsonl.zstd").write_text("{}", encoding="utf-8")
+    (projcache / "agent-1-session-99.meta.json").write_text("{}", encoding="utf-8")
+
+    harness_client = _FakeHarnessClient()
+    client = _client(harness_client)
+    client.update_config(dsh_home=str(home))
+    client.create_session(session_key=_SESSION_KEY)
+
+    client.delete_session(session_key=_SESSION_KEY)
+
+    assert not sid_dir.exists()  # 嵌套 session 目录整删
+    assert not (projcache / f"{_SESSION_ID}.json").exists()
+    assert (slug / "agent-1-session-90").exists()  # 90 目录保留
+    assert (other_dir / "session.jsonl.zstd").exists()
+    assert (projcache / "agent-1-session-99.meta.json").exists()  # 99 文件保留
+    assert _SESSION_KEY not in client._session_map
+
+
+def test_delete_session_preserves_unrelated_empty_dirs(tmp_path: Path) -> None:
+    """回归（review 问题1）：删除只清理「本次删除命中且被清空」的目录，
+    不得误删无关的既存空目录。"""
+    home = tmp_path / "dsh-home"
+    sessions = home / "sessions"
+    # 与本次 session 无关、预先存在的空目录（深埋于落盘子树内）。
+    unrelated_empty = sessions / "ws-slug" / "empty-scaffold"
+    unrelated_empty.mkdir(parents=True)
+    sid_file = sessions / f"{_SESSION_ID}.jsonl"
+    sid_file.write_text("{}", encoding="utf-8")
+
+    harness_client = _FakeHarnessClient()
+    client = _client(harness_client)
+    client.update_config(dsh_home=str(home))
+    client.create_session(session_key=_SESSION_KEY)
+
+    client.delete_session(session_key=_SESSION_KEY)
+
+    assert not sid_file.exists()
+    assert unrelated_empty.is_dir()  # 无关空目录保留
+    assert _SESSION_KEY not in client._session_map
+
+
+def test_delete_session_does_not_follow_symlinks(tmp_path: Path) -> None:
+    """回归（review 问题2）：symlink 不跟随——命中名字的链接只删链接本身，
+    绝不进入链接目标（防越界删除 home 之外的目录/文件）；未命中的链接完全保留。"""
+    home = tmp_path / "dsh-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    external = tmp_path / "external"
+    external.mkdir()
+    victim = external / "session.jsonl"
+    victim.write_text("important", encoding="utf-8")
+    # 链接名字命中 sid：应只删链接，不删目标
+    os.symlink(external, sessions / _SESSION_ID)
+    # 链接名字未命中：完全保留
+    os.symlink(external, sessions / "agent-1-session-90")
+    sid_file = sessions / f"{_SESSION_ID}.jsonl"
+    sid_file.write_text("{}", encoding="utf-8")
+
+    harness_client = _FakeHarnessClient()
+    client = _client(harness_client)
+    client.update_config(dsh_home=str(home))
+    client.create_session(session_key=_SESSION_KEY)
+
+    client.delete_session(session_key=_SESSION_KEY)
+
+    assert not sid_file.exists()
+    assert victim.exists()  # 越界目标不受影响
+    assert not (sessions / _SESSION_ID).exists()  # 命中链接被删（仅链接本身）
+    assert (sessions / "agent-1-session-90").is_symlink()  # 未命中链接保留
+    assert _SESSION_KEY not in client._session_map
+
+
+def test_delete_session_without_dsh_home_only_clears_mapping() -> None:
     harness_client = _FakeHarnessClient()
     client = _client(harness_client)
     client.create_session(session_key=_SESSION_KEY)
@@ -542,7 +634,7 @@ def test_ensure_harness_builds_from_config_and_reuses_instance() -> None:
     client = DshClient()
     client.update_config(
         workspace_dir="/tmp/dsh-ws",
-        session_root="/tmp/dsh-sr",
+        dsh_home="/tmp/dsh-home",
         provider="custom-endpoint",
         model="custom-model",
         api_key="sk-test",
@@ -554,7 +646,7 @@ def test_ensure_harness_builds_from_config_and_reuses_instance() -> None:
 
     assert isinstance(harness, DeepSeekHarness)
     assert harness.config.cwd == "/tmp/dsh-ws"
-    assert harness.config.session_root == "/tmp/dsh-sr"
+    assert harness.config.dsh_home == "/tmp/dsh-home"
     assert harness.config.provider == "custom-endpoint"
     assert harness.config.model == "custom-model"
     assert harness.config.api_key == "sk-test"

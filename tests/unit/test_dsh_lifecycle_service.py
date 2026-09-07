@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from witty_agent_server.application.models.agent import AgentStatus
+from witty_agent_server.application.services.agent import (
+    dsh_agent_service as dsh_agent_service_module,
+)
 from witty_agent_server.application.services.agent.dsh_agent_service import (
     DshAgentService,
 )
@@ -115,7 +119,7 @@ def test_update_config_derives_instance_paths_and_pushes_to_client(
     assert client._workspace_dir == str(
         (tmp_path / "agent-workspaces" / "a1" / "workspace").resolve()
     )
-    assert client._session_root == str(tmp_path / "dsh-instances" / "a1" / "sessions")
+    assert client._dsh_home == str(tmp_path / "dsh-instances" / "a1")
     assert client._model == "deepseek-x"
     assert client._max_tokens == 4096
 
@@ -134,7 +138,7 @@ def test_update_config_rejects_unsafe_agent_id(
     assert exc.value.action == "update_config"
     assert "invalid agent_id" in exc.value.message
     assert client._workspace_dir is None
-    assert client._session_root is None
+    assert client._dsh_home is None
 
 
 def test_update_config_change_detaches_running_harness(
@@ -198,7 +202,9 @@ def test_start_server_creates_dirs_and_starts_harness(
     svc.start_server()
 
     assert (tmp_path / "agent-workspaces" / "a1" / "workspace").is_dir()
-    assert (tmp_path / "dsh-instances" / "a1" / "sessions").is_dir()
+    assert (tmp_path / "dsh-instances" / "a1").is_dir()
+    # sessions 子目录由 runtime 启动后自行建立，lifecycle 不预建
+    assert not (tmp_path / "dsh-instances" / "a1" / "sessions").exists()
     harness = client.harness
     assert harness is not None
     assert harness.start_calls == 1
@@ -468,6 +474,73 @@ def test_agent_service_start_without_config_still_pushes_agent_id() -> None:
     service.start(reload=False)  # agent_id 缺省 → "main"
 
     assert svc.update_calls == [{"agent_id": "main"}]
+
+
+def test_agent_service_start_warns_when_missing_workspace_key_without_agent_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """隔离守卫（review must-fix）：无显式 agent_id 且 config 缺少 dsh.workspace_key
+    时，显式告警，避免多 agent 静默折叠到共享 workspace。"""
+    svc = FakeDshLifecycle(probe_returns=[True])
+    service = DshAgentService(lifecycle_service=svc)
+
+    with caplog.at_level(logging.WARNING, logger=dsh_agent_service_module.__name__):
+        service.start(config={"dsh": {"model": "deepseek-x"}}, reload=False)
+
+    assert svc.update_calls == [{"agent_id": "main", "model": "deepseek-x"}]
+    assert any(
+        "without explicit agent_id or config['dsh']['workspace_key']" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_agent_service_start_uses_config_workspace_key_for_lifecycle_workspace() -> (
+    None
+):
+    """无显式 agent_id 时，lifecycle 按下推的 dsh.workspace_key（外层 agent uuid）
+    推导 workspace；HTTP/会话侧身份仍为 main。workspace_key 是 workspace 的
+    唯一事实来源，与 SDK 工具面 profile（默认 "sdk"）无关。"""
+    svc = FakeDshLifecycle(probe_returns=[True])
+    service = DshAgentService(lifecycle_service=svc)
+
+    service.start(
+        config={
+            "dsh": {
+                "workspace_key": "agent-uuid",
+                "model": "deepseek-x",
+                "api_key": "sk-1",
+            }
+        },
+        reload=False,
+    )
+
+    assert svc.update_calls == [
+        {"agent_id": "agent-uuid", "model": "deepseek-x", "api_key": "sk-1"}
+    ]
+    # 会话侧身份保持 main，list_agents / ws 路径不被破坏。
+    assert service.agent.id == "main"
+    assert service.agent.config == {
+        "dsh": {"workspace_key": "agent-uuid", "model": "deepseek-x"}
+    }
+
+
+def test_agent_service_start_explicit_agent_id_keeps_workspace_from_config_key() -> (
+    None
+):
+    """显式 agent_id（?id=）只改 HTTP/会话侧身份，不覆盖 workspace：
+    workspace 恒由 config['dsh']['workspace_key'] 决定，避免同一 agent 跨
+    多次 start 时实例目录漂移。"""
+    svc = FakeDshLifecycle(probe_returns=[True])
+    service = DshAgentService(lifecycle_service=svc)
+
+    service.start(
+        agent_id="agent-explicit",
+        config={"dsh": {"workspace_key": "agent-uuid"}},
+        reload=False,
+    )
+
+    assert svc.update_calls == [{"agent_id": "agent-uuid"}]
+    assert service.agent.id == "agent-explicit"
 
 
 def test_agent_service_start_invalid_agent_id_converts_to_400() -> None:

@@ -104,7 +104,7 @@ class DshClient(ClientBase):
         self._active_harness_refs: dict[int, int] = {}
         self._retired_harnesses: dict[int, DeepSeekHarness] = {}
         self._workspace_dir: str | None = None
-        self._session_root: str | None = None
+        self._dsh_home: str | None = None
         self._provider: str = _DEFAULT_PROVIDER
         self._model: str = _DEFAULT_MODEL
         self._api_key: str | None = None
@@ -119,7 +119,7 @@ class DshClient(ClientBase):
         self,
         *,
         workspace_dir: str | None = None,
-        session_root: str | None = None,
+        dsh_home: str | None = None,
         provider: str | None = None,
         model: str | None = None,
         api_key: str | None = None,
@@ -133,7 +133,7 @@ class DshClient(ClientBase):
         """
         updates = {
             "_workspace_dir": workspace_dir,
-            "_session_root": session_root,
+            "_dsh_home": dsh_home,
             "_provider": provider,
             "_model": model,
             "_api_key": api_key,
@@ -177,7 +177,7 @@ class DshClient(ClientBase):
                 self._harness = DeepSeekHarness(
                     DeepSeekHarnessConfig(
                         cwd=self._workspace_dir,
-                        session_root=self._session_root,
+                        dsh_home=self._dsh_home,
                         provider=self._provider,
                         model=self._model,
                         max_tokens=self._max_tokens,
@@ -227,7 +227,7 @@ class DshClient(ClientBase):
         self._session_map[session_key] = derive_dsh_session_id(session_key)
 
     def delete_session(self, *, session_key: str) -> None:
-        """尽力而为：删 session_root 下该 session 的落盘文件；删除映射。"""
+        """尽力而为：删 <dsh_home> 下该 session 的落盘文件；删除映射。"""
         dsh_session_id = self._resolve_dsh_session_id(session_key)
         self._session_map.pop(session_key, None)
         self._aborted_sessions.discard(session_key)
@@ -383,34 +383,77 @@ class DshClient(ClientBase):
         return session_id
 
     def _delete_session_files(self, dsh_session_id: str) -> None:
-        """尽力而为删除 session_root 下该 session 的落盘文件（JSONL 等）。"""
-        if not self._session_root:
+        """尽力而为删除 <dsh_home> 下该 session 的全部落盘文件。
+
+        0.1.2rc1 真机落盘为嵌套布局：``<dsh_home>/sessions/<workspace-slug>/<sid>/...``
+        与 ``<dsh_home>/storages/session_projcache/sessions/<sid>.json``。删除只扫描这两个
+        已知落盘子树，按精确边界匹配（``name == sid`` 或 ``name.startswith(sid + ".")``）删
+        除 session 目录/文件，。仅在本次删除确实清空了某目录时才向上清理空祖先；symlink 一律不跟随，
+        避免越界删除 home 之外的目录/文件。``dsh_home`` 未配置时仅清映射（维持原语义）。
+        """
+        if not self._dsh_home:
             return
-        root = Path(self._session_root)
-        if not root.is_dir():
+        home = Path(self._dsh_home)
+        if not home.is_dir():
             return
+        # 已知 session 落盘子树；protected 根（home 根 + 两个 session 根）永不清理。
+        roots = (
+            home / "sessions",
+            home / "storages" / "session_projcache" / "sessions",
+        )
+        protected = {home, *roots}
+        for root in roots:
+            if root.is_dir() and not root.is_symlink():
+                self._remove_session_entries(root, dsh_session_id, protected)
+
+    def _remove_session_entries(
+        self, root: Path, dsh_session_id: str, protected: set[Path]
+    ) -> bool:
+        """递归删除命中 ``dsh_session_id`` 的 session 落盘项（文件 / 整目录）。
+
+        返回本子树是否删除了至少一项；仅当确实删除了内容、目录随之变空且不在
+        ``protected`` 中时才 ``rmdir`` 它，避免误删与本次无关的既存空目录。
+        """
+        prefix = f"{dsh_session_id}."
+        removed_any = False
         try:
             entries = list(root.iterdir())
         except OSError as exc:
-            logger.warning(
-                "dsh delete_session cannot list session_root %s: %s", root, exc
-            )
-            return
-        prefix = f"{dsh_session_id}."
+            logger.warning("dsh delete_session cannot list %s: %s", root, exc)
+            return False
         for entry in entries:
-            if entry.name != dsh_session_id and not entry.name.startswith(prefix):
-                continue
+            name = entry.name
             try:
+                # 不跟随 symlink：命中名字的链接只删链接本身，绝不进入链接目标
+                # （防越界删除 home 之外的目录/文件）。
+                if entry.is_symlink():
+                    if name == dsh_session_id or name.startswith(prefix):
+                        entry.unlink()
+                        removed_any = True
+                    continue
                 if entry.is_dir():
-                    shutil.rmtree(entry)
-                else:
+                    if name == dsh_session_id:
+                        shutil.rmtree(entry)
+                        removed_any = True
+                        continue
+                    if self._remove_session_entries(entry, dsh_session_id, protected):
+                        removed_any = True
+                elif name == dsh_session_id or name.startswith(prefix):
                     entry.unlink()
+                    removed_any = True
             except OSError as exc:
                 logger.warning(
                     "dsh delete_session best-effort removal failed for %s: %s",
                     entry,
                     exc,
                 )
+        if removed_any and root not in protected:
+            try:
+                if not any(root.iterdir()):
+                    root.rmdir()
+            except OSError:
+                pass
+        return removed_any
 
 
 __all__ = ["DshClient", "DshClientError", "derive_dsh_session_id"]

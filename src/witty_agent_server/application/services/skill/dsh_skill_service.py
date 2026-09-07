@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 class DshSkillService(AgentSkillServiceBase):
     """dsh runtime 的 skill 服务（最小空实现）。
 
-    满足 ``RuntimeBundle.skill_service`` 必填约束；dsh 的 skill 能力
-    走 cordis 配置（后续演进项），MVP 阶段：list 返回空列表，
-    install / uninstall 抛不支持。
+    满足 ``RuntimeBundle.skill_service`` 必填约束；dsh 的 skill 能力暂不
+    经 SDK 工具面 profile / patches 接线（harness 恒用默认 "sdk" profile，
+    后续演进项），MVP 阶段：list 返回空列表，install / uninstall 抛不支持。
     """
 
     runtime_type = "dsh"

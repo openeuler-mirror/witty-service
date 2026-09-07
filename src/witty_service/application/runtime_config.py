@@ -42,10 +42,15 @@ class RuntimeConfig(Protocol):
         *,
         model_id: str | None,
         model_info: dict[str, Any],
-        profile: str,
+        agent_key: str,
         gateway_port: int,
     ) -> dict[str, Any]:
-        """构建 /agent/start 接口的请求体."""
+        """构建 /agent/start 接口的请求体.
+
+        ``agent_key`` 是外层 agent 的身份标识（witty agent uuid），各 runtime
+        自行映射：opencode/openclaw 将其作为 ``profile``，dsh 将其作为
+        ``workspace_key``（workspace / dsh_home 隔离的事实来源）。
+        """
         ...
 
     def port_metadata_key(self) -> str:
@@ -66,7 +71,7 @@ class OpencodeConfig(RuntimeConfig):
         *,
         model_id: str | None,
         model_info: dict[str, Any],
-        profile: str,
+        agent_key: str,
         gateway_port: int,
     ) -> dict[str, Any]:
         return {
@@ -77,7 +82,7 @@ class OpencodeConfig(RuntimeConfig):
                 "username": "opencode",
                 "password": "",  # nosec B105 - 默认空密码占位，由部署配置注入
                 "timeout": 30.0,
-                "profile": profile,
+                "profile": agent_key,
             },
         }
 
@@ -98,14 +103,14 @@ class OpenclawConfig(RuntimeConfig):
         *,
         model_id: str | None,
         model_info: dict[str, Any],
-        profile: str,
+        agent_key: str,
         gateway_port: int,
     ) -> dict[str, Any]:
         return {
             "model_id": model_id,
             "model": model_info,
             "openclaw": {
-                "profile": profile,
+                "profile": agent_key,
                 "gateway_port": gateway_port,
             },
         }
@@ -127,10 +132,10 @@ class DshConfig(RuntimeConfig):
         *,
         model_id: str | None,
         model_info: dict[str, Any],
-        profile: str,
+        agent_key: str,
         gateway_port: int,
     ) -> dict[str, Any]:
-        del profile, gateway_port  # dsh 无 HTTP gateway/控制端口
+        del gateway_port  # dsh 无 HTTP gateway/控制端口
         provider = model_info.get("provider")
         resolved_provider = _DSH_PROVIDER_ALIASES.get(provider, provider)
         # 仅放过白名单内的 provider , 暂时仅支持 deepseek
@@ -146,6 +151,12 @@ class DshConfig(RuntimeConfig):
             "model_id": model_id,
             "model": model_info,
             "dsh": {
+                # workspace_key = agent_key（外层 witty agent uuid）：agent-server
+                # 侧据其推导 dsh workspace / dsh_home，保证 write 工具产物与
+                # agent.workspace_path 同源（artifact 边界归一化依赖）。
+                # 注意：这不是 SDK 工具面 profile（DeepSeekHarnessConfig.profile，
+                # 默认 "sdk"，由运行时管理），二者概念不同，勿混用。
+                "workspace_key": agent_key,
                 "provider": resolved_provider,
                 "model": model_info.get("name") or model_id,
                 "api_key": model_info.get("api_key"),
