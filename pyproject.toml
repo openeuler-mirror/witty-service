@@ -105,7 +105,7 @@ packages = [
     "witty_agent_server.logger",
 ]
 package-dir = {"witty_service" = "src/witty_service", "witty_agent_server" = "src/witty_agent_server"}
-package-data = {"witty_service.data" = ["*.tar.gz"]}
+package-data = {"witty_service.data" = ["*.tar.gz", "preset_agents/**/*"]}
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
