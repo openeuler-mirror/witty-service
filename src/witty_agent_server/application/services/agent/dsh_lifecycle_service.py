@@ -69,10 +69,10 @@ class DshLifecycleService:
             self._agent_id = agent_id
         paths = self._derive_instance_paths()
         workspace_dir = str(paths[0]) if paths else None
-        session_root = str(paths[1]) if paths else None
+        dsh_home = str(paths[1]) if paths else None
         self._client.update_config(
             workspace_dir=workspace_dir,
-            session_root=session_root,
+            dsh_home=dsh_home,
             provider=provider,
             model=model,
             api_key=api_key,
@@ -84,10 +84,10 @@ class DshLifecycleService:
         """启动 dsh harness：准备实例目录 → 清理僵尸 harness → ensure → start。"""
         paths = self._derive_instance_paths()
         if paths is not None:
-            workspace_dir, session_root = paths
+            workspace_dir, dsh_home = paths
             try:
                 workspace_dir.mkdir(parents=True, exist_ok=True)
-                session_root.mkdir(parents=True, exist_ok=True)
+                dsh_home.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 raise DshLifecycleError(
                     action="start",
@@ -99,7 +99,7 @@ class DshLifecycleService:
             # 幂等下推（值未变时 client 不 detach）
             self._client.update_config(
                 workspace_dir=str(workspace_dir),
-                session_root=str(session_root),
+                dsh_home=str(dsh_home),
             )
 
         # 僵尸/崩溃 harness 无法复用（start 对已初始化 harness 是 no-op），丢弃重建。
@@ -167,26 +167,25 @@ class DshLifecycleService:
                 )
 
     def _derive_instance_paths(self) -> tuple[Path, Path] | None:
-        """按 agent_id 推导 dsh 实例目录（workspace / sessions）。
+        """按 agent_id 推导 dsh 实例目录（workspace / dsh_home）。
 
         ``workspace`` 与 ``agent.workspace_path``（单一事实来源
         ``agent_workspace_path``）同源，使 dsh ``write`` 工具产物落入
-        artifact 归一化 / 工作区文件端点所校验的同一工作区；``sessions``
-        （会话 JSONL 转录）属运行时状态，与 opencode 的 data/state/cache
-        同理，不进入 AI 工作区，仍按 dsh 实例目录隔离。
+        artifact 归一化 / 工作区文件端点所校验的同一工作区；``dsh_home``
+        承载 SDK 工具面 profile（``<dsh_home>/profiles/<profile>``，默认
+        ``sdk``）/ 插件 / 会话 JSONL 等运行时状态（``<dsh_home>/sessions``
+        由 runtime 启动后自行创建），与 opencode 的 data/state/cache 同理，
+        不进入 AI 工作区，按 agent 独立 home 隔离。
         """
         if not self._agent_id:
             return None
         workspace = agent_workspace_path(
             self._agent_id, root=get_settings().workspace.root_path()
         )
-        session_root = (
-            get_settings().workspace.root_path()
-            / "dsh-instances"
-            / self._agent_id
-            / "sessions"
+        dsh_home = (
+            get_settings().workspace.root_path() / "dsh-instances" / self._agent_id
         )
-        return workspace, session_root
+        return workspace, dsh_home
 
 
 __all__: Sequence[str] = ("DshLifecycleError", "DshLifecycleService")

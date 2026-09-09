@@ -19,6 +19,18 @@ from witty_agent_server.runtimes.runtime_base import RuntimeType
 logger = logging.getLogger(__name__)
 
 
+def _dsh_workspace_key_from_config(config: dict[str, Any] | None) -> str | None:
+    """提取 ``config["dsh"]["workspace_key"]``（外层 witty agent uuid，用于
+    dsh workspace / dsh_home 隔离），非法类型返回 None。"""
+    if not isinstance(config, dict):
+        return None
+    dsh_cfg = config.get("dsh")
+    if not isinstance(dsh_cfg, dict):
+        return None
+    workspace_key = dsh_cfg.get("workspace_key")
+    return workspace_key if isinstance(workspace_key, str) and workspace_key else None
+
+
 class DshAgentService(AgentServiceBase):
     """dsh runtime 的 agent 服务。
 
@@ -56,6 +68,19 @@ class DshAgentService(AgentServiceBase):
             resolved_agent_id = (
                 agent_id if agent_id is not None else (self._agent.id or "main")
             )
+            # 会话/HTTP 侧身份维持 "main"（dsh 无 agent 概念，list_agents
+            # 默认 main）；workspace 隔离由 config["dsh"]["workspace_key"]
+            # （外层 witty agent uuid）下推 lifecycle 完成
+            workspace_key = _dsh_workspace_key_from_config(config)
+            lifecycle_agent_id = workspace_key or resolved_agent_id
+            # 隔离守卫：dsh 的 per-agent 隔离依赖 dsh.workspace_key
+            if agent_id is None and workspace_key is None:
+                logger.warning(
+                    "dsh start without explicit agent_id or config['dsh']['workspace_key']: "
+                    "workspace/dsh_home falls back to shared agent_id=%s; per-agent "
+                    "isolation requires dsh.workspace_key (outer witty agent uuid)",
+                    resolved_agent_id,
+                )
 
             logger.info(
                 "agent start requested: agent_id=%s runtime=%s reload=%s",
@@ -65,7 +90,7 @@ class DshAgentService(AgentServiceBase):
             )
 
         # ---- 锁外执行：配置下推可能 detach/close harness（进程操作） ----
-        self._apply_config(config, agent_id=resolved_agent_id)
+        self._apply_config(config, agent_id=lifecycle_agent_id)
 
         with self._lock:
             self._agent.id = resolved_agent_id
@@ -111,7 +136,8 @@ class DshAgentService(AgentServiceBase):
         """从 ``config["dsh"]`` 提取模型配置下推 lifecycle。
 
         workspace 路径由 lifecycle 按 agent_id 推导，故 agent_id 始终下推
-        （无 dsh 配置时也保证实例目录隔离）；agent_id 校验失败即抛错不落库。
+        （即 workspace_key，dsh 下恒等于外层 agent uuid；无 dsh 配置时也
+        保证实例目录隔离）；agent_id 校验失败即抛错不落库。
         """
         dsh_cfg = config.get("dsh") if isinstance(config, dict) else None
         kwargs: dict[str, Any] = {"agent_id": agent_id}
@@ -182,5 +208,6 @@ class DshAgentService(AgentServiceBase):
     def resolve_default_agent(self) -> str:
         return self._agent.id or "main"
 
-    # setup_mcp / unset_mcp 暂不实现（dsh MCP 走 cordis 配置，
-    # 后续演进项），保持基类 NotImplementedError。
+    # setup_mcp / unset_mcp 暂不实现（dsh MCP 走 SDK 工具面 profile /
+    # patches 机制，但当前未接线——harness 恒用默认 "sdk" profile，后续演进项），
+    # 保持基类 NotImplementedError。

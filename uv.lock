@@ -480,24 +480,25 @@ wheels = [
 
 [[package]]
 name = "deepseek-harness-runtime-bin"
-version = "0.1.1rc1"
+version = "0.1.2rc1"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
 wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/56/b7/6b05d20cba520ab378cf9909adc0adee01e15099b0d896d68cfdc4a034b7/deepseek_harness_runtime_bin-0.1.1rc1-py3-none-macosx_14_0_arm64.whl", hash = "sha256:2707cd666ba49ee0963228873abf7850ca7ec5e782cca61e3603793bace0d1cf" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/bb/b5/7c840b4859fbec5de4b84a3794a06695f9da1100391a251cafbc37bf6ab2/deepseek_harness_runtime_bin-0.1.1rc1-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:e73987c6c08d8322bce2b8b2ce75db6a139ecf546417b6015ce7a8de5e5f19b5" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/38/26/0f1b453134a45841624e3791c4b2ed98484b75fc7e35ccd137cff16e2eda/deepseek_harness_runtime_bin-0.1.1rc1-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:8eb31e3ab2bc3ff45474fe419eb389e32553391f1a40789ea2cc3dc8d6de137b" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/33/91/be83a7f28b3f09c128913a6f331d3c7b35dd60b2a59e76ab3efe58b43db5/deepseek_harness_runtime_bin-0.1.2rc1-py3-none-macosx_14_0_arm64.whl", hash = "sha256:2cac2256cdebfda726c3378e24f4be31c0847aece7f2a7eb5a8523559f6b5894" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/95/63/56e9467299c01274143db7c5b122d5f6a5b5bfeb1d19d7f4f55f8d5716b3/deepseek_harness_runtime_bin-0.1.2rc1-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:5052ca9fea2304e28d82a71012a32e7d2399322e1884a065cb08cf5bc57f017f" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/46/e3/7fdfffff5a5925e52d9726b6e90d489af87090847db54814aa3b14334cb3/deepseek_harness_runtime_bin-0.1.2rc1-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:670d8af06845cc2fc16738f1b030375321f3f8268837152aa3100e14a7b9887d" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/e7/63/16b5733796e85f5df2d5985f0c78fdf582cd002f687d7e985f16d19d9cb3/deepseek_harness_runtime_bin-0.1.2rc1-py3-none-win_amd64.whl", hash = "sha256:390bd8cd5f8700fc609c58e1ccb78091d5c8c6e11c21656e284e0f68da0e148f" },
 ]
 
 [[package]]
 name = "deepseek-harness-sdk"
-version = "0.1.1rc1"
+version = "0.1.2rc1"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
 dependencies = [
     { name = "deepseek-harness-runtime-bin" },
     { name = "pydantic" },
 ]
 wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/92/95/2cb97bcac85a3787b4b3a7f497a559e3a161c167bbe97e38c66464cd823b/deepseek_harness_sdk-0.1.1rc1-py3-none-any.whl", hash = "sha256:2113aec229039da435bc44b275b487216d2b1c308d850521b88cea6ce3c1b762" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/d7/38/0220769bc89ca29318a8f09c30390095aaa071ae2116f677e8398763390e/deepseek_harness_sdk-0.1.2rc1-py3-none-any.whl", hash = "sha256:24689eec01e95233feb75ca08a0fe748b491e71682f80d2c04e6f9485f20488a" },
 ]
 
 [[package]]
@@ -1702,6 +1703,7 @@ dependencies = [
     { name = "alembic" },
     { name = "apscheduler" },
     { name = "cryptography" },
+    { name = "deepseek-harness-sdk" },
     { name = "docker" },
     { name = "fastapi" },
     { name = "gitpython" },
@@ -1723,9 +1725,6 @@ dev = [
     { name = "python-semantic-release" },
     { name = "ruff" },
 ]
-dsh = [
-    { name = "deepseek-harness-sdk" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -1742,7 +1741,7 @@ requires-dist = [
     { name = "apscheduler", specifier = ">=3.11,<4" },
     { name = "bandit", marker = "extra == 'dev'", specifier = ">=1.9" },
     { name = "cryptography", specifier = ">=42.0.0" },
-    { name = "deepseek-harness-sdk", marker = "extra == 'dsh'", specifier = "==0.1.1rc1" },
+    { name = "deepseek-harness-sdk", specifier = "==0.1.2rc1" },
     { name = "docker", specifier = ">=7.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "gitpython", specifier = ">=3.1.40" },
@@ -1759,7 +1758,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.20" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
-provides-extras = ["dev", "dsh"]
+provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [

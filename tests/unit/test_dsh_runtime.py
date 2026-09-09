@@ -762,6 +762,53 @@ def test_run_turn_tools_pipeline() -> None:
     assert types.count("tool.call.response") == 1
 
 
+def test_run_turn_write_emits_artifact_events() -> None:
+    """write 工具（真实 dsh 形态：绝对 file_path + content）在 run_turn
+    管线内产出 artifact.started/completed——runtime_base 统一钩子的回归测试。"""
+    write_args = json.dumps(
+        {
+            "file_path": (
+                "/root/.witty/agent-workspaces/agent-uuid/workspace/selection_sort.py"
+            ),
+            "content": "print('hi')\n",
+        }
+    )
+    notifications = [
+        _notification("s1", "turn/start", {"turn": 1}),
+        _notification(
+            "s1",
+            "tool/call",
+            {"callId": "call-1", "name": "write", "arguments": write_args},
+        ),
+        _write_result_raw(),
+        _notification(
+            "s1",
+            "turn/end",
+            {"reason": {"kind": "normal"}},
+        ),
+    ]
+
+    events = _run_turn_with(_ReplayClient(notifications), session_key="s1")
+    types = _event_types(events)
+
+    assert types == [
+        "message.started",
+        "tool.call.started",
+        "artifact.started",
+        "tool.call.response",
+        "artifact.completed",
+        "message.completed",
+        "turn.completed",
+    ]
+    started = _of_type(events, "artifact.started")[0]["payload"]
+    assert started["id"].endswith("selection_sort.py")
+    assert started["status"] == "creating"
+    assert "content" not in started
+    completed = _of_type(events, "artifact.completed")[0]["payload"]
+    assert completed["status"] == "ready"
+    assert completed["content"] == "print('hi')\n"
+
+
 def test_run_turn_error_turn_no_synthesized_completed() -> None:
     """error 轮不伪造 message.completed：stream.error 先发、turn.completed 收尾。"""
     client = _ReplayClient(_load_fixture("turn-error"))

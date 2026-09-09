@@ -771,7 +771,7 @@ class AgentManager:
                 start_payload = self._build_agent_start_payload(
                     adapter_type=request.adapter_type,
                     model_id=request.model_id,
-                    profile=profile_name,
+                    agent_key=profile_name,
                     gateway_port=gateway_port,
                 )
                 logger.debug(
@@ -874,7 +874,7 @@ class AgentManager:
         *,
         adapter_type: str,
         model_id: str | None,
-        profile: str,
+        agent_key: str,
         gateway_port: int,
     ) -> dict[str, Any]:
         """构建 /agent/start 请求的 payload（创建 + 恢复通用）。
@@ -886,7 +886,7 @@ class AgentManager:
         return config.build_start_payload(
             model_id=model_id,
             model_info=model_info,
-            profile=profile,
+            agent_key=agent_key,
             gateway_port=gateway_port,
         )
 
@@ -970,7 +970,7 @@ class AgentManager:
                 start_payload = self._build_agent_start_payload(
                     adapter_type=agent.adapter_type,
                     model_id=agent.model_id,
-                    profile=agent.id,
+                    agent_key=agent.id,
                     gateway_port=gateway_port,
                 )
                 await adaptor_client.post("/agent/start", json=start_payload)
@@ -1039,7 +1039,7 @@ class AgentManager:
             start_payload = self._build_agent_start_payload(
                 adapter_type=agent.adapter_type,
                 model_id=agent.model_id,
-                profile=agent.id,
+                agent_key=agent.id,
                 gateway_port=gateway_port,
             )
             logger.debug(
@@ -1218,7 +1218,7 @@ class AgentManager:
             start_payload = self._build_agent_start_payload(
                 adapter_type=agent.adapter_type,
                 model_id=agent.model_id,
-                profile=profile_name,
+                agent_key=profile_name,
                 gateway_port=gateway_port,
             )
             logger.debug(
