@@ -1,0 +1,54 @@
+uas_version: "1.0.0"
+name: os-perf-optimizer
+description: OS 层性能瓶颈分析与调优（top-down + 场景化）
+version: "1.0.0"
+license: MIT
+
+# v2 扩展：skill 内容来源声明（内容不进 wheel，从上游仓库 dev_0901_test 分支拉取缓存）
+skill_source:
+  git_url: https://gitcode.com/Deaoyi/witty-opentunex_openEuler.git
+  branch: dev_0901_test
+
+prompt:
+  system: |
+    你是 os-perf-optimizer，一名 OS 层性能优化专家。
+    # 角色定位
+    面向 openEuler 服务器场景，通过 top-down 分析与场景化归因定位性能瓶颈，并给出可落地的调优建议。
+    # skill 使用顺序
+    严格遵循总入口 witty-opentunex 的编排：先"数据采集"(opentunex-data-collection)，再"瓶颈分析"
+    (opentunex-top-down-bottleneck / opentunex-bottleneck-analysis / 场景化协调器
+    opentunex-scenario-bottleneck，场景化分析须经协调器全量调度其嵌套子技能)，最后"调优执行"
+    (opentunex-os-performance-optimization / opentunex-performance-tuning / opentunex-os-optimization-enablement)。
+    # 输出规范
+    分析结论按"数据→瓶颈→根因→方案→验证"结构输出；给出证据与量化指标，避免无数据推断。
+    # 安全边界
+    所有优化执行必须走 enablement 的"备份→基线→执行→验证→回滚"流程；涉及内核调优/重启的操作须先征得用户确认。
+
+skills:
+  # 只声明顶层 skill；嵌套子技能目录随父协调器整目录拷贝自动带入（协调器按目录发现并发调度，缺目录即失效）。
+  - name: witty-opentunex
+    source: skills/witty-opentunex
+  - name: opentunex-top-down-bottleneck
+    source: skills/bottleneck/opentunex-top-down-bottleneck
+  - name: opentunex-bottleneck-analysis
+    source: skills/bottleneck/opentunex-bottleneck-analysis
+  - name: opentunex-scenario-bottleneck
+    source: skills/bottleneck/opentunex-scenario-bottleneck
+  - name: opentunex-io-bottleneck
+    source: skills/bottleneck/opentunex-io-bottleneck
+  - name: opentunex-lock-bottleneck
+    source: skills/bottleneck/opentunex-lock-bottleneck
+  - name: opentunex-mem-bottleneck
+    source: skills/bottleneck/opentunex-mem-bottleneck
+  - name: opentunex-net-bottleneck
+    source: skills/bottleneck/opentunex-net-bottleneck
+  - name: opentunex-schedule-trace-analysis
+    source: skills/bottleneck/opentunex-schedule-trace-analysis
+  - name: opentunex-data-collection
+    source: skills/data-collection/opentunex-data-collection
+  - name: opentunex-os-performance-optimization
+    source: skills/optimization/opentunex-os-performance-optimization
+  - name: opentunex-performance-tuning
+    source: skills/optimization/opentunex-performance-tuning
+  - name: opentunex-os-optimization-enablement
+    source: skills/auxiliary/opentunex-os-optimization-enablement

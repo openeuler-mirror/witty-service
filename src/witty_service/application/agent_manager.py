@@ -498,7 +498,9 @@ class AgentManager:
 
             for attempt in range(10):
                 try:
-                    response = client.get("/agent/skills")
+                    # 必须带 id：runtime 的 skill 目录按 agent_workspace_path(<agent_id>)
+                    # 推导；缺省会回退到 "_default"/"main"，读到错误的空目录。
+                    response = client.get("/agent/skills", params={"id": agent_id})
                     response.raise_for_status()
                     break
                 except httpx.HTTPStatusError as exc:

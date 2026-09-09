@@ -4,6 +4,7 @@ import threading
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from witty_service.api.agent_templates import router as agent_templates_router
 from witty_service.api.agents import router as agents_router
 from witty_service.api.backport import router as backport_router
 from witty_service.api.cve import router as cve_router
@@ -56,6 +57,30 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
             kwargs={"repository": app.state.services.repository},
             daemon=True,
         ).start()
+
+    @app.on_event("startup")
+    def prewarm_skill_repos_on_startup() -> None:
+        """后台预热预置模板的 skill 内容仓库缓存（B2）。
+
+        只做缓存填充，失败仅记 warning，绝不阻塞/中断启动；实例化时的懒兜底保证可用。
+        """
+        from witty_service.application.agent_template_service import (
+            AgentTemplateService,
+        )
+
+        services = app.state.services
+
+        def _prewarm() -> None:
+            try:
+                template_service = AgentTemplateService(
+                    repository=services.repository,
+                    agent_manager_factory=services.get_agent_manager_for_sandbox,
+                )
+                template_service.prewarm_skill_repos()
+            except Exception:
+                logger.exception("Failed to prewarm skill repos on startup")
+
+        threading.Thread(target=_prewarm, daemon=True).start()
 
     @app.on_event("startup")
     def recover_stale_generations() -> None:
@@ -172,6 +197,7 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
         await app.state.services.close()
 
     app.include_router(agents_router)
+    app.include_router(agent_templates_router)
     app.include_router(cve_router)
     app.include_router(models_router)
     app.include_router(mcp_servers_router)

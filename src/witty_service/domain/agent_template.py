@@ -7,7 +7,6 @@ Universal Agent Specification (UAS) v1.0 — 模型定义
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -30,6 +29,13 @@ class AgentTemplateSkill(BaseModel):
     when: list[str] = Field(default_factory=list)
 
 
+class AgentTemplateSkillSource(BaseModel):
+    """v2 扩展：skill 内容的来源声明（上游 git 仓库 + 分支）"""
+
+    git_url: str
+    branch: str | None = None
+
+
 class AgentTemplate(BaseModel):
     """完整的 UAS v1.0 agent 模板"""
 
@@ -42,6 +48,7 @@ class AgentTemplate(BaseModel):
     tags: list[str] = Field(default_factory=list)
     prompt: AgentTemplatePrompt = Field(default_factory=AgentTemplatePrompt)
     skills: list[AgentTemplateSkill] = Field(default_factory=list)
+    skill_source: AgentTemplateSkillSource | None = None
 
     @classmethod
     def from_yaml(cls, yaml_path: str | Path) -> AgentTemplate:

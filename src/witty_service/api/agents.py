@@ -44,7 +44,10 @@ from witty_service.application.agent_manager import (
     SKILL_UNINSTALL_RECORD_FAILED,
     AgentCreateRequest,
 )
-from witty_service.application.agent_template_service import AgentTemplateService
+from witty_service.application.agent_template_service import (
+    AgentTemplateService,
+    validate_model,
+)
 from witty_service.application.artifact_paths import resolve_within_workspace
 from witty_service.application.mcp_runtime_config import McpRuntimeConfigResolver
 from witty_service.application.skill_manager import SkillManager
@@ -211,6 +214,8 @@ def create_agent(
     services: ServiceContainer = Depends(get_services),
 ) -> AgentResponse:
     manager = services.get_agent_manager_for_sandbox(payload.sandbox_type)
+    # S5：与预置模板实例化共用同一 model 校验；model_id 可为空，一旦给出则须存在且启用。
+    validate_model(services.repository, payload.model_id, required=False)
     result = manager.create_agent(
         AgentCreateRequest(
             name=payload.name,
@@ -246,6 +251,8 @@ def create_agent_from_agenthub(
     services: ServiceContainer = Depends(get_services),
 ) -> AgentResponse:
     """从远程 git 仓库拉取 agent 模板（agent.yaml），解析并创建 agent。"""
+    # S5：model_id 可为空，一旦给出则须存在且启用（与 /agents 一致）。
+    validate_model(services.repository, payload.model_id, required=False)
     template_service = AgentTemplateService(
         repository=services.repository,
         agent_manager_factory=services.get_agent_manager_for_sandbox,

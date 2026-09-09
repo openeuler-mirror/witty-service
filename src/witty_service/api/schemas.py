@@ -41,6 +41,28 @@ class CreateAgentHubRequest(BaseModel):
     model_id: str | None = None
 
 
+class InstantiateAgentTemplateRequest(BaseModel):
+    """一键实例化预置模板的请求。
+
+    只有 model_id 与 sandbox_type 可配；adapter_type 恒为 opencode，
+    name 恒为模板名（一模板一实例，同名 agent 已存在返回 409）。
+    """
+
+    model_id: str | None = None
+    sandbox_type: str | None = None
+
+
+class AgentTemplateInfoResponse(BaseModel):
+    """GET /agent-templates 的单个模板信息（只读，零网络、零 DB）。"""
+
+    name: str
+    description: str
+    version: str
+    skill_count: int
+    skills: list[str]
+    source_commit: str | None = None
+
+
 class SendMessageRequest(BaseModel):
     content: str = Field(min_length=1)
 
