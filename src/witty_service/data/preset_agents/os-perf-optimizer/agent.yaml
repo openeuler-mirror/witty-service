@@ -24,6 +24,10 @@ prompt:
     # 安全边界
     所有优化执行必须走 enablement 的"备份→基线→执行→验证→回滚"流程；涉及内核调优/重启的操作须先征得用户确认。
 
+  # 默认使用提问（用户体验）：随 GET /agent-templates 的 default_prompt 暴露，
+  # 由前端渲染成用户可直接发送的默认问题（后端不往 AGENTS.md 注入任何引导内容）。
+  default: 用root用户ssh连接，对xxx.xxx.xxx.xxx上的redis应用，进行性能瓶颈分析并给出调优建议报告。重要的文档先写到本地，再同步到远端
+
 skills:
   # 只声明顶层 skill；嵌套子技能目录随父协调器整目录拷贝自动带入（协调器按目录发现并发调度，缺目录即失效）。
   - name: witty-opentunex

@@ -60,6 +60,12 @@ class AgentTemplateInfoResponse(BaseModel):
     version: str
     skill_count: int
     skills: list[str]
+    mcp_count: int = 0
+    mcp_servers: list[str] = Field(default_factory=list)
+    default_prompt: str | None = Field(
+        default=None,
+        description="模板声明的默认使用提问（给用户直接用；未声明为 null）",
+    )
     source_commit: str | None = None
 
 

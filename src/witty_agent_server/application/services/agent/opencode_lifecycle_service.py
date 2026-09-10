@@ -95,7 +95,7 @@ def _build_opencode_model_config(
         "provider": {model_provider: provider_config},
     }
 
-def _to_opencode_mcp_config(config: dict[str, Any]) -> dict[str, Any]:
+def to_opencode_mcp_config(config: dict[str, Any]) -> dict[str, Any]:
     """将 MCP 配置 dict 转换为 opencode serve 可接受的格式。
 
     转换后输出:
@@ -286,7 +286,7 @@ class OpenCodeLifecycleService:
                 message="Cannot persist MCP config: no profile configured",
             )
 
-        oc_config = _to_opencode_mcp_config(config)
+        oc_config = to_opencode_mcp_config(config)
 
         # ---- XDG 磁盘(持久化优先) ----
         with self._config_lock:

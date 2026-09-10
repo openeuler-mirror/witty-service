@@ -1,6 +1,7 @@
 """预置 Agent 模板端点（B4）：模板浏览 + 一键实例化。
 
 - ``GET /agent-templates``：只读，扫包内元数据，零网络、零 DB（``source_commit`` 仅本地读缓存 HEAD）。
+  同时返回模板声明的 MCP（``mcp_count``/``mcp_servers``）与默认使用提问（``default_prompt``）。
 - ``POST /agent-templates/{name}/instantiate``：一模板一实例；复用 ``AgentTemplateService``
   （skill 缓存 B2 + 元数据扫描 B3 + 编排 B4），创建 agent 后安装 skills / AGENTS.md / opencode.json，
   任一步失败整体回滚（删除 agent 释放同名）。
@@ -60,6 +61,9 @@ def list_agent_templates(
                 version=template.version,
                 skill_count=len(template.skills),
                 skills=[skill.name for skill in template.skills],
+                mcp_count=len(template.mcp),
+                mcp_servers=[server.name for server in template.mcp],
+                default_prompt=template.prompt.default,
                 source_commit=source_commit,
             )
         )
