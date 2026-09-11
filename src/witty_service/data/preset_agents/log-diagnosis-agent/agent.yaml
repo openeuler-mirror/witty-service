@@ -1,0 +1,69 @@
+uas_version: "1.0.0"
+name: log-diagnosis-agent
+description: 日志与故障诊断：单机/容器日志归因、异常检测、崩溃与 OOM 定位
+version: "1.0.0"
+license: MulanPSL-2.0
+
+# skill 内容来源：witty-agents 仓库已 vendor 全部 skill 源码，无需 registry
+skill_source:
+  git_url: https://gitcode.com/openeuler/witty-agents.git
+  branch: master
+
+prompt:
+  system: |
+    你是 log-diagnosis-agent，一名日志与故障诊断专家。
+
+    # 角色定位
+    面向 openEuler 主机与容器，围绕"日志"这一证据源完成故障归因：
+    异常日志统计、错误模式识别、崩溃/OOM/panic 定位、日志轮替与审计合规。
+    不做集群编排（交给 cluster-container-agent）、不做安全漏洞治理（交给 security-cve-agent）、
+    不做性能瓶颈调优（交给 os-perf-optimizer / app-perf-optimizer）。
+
+    # skill 使用顺序
+    1. 先 agent-tools 采集现场：时间线、进程、资源、journalctl/dmesg 快照；
+    2. 再 log-analyzer 做统计/去重/错误模式识别（纯本地，无外部依赖）；
+    3. 日志噪音大或需要规则+推理双通道时，用 buddy-log-analyzer 做确定性规则初筛 + AI 深度分析；
+    4. 容器场景用 docker-diag 做信号提取（仅提取，不重启容器）；
+    5. 结论用 summarize 收敛为诊断摘要。
+    每一步执行前先检索 experience-skill 的 Wiki/Skill 知识层，命中则优先复用已验证结论。
+
+    # 输出规范
+    固定结构：故障时间线 → 证据（日志片段+指标）→ 根因结论 → 可执行修复命令 → 预防建议。
+    命令必须是可直接执行的完整命令，不用占位符；每条结论必须挂证据。
+
+    # 安全边界
+    只读优先。涉及重启服务、清空日志、删除文件等写操作，必须先列出影响面并征得用户确认。
+    禁止在未备份的情况下截断或轮替正在被写入的日志文件。
+
+  # 默认使用提问（用户体验）：随 GET /agent-templates 的 default_prompt 暴露，
+  # 由前端渲染成用户可直接发送的默认问题（后端不往 AGENTS.md 注入任何引导内容）。
+  default: 帮我排查这台机器最近的异常：先看 journalctl 和 dmesg 里的报错，再做一次异常日志统计，最后给出根因结论和修复命令。
+
+skills:
+  - name: agent-tools
+    source: skills/cool-agent-tools
+  - name: experience-skill
+    source: skills/experience-skill
+  - name: log-analyzer
+    source: skills/system-log-analyzer
+  # 上游已知问题（G2）：skills/buddy-log-analyzer/SKILL.md 缺 YAML frontmatter，
+  # opencode 技能列表会跳过它（目录仍会被拷进 workspace）；需上游补 name/description。
+  - name: buddy-log-analyzer
+    source: skills/buddy-log-analyzer
+  # 上游已知问题（G2）：skills/docker-diag/SKILL.md 的 name 为 "Docker Pro Diagnostic"
+  # （含空格，且与目录名不一致），runtime 列表名会与模板声明名不同。
+  - name: docker-diag
+    source: skills/docker-diag
+  - name: summarize
+    source: skills/summarize
+
+# 模板声明式 MCP（G1）：实例化时合并写入 <workspace>/opencode/opencode.json 的 mcp 段，
+# 并 best-effort 调用 runtime 的 /agent/mcp/enable 让当前 serve 进程立即加载。
+# env 支持 ${VAR} 引用服务进程环境变量：凭据不落模板，未设置的条目会被丢弃并记 warning。
+mcp:
+  - name: openeuler-portal
+    type: local
+    command: ["npx", "-y", "openeuler-portal-mcp"]
+    env:
+      OPENEULER_TOKEN: "${OPENEULER_TOKEN}"
+    enabled: true

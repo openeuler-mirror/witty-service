@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import shutil
 import threading
 import uuid
@@ -17,6 +19,10 @@ from typing import Any
 import git
 import yaml
 
+from witty_agent_server.application.services.agent.opencode_lifecycle_service import (
+    to_opencode_mcp_config,
+)
+from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.application.agent_manager import (
     AgentCreateRequest,
     AgentCreateResult,
@@ -48,6 +54,26 @@ def _lock_for(key: str) -> threading.Lock:
             lock = threading.Lock()
             _URL_LOCKS[key] = lock
         return lock
+
+
+# 模板 mcp.env 中的 ``${VAR}`` 环境变量引用（凭据不写进模板，实例化时展开）。
+_ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env_value(value: str) -> str | None:
+    """展开 ``${VAR}``；引用的环境变量未设置时返回 ``None``（调用方丢弃该条目）。"""
+    missing: list[str] = []
+
+    def _replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        resolved = os.environ.get(name)
+        if resolved is None:
+            missing.append(name)
+            return match.group(0)
+        return resolved
+
+    expanded = _ENV_REF_PATTERN.sub(_replace, value)
+    return None if missing else expanded
 
 
 # 预置模板实例化的错误码（S5：集中到服务层，API 复用同一常量与校验逻辑）。
@@ -423,7 +449,7 @@ class AgentTemplateService:
 
         # 7. post-create 配置块（任一步抛错 → 整体回滚释放同名）
         try:
-            self._apply_preset_post_config(
+            await self._apply_preset_post_config(
                 agent_manager=agent_manager,
                 agent=result.agent,
                 template=template,
@@ -458,7 +484,7 @@ class AgentTemplateService:
                 return agent
         return None
 
-    def _apply_preset_post_config(
+    async def _apply_preset_post_config(
         self,
         *,
         agent_manager: AgentManager,
@@ -472,8 +498,10 @@ class AgentTemplateService:
         b. ``sync_installed_agent_skills`` → runtime 自枚举顶层为 builtin（嵌套为载荷不落库）
         c. 写 ``<workspace>/AGENTS.md`` = ``template.prompt.system``（仅在非空时写）
         d. 合并写 ``<workspace>/opencode/opencode.json`` 的 ``instructions``（保留已有）
+        e. 合并写同一份 ``opencode.json`` 的 ``mcp``（模板声明式 MCP，G1）
+        f. best-effort 让 e 的 MCP 在当前 runtime 立即生效（失败不回滚）
 
-        任一步抛错即向上传播，由调用方整体回滚。
+        a~e 任一步抛错即向上传播，由调用方整体回滚；f 只记 warning。
         """
         workspace = Path(agent.workspace_path)
 
@@ -491,6 +519,12 @@ class AgentTemplateService:
 
         # d. 合并 opencode.json 的 instructions（保留已有 model/provider/mcp）
         self._merge_opencode_instructions(workspace)
+
+        # e. 模板声明式 MCP → opencode.json 的 mcp 段（与 instructions 同一文件）
+        self._merge_opencode_mcp(workspace, template)
+
+        # f. 落盘配置重启后才生效，这里再让当前 serve 进程立即加载（best-effort）
+        await self._enable_template_mcp_runtime(agent=agent, template=template)
 
     def _install_preset_skills(
         self, workspace: Path, template: AgentTemplate, cache_dir: Path
@@ -535,24 +569,39 @@ class AgentTemplateService:
         )
         return matches[0] if matches else None
 
+    @staticmethod
+    def _opencode_config_path(workspace: Path) -> Path:
+        """opencode 配置文件路径（XDG_CONFIG_HOME 后由 opencode 追加 /opencode）。"""
+        return workspace / "opencode" / "opencode.json"
+
+    def _read_opencode_config(self, workspace: Path) -> dict[str, Any]:
+        """读取已有 opencode.json；缺失/损坏时返回空 dict（不中断实例化）。"""
+        config_path = self._opencode_config_path(workspace)
+        if not config_path.exists():
+            return {}
+        try:
+            loaded = json.loads(config_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to read existing opencode.json: %s", exc)
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _write_opencode_config(self, workspace: Path, config: dict[str, Any]) -> None:
+        config_path = self._opencode_config_path(workspace)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(config, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        logger.info("Wrote opencode.json: %s", config_path)
+
     def _merge_opencode_instructions(self, workspace: Path) -> None:
         """合并写 ``opencode/opencode.json`` 的 ``instructions``，保留已有 model/provider/mcp。
 
         M5：不覆盖已有 ``instructions``——追加去重；且仅当 ``AGENTS.md`` 确实写出时才引用，
         避免悬空指令。
         """
-        opencode_dir = workspace / "opencode"
-        opencode_dir.mkdir(parents=True, exist_ok=True)
-        config_path = opencode_dir / "opencode.json"
-        config: dict[str, Any] = {}
-        if config_path.exists():
-            try:
-                loaded = json.loads(config_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    config = loaded
-            except (json.JSONDecodeError, OSError) as exc:
-                logger.warning("Failed to read existing opencode.json: %s", exc)
-
+        config = self._read_opencode_config(workspace)
         existing = config.get("instructions", [])
         if not isinstance(existing, list):
             existing = []
@@ -560,11 +609,116 @@ class AgentTemplateService:
         if (workspace / "AGENTS.md").exists() and "AGENTS.md" not in merged:
             merged.append("AGENTS.md")
         config["instructions"] = merged
-        config_path.write_text(
-            json.dumps(config, indent=2, ensure_ascii=False),
-            encoding="utf-8",
+        self._write_opencode_config(workspace, config)
+
+    def _merge_opencode_mcp(self, workspace: Path, template: AgentTemplate) -> list[str]:
+        """把模板 ``mcp`` 段合并写进 ``opencode/opencode.json`` 的 ``mcp``（G1）。
+
+        与 ``POST /agent/mcp/enable`` 复用同一个转换器 ``to_opencode_mcp_config``，
+        保证两条路径产出的 opencode 配置形状完全一致；同名条目按模板覆盖，
+        未在模板中声明的已有 mcp 条目（含 ``/agent/mcp/enable`` 下发的）保留。
+
+        返回本次写入的 server 名列表。
+        """
+        if not template.mcp:
+            return []
+        config = self._read_opencode_config(workspace)
+        mcp_config = config.get("mcp")
+        if not isinstance(mcp_config, dict):
+            mcp_config = {}
+        names: list[str] = []
+        for server in template.mcp:
+            storage_config = server.to_storage_config()
+            mcp_config[server.name] = to_opencode_mcp_config(
+                self._resolve_mcp_env(server.name, storage_config)
+            )
+            names.append(server.name)
+        config["mcp"] = mcp_config
+        self._write_opencode_config(workspace, config)
+        logger.info(
+            "Merged template MCP servers into opencode.json: agent_workspace=%s servers=%s",
+            workspace,
+            names,
         )
-        logger.info("Merged opencode.json instructions: %s", config_path)
+        return names
+
+    @staticmethod
+    def _resolve_mcp_env(server_name: str, storage_config: dict[str, Any]) -> dict[str, Any]:
+        """展开 mcp.env 里的 ``${VAR}`` 引用（凭据来自服务进程环境，不进模板）。
+
+        未设置的环境变量对应的条目会被丢弃并记 warning——把字面量 ``${VAR}`` 传给 MCP
+        只会让服务端拿到一个必然错误的凭据值。
+        """
+        env = storage_config.get("env")
+        if not isinstance(env, dict):
+            return storage_config
+        resolved: dict[str, Any] = {}
+        for key, value in env.items():
+            if not isinstance(value, str):
+                resolved[key] = value
+                continue
+            expanded = _expand_env_value(value)
+            if expanded is None:
+                logger.warning(
+                    "Dropping MCP env entry with unset environment variable: "
+                    "server=%s key=%s value=%s",
+                    server_name,
+                    key,
+                    value,
+                )
+                continue
+            resolved[key] = expanded
+        if resolved:
+            storage_config["env"] = resolved
+        else:
+            storage_config.pop("env", None)
+        return storage_config
+
+    async def _enable_template_mcp_runtime(
+        self, *, agent: AgentRecord, template: AgentTemplate
+    ) -> None:
+        """让模板声明的 MCP 立即在运行中的 runtime 生效（best-effort）。
+
+        磁盘配置已由 :meth:`_merge_opencode_mcp` 落盘，agent 重启后必然生效；
+        这里再走一次 runtime 的 ``POST /agent/mcp/enable``，让当前 serve 进程立即加载。
+        任何失败只记 warning 不回滚——MCP 未加载不应让整个 agent 实例化失败。
+        """
+        if not template.mcp:
+            return
+        sandbox_state = self._repository.get_sandbox_state(agent.id)
+        if sandbox_state is None:
+            logger.warning(
+                "Skip enabling template MCP at runtime: sandbox state missing: agent_id=%s",
+                agent.id,
+            )
+            return
+        client = AdaptorHttpClient(base_url=sandbox_state.adapter_base_url, timeout=15.0)
+        try:
+            for server in template.mcp:
+                try:
+                    await client.post(
+                        "/agent/mcp/enable",
+                        json={
+                            "mcp_server_name": server.name,
+                            "mcp_server_config": server.to_storage_config(),
+                        },
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to enable template MCP at runtime (config is persisted and "
+                        "applies after agent restart): agent_id=%s server=%s",
+                        agent.id,
+                        server.name,
+                        exc_info=True,
+                    )
+                else:
+                    logger.info(
+                        "Enabled template MCP at runtime: agent_id=%s server=%s",
+                        agent.id,
+                        server.name,
+                    )
+        finally:
+            await client.close()
 
     # ------------------------------------------------------------------
     # 仓库管理

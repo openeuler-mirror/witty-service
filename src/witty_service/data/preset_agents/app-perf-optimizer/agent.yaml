@@ -24,6 +24,10 @@ prompt:
     # 安全边界
     优化执行需备份与回滚路径；生产变更须先征得用户确认。
 
+  # 默认使用提问（用户体验）：随 GET /agent-templates 的 default_prompt 暴露，
+  # 由前端渲染成用户可直接发送的默认问题（后端不往 AGENTS.md 注入任何引导内容）。
+  default: 帮我定位一个应用层性能瓶颈：先看现象与指标，再定位到具体环节，最后给出优化方案和压测验证方式。
+
 skills:
   # 只声明顶层 skill；嵌套子技能目录随父协调器整目录拷贝自动带入。
   - name: opentunex-application-bottleneck
