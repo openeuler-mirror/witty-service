@@ -9,8 +9,19 @@ from witty_service.adapter.websocket_client_pool import WebSocketClientPool
 from witty_service.application.agent_manager import AGENT_NOT_FOUND, AgentManager
 from witty_service.application.scheduled_task_service import ScheduledTaskService
 from witty_service.application.session_manager import SessionManager
+from witty_service.channels.crypto import CredentialCipher
+from witty_service.channels.dedup import DEFAULT_RETENTION_DAYS, InboundDedup
+from witty_service.channels.gateway import ChannelGateway
+from witty_service.channels.provisioning.flow import ProvisioningFlow
+from witty_service.channels.provisioning.manual import ManualCredentialBinder
+from witty_service.channels.router import SessionRouter
+from witty_service.channels.turn_gateway import AgentTurnGateway
 from witty_service.config import get_settings
 from witty_service.domain.errors import DomainError, insight_disabled
+from witty_service.persistence.channel_repository import (
+    ChannelInstanceRecord,
+    ChannelRepository,
+)
 from witty_service.persistence.db import (
     create_session_factory,
     create_sqlite_engine,
@@ -32,6 +43,19 @@ class ServiceContainer:
     session_manager: SessionManager = field(init=False)
     insight_facade: Any = field(init=False, default=None)
     scheduled_task_service: ScheduledTaskService = field(init=False)
+    # --- IM Channel 渠道层（框架设计 §3.3 / §3.4） ---------------------------
+    # 这些成员在 __post_init__ 里**只做装配、不做 IO、不解析密钥**：ServiceContainer
+    # 会被大量测试以 MagicMock() 依赖反复构造，任何 IO 或密钥解析都会让无关测试连带
+    # 失败。凭据加密器与数据库枚举都推迟到 ChannelGateway.start()。
+    channel_repository: ChannelRepository = field(init=False)
+    channel_dedup: InboundDedup = field(init=False)
+    channel_turn_gateway: AgentTurnGateway = field(init=False)
+    channel_router: SessionRouter = field(init=False)
+    channel_gateway: ChannelGateway = field(init=False)
+    channel_provisioning: ProvisioningFlow | None = field(init=False, default=None)
+    channel_manual_binder: ManualCredentialBinder | None = field(
+        init=False, default=None
+    )
 
     def __post_init__(self) -> None:
         self.session_manager = SessionManager(repository=self.repository)
@@ -40,6 +64,73 @@ class ServiceContainer:
             get_agent_manager=self.get_agent_manager_for_agent,
             settings=get_settings().scheduler,
         )
+        self._build_channel_components()
+
+    # ==========================================================================
+    # IM Channel 渠道层装配
+    # ==========================================================================
+
+    def _build_channel_components(self) -> None:
+        channel_settings = get_settings().channel
+        self.channel_repository = ChannelRepository(self.repository.session_factory)
+        self.channel_dedup = InboundDedup(
+            self.channel_repository,
+            retention_days=(
+                channel_settings.inbound_retention_days or DEFAULT_RETENTION_DAYS
+            ),
+        )
+        # 渠道标识符按**实例**取值：SessionRouter 调用时传入，因此一个回合网关
+        # 就能服务多个渠道实例（会话来源标记取实际实例的渠道）。
+        self.channel_turn_gateway = AgentTurnGateway(
+            repository=self.repository,
+            get_agent_manager=self.get_agent_manager_for_agent,
+            channel="",
+        )
+        self.channel_router = SessionRouter(
+            repository=self.channel_repository,
+            gateway=self.channel_turn_gateway,
+            dedup=self.channel_dedup,
+            queue_depth=channel_settings.queue_depth,
+            stall_window_seconds=channel_settings.stall_window_seconds,
+            edit_throttle_ms=channel_settings.edit_throttle_ms,
+        )
+        self.channel_gateway = ChannelGateway(
+            repository=self.channel_repository,
+            router=self.channel_router,
+            settings=channel_settings,
+            dedup=self.channel_dedup,
+        )
+
+    def get_channel_cipher(self) -> CredentialCipher:
+        """凭据加密器；密钥缺失或非法时抛 `CHANNEL_SECRET_KEY_INVALID`（fail-closed）。"""
+        return CredentialCipher.from_settings(get_settings().channel.secret_key)
+
+    def get_channel_provisioning(self) -> ProvisioningFlow:
+        """扫码接入编排（进程内单例：同一实例的进行中尝试与节流都记在内存里）。"""
+        if self.channel_provisioning is None:
+            self.channel_provisioning = ProvisioningFlow(
+                repository=self.channel_repository,
+                cipher=self.get_channel_cipher(),
+                on_instance_ready=self.notify_channel_instance_ready,
+            )
+        return self.channel_provisioning
+
+    def get_channel_manual_binder(self) -> ManualCredentialBinder:
+        """手填凭据旁路（与扫码共用同一落库路径）。"""
+        if self.channel_manual_binder is None:
+            self.channel_manual_binder = ManualCredentialBinder(
+                repository=self.channel_repository,
+                cipher=self.get_channel_cipher(),
+                on_instance_ready=self.notify_channel_instance_ready,
+            )
+        return self.channel_manual_binder
+
+    async def notify_channel_instance_ready(
+        self, record: ChannelInstanceRecord
+    ) -> None:
+        """接入成功后的装配钩子：网关未运行时只落库，由重连接口或重启再连。"""
+        if self.channel_gateway.running:
+            await self.channel_gateway.connect_instance(record.id)
 
     def get_sandbox_backend(self, sandbox_type: str) -> SandboxBackend:
         key = sandbox_type.lower()
