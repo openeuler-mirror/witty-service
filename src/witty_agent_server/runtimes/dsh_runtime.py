@@ -247,6 +247,10 @@ class DshRuntime(RuntimeBase):
 
         # block-start / tool-call-delta / usage / finish 子类型不透出：
         # usage 走 assistant/message（P0 spike-2），参数增量不透出。
+        # 注意 dsh 的 tool-call-delta 是**参数**增量，而 tool.call.delta 的载荷契约
+        # 是**增量输出**（channel 语义不同，见 runtime_base.tool_call_delta_event）；
+        # 且它先于 tool.call.started 到达，前端 applyToolCallDelta 需要已有归属事件、
+        # 否则丢弃，因此本次不接线（dsh 的工具参数以 tool/call 终值为准）。
 
     @staticmethod
     def _map_assistant_message(data: Mapping[str, Any]) -> Iterator[RuntimeTurnEvent]:

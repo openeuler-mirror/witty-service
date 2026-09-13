@@ -10,8 +10,8 @@ from witty_agent_server.runtimes.runtime_base import (
     RuntimeTurnEvent,
     RuntimeType,
     TurnEventType,
+    tool_call_delta_event,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +31,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
     def _map_events(self, raw: dict[str, Any]) -> Iterator[RuntimeTurnEvent]:
         yield from self._map_gateway_events(raw)
 
-    def _on_mapped_event(
-        self, event: RuntimeTurnEvent
-    ) -> Iterator[RuntimeTurnEvent]:
+    def _on_mapped_event(self, event: RuntimeTurnEvent) -> Iterator[RuntimeTurnEvent]:
         event_type = event.get("type")
         if event_type == TurnEventType.THINKING:
             yield from self._on_thinking_event(event)
@@ -56,7 +54,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
                 and len(full_text) > len(self._turn.acc_delta)
                 and full_text.startswith(self._turn.acc_delta)
             ):
-                missing = full_text[len(self._turn.acc_delta):]
+                missing = full_text[len(self._turn.acc_delta) :]
                 if missing:
                     yield {
                         "type": TurnEventType.MESSAGE_DELTA,
@@ -65,9 +63,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
                     self._turn.acc_delta = full_text
         yield event
 
-    def _on_thinking_event(
-        self, event: RuntimeTurnEvent
-    ) -> Iterator[RuntimeTurnEvent]:
+    def _on_thinking_event(self, event: RuntimeTurnEvent) -> Iterator[RuntimeTurnEvent]:
         """完整 thinking 块到达时，立即补发尚未通过 delta 下发的尾巴。
 
         OpenClaw 的 thinking delta 流为异步刷出，块尾 delta 可能滞后于随后的
@@ -83,12 +79,8 @@ class OpenClawGatewayRuntime(RuntimeBase):
         # 进入新 thinking block 前清空旧的 suppress，防止不同 block
         # 之间发生前缀碰撞导致陈旧 suppress 污染后续 delta 抵扣。
         self._turn.thinking_suppress = ""
-        if (
-            acc
-            and thinking.startswith(acc)
-            and len(thinking) > len(acc)
-        ):
-            missing = thinking[len(acc):]
+        if acc and thinking.startswith(acc) and len(thinking) > len(acc):
+            missing = thinking[len(acc) :]
             self._turn.thinking_suppress += missing
             yield {
                 "type": TurnEventType.THINKING_DELTA,
@@ -111,10 +103,7 @@ class OpenClawGatewayRuntime(RuntimeBase):
         suppress = self._turn.thinking_suppress
         # 仅当 delta 属于当前 block（text 与 acc 存在前缀延续关系）时才抵扣，
         # 避免误吞新 block 的内容
-        same_block = (
-            text is not None
-            and (acc.startswith(text) or text.startswith(acc))
-        )
+        same_block = text is not None and (acc.startswith(text) or text.startswith(acc))
         if suppress and not same_block:
             # 新 block 的 delta 到达，旧 suppress（未等到的迟到尾巴）作废
             self._turn.thinking_suppress = ""
@@ -147,7 +136,6 @@ class OpenClawGatewayRuntime(RuntimeBase):
             "payload": {**payload, "delta": delta},
         }
 
-
     def _map_gateway_events(
         self, raw_event: Mapping[str, Any]
     ) -> Iterator[RuntimeTurnEvent]:
@@ -161,7 +149,10 @@ class OpenClawGatewayRuntime(RuntimeBase):
 
         if raw_type == "session.usage":
             if normalized_payload:
-                yield {"type": TurnEventType.SESSION_USAGE, "payload": normalized_payload}
+                yield {
+                    "type": TurnEventType.SESSION_USAGE,
+                    "payload": normalized_payload,
+                }
             return
 
         if raw_type == "sessions.changed":
@@ -194,7 +185,10 @@ class OpenClawGatewayRuntime(RuntimeBase):
             if stream == "assistant":
                 delta = data.get("delta")
                 if isinstance(delta, str) and delta:
-                    yield {"type": TurnEventType.MESSAGE_DELTA, "payload": {"delta": delta}}
+                    yield {
+                        "type": TurnEventType.MESSAGE_DELTA,
+                        "payload": {"delta": delta},
+                    }
                 return
             if stream == "thinking":
                 delta = data.get("delta")
@@ -214,7 +208,10 @@ class OpenClawGatewayRuntime(RuntimeBase):
             if stream == "sessions.usage":
                 usage_payload = self._extract_usage_payload(data)
                 if usage_payload is not None:
-                    yield {"type": TurnEventType.SESSION_USAGE, "payload": usage_payload}
+                    yield {
+                        "type": TurnEventType.SESSION_USAGE,
+                        "payload": usage_payload,
+                    }
                 return
             if stream == "lifecycle":
                 phase = self._pick_string(data, "phase")
@@ -257,43 +254,46 @@ class OpenClawGatewayRuntime(RuntimeBase):
         return
 
     def _map_session_message(
-            self, message: Mapping[str, Any]
-        ) -> Iterator[RuntimeTurnEvent]:
-            role = message.get("role")
-            content = message.get("content")
-            if role == "toolResult":
-                yield from self._map_tool_result_message(message)
+        self, message: Mapping[str, Any]
+    ) -> Iterator[RuntimeTurnEvent]:
+        role = message.get("role")
+        content = message.get("content")
+        if role == "toolResult":
+            yield from self._map_tool_result_message(message)
+            return
+        if role == "assistant":
+            if message.get("stopReason") != "stop":
+                yield from self._extract_thinking_events(message)
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict) or item.get("type") != "toolCall":
+                        continue
+                    yield {
+                        "type": TurnEventType.TOOL_CALL_STARTED,
+                        "payload": {
+                            "stage": "started",
+                            "tool_name": self._pick_string(item, "name") or "unknown",
+                            "tool_call_id": self._pick_string(item, "id"),
+                            "arguments": item.get("arguments"),
+                        },
+                    }
+            if message.get("stopReason") != "stop":
                 return
-            if role == "assistant":
-                if message.get("stopReason") != "stop":
-                    yield from self._extract_thinking_events(message)
-                if isinstance(content, list):
-                    for item in content:
-                        if not isinstance(item, dict) or item.get("type") != "toolCall":
-                            continue
-                        yield {
-                            "type": TurnEventType.TOOL_CALL_STARTED,
-                            "payload": {
-                                "stage": "started",
-                                "tool_name": self._pick_string(item, "name") or "unknown",
-                                "tool_call_id": self._pick_string(item, "id"),
-                                "arguments": item.get("arguments"),
-                            },
-                        }
-                if message.get("stopReason") != "stop":
+            if isinstance(content, list):
+                text = "".join(
+                    item.get("text", "")
+                    for item in content
+                    if isinstance(item, dict)
+                    and item.get("type") == "text"
+                    and isinstance(item.get("text"), str)
+                )
+                if text:
+                    yield {
+                        "type": TurnEventType.MESSAGE_COMPLETED,
+                        "payload": {"text": text},
+                    }
                     return
-                if isinstance(content, list):
-                    text = "".join(
-                        item.get("text", "")
-                        for item in content
-                        if isinstance(item, dict)
-                        and item.get("type") == "text"
-                        and isinstance(item.get("text"), str)
-                    )
-                    if text:
-                        yield {"type": TurnEventType.MESSAGE_COMPLETED, "payload": {"text": text}}
-                        return
-            yield from self._extract_thinking_events(message)
+        yield from self._extract_thinking_events(message)
 
     def _map_tool_result_message(
         self, message: Mapping[str, Any]
@@ -385,30 +385,24 @@ class OpenClawGatewayRuntime(RuntimeBase):
             }
             return
 
-        # 增量更新事件: 来自 OpenClaw agent stream 的 phase:update
-        # exec 运行时会通过 onUpdate 推送进程的增量 stdout/stderr
+        # 增量更新事件（phase:update）：exec 运行时的增量 stdout/stderr，透出为
+        # tool.call.delta，前端「边跑边看」。终态输出仍由 stage == "result" 的
+        # tool.call.response 完整下发，两者不重复计内容。
         if stage == "update":
             partial = data.get("partialResult")
+            content = ""
             if isinstance(partial, dict):
-                content = partial.get("content", "")
-                details = partial.get("details", {})
-            else:
-                content = ""
-                details = {}
-            if not isinstance(details, dict):
-                details = {}
-            yield {
-                "type": TurnEventType.TOOL_CALL_DELTA,
-                "payload": {
-                    "stage": "delta",
-                    "name": tool_name,
-                    "tool_call_id": tool_call_id,
-                    "content": content,
-                    "details": details,
-                    "session_id": details.get("sessionId"),
-                    "status": details.get("status", "running"),
-                },
-            }
+                raw_content = partial.get("content")
+                if isinstance(raw_content, str):
+                    content = raw_content
+            # 没有 tool_call_id 就无法归属到具体工具调用：宁可不发，也不发一条
+            # 前端注定丢弃的事件（载荷契约见 runtime_base.tool_call_delta_event）。
+            if content and tool_call_id:
+                yield tool_call_delta_event(
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    delta=content,
+                )
             return
 
     def _pick_value(self, payload: Mapping[str, Any], *keys: str) -> Any:
