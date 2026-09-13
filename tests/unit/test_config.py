@@ -119,3 +119,67 @@ def test_settings_from_env_includes_insight_settings(monkeypatch) -> None:
 
     assert settings.insight.enabled is True
     assert settings.insight.base_url == "http://insight.internal:7396"
+
+
+def _clear_channel_env(monkeypatch) -> None:
+    for key in (
+        "WITTY_CHANNEL_ENABLED",
+        "WITTY_CHANNEL_SECRET_KEY",
+        "WITTY_CHANNEL_STALL_WINDOW_SECONDS",
+        "WITTY_CHANNEL_HEALTH_INTERVAL_SECONDS",
+        "WITTY_CHANNEL_QUEUE_DEPTH",
+        "WITTY_CHANNEL_EDIT_THROTTLE_MS",
+        "WITTY_CHANNEL_INBOUND_RETENTION_DAYS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_channel_settings_defaults(monkeypatch) -> None:
+    _clear_channel_env(monkeypatch)
+
+    settings = config_module.ChannelSettings.from_env()
+
+    assert settings.enabled is True
+    assert settings.secret_key is None
+    assert settings.stall_window_seconds == 90.0
+    assert settings.health_interval_seconds == 15.0
+    assert settings.queue_depth == 3
+    assert settings.edit_throttle_ms == 0
+    assert settings.inbound_retention_days == 7
+
+
+def test_channel_settings_reads_env(monkeypatch) -> None:
+    monkeypatch.setenv("WITTY_CHANNEL_ENABLED", "false")
+    monkeypatch.setenv("WITTY_CHANNEL_SECRET_KEY", "not-parsed-here")
+    monkeypatch.setenv("WITTY_CHANNEL_STALL_WINDOW_SECONDS", "30")
+    monkeypatch.setenv("WITTY_CHANNEL_HEALTH_INTERVAL_SECONDS", "5")
+    monkeypatch.setenv("WITTY_CHANNEL_QUEUE_DEPTH", "7")
+    monkeypatch.setenv("WITTY_CHANNEL_EDIT_THROTTLE_MS", "1500")
+    monkeypatch.setenv("WITTY_CHANNEL_INBOUND_RETENTION_DAYS", "14")
+
+    settings = config_module.ChannelSettings.from_env()
+
+    assert settings.enabled is False
+    # 配置层不做任何密钥解析：原样保存，解析与校验在 ChannelGateway.start()
+    assert settings.secret_key == "not-parsed-here"
+    assert settings.stall_window_seconds == 30.0
+    assert settings.health_interval_seconds == 5.0
+    assert settings.queue_depth == 7
+    assert settings.edit_throttle_ms == 1500
+    assert settings.inbound_retention_days == 14
+
+
+def test_channel_settings_normalizes_blank_secret(monkeypatch) -> None:
+    monkeypatch.setenv("WITTY_CHANNEL_SECRET_KEY", "   ")
+
+    assert config_module.ChannelSettings.from_env().secret_key is None
+
+
+def test_settings_from_env_includes_channel_settings(monkeypatch) -> None:
+    _clear_channel_env(monkeypatch)
+    monkeypatch.setenv("WITTY_CHANNEL_QUEUE_DEPTH", "5")
+
+    settings = config_module.Settings.from_env()
+
+    assert settings.channel.queue_depth == 5
+    assert settings.channel.enabled is True

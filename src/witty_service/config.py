@@ -43,6 +43,15 @@ Witty Service 统一配置管理
     WITTY_INSIGHT_TIMEOUT_SECONDS  insight 请求超时(秒) (默认: 10)
     WITTY_INSIGHT_BEARER_TOKEN     insight Bearer Token (可选)
 
+    # IM Channel 渠道配置
+    WITTY_CHANNEL_ENABLED                 渠道网关总开关 (默认: true)
+    WITTY_CHANNEL_SECRET_KEY              凭据加密密钥(Fernet, base64 32 字节; 必填, 缺失则渠道网关拒绝启动)
+    WITTY_CHANNEL_STALL_WINDOW_SECONDS    停滞窗口长度(秒) (默认: 90)
+    WITTY_CHANNEL_HEALTH_INTERVAL_SECONDS 连接健康复查间隔(秒) (默认: 15)
+    WITTY_CHANNEL_QUEUE_DEPTH             每会话队列深度(排队等待中的条数) (默认: 3)
+    WITTY_CHANNEL_EDIT_THROTTLE_MS        占位消息节流更新间隔(毫秒; 0 表示只更新开始与结束两次)
+    WITTY_CHANNEL_INBOUND_RETENTION_DAYS  入站去重记录保留天数 (默认: 7)
+
 使用示例:
     from witty_service.config import get_settings
 
@@ -429,6 +438,60 @@ class SchedulerSettings:
 
 
 # ==============================================================================
+# IM Channel 渠道配置
+# ==============================================================================
+
+
+@dataclass(frozen=True)
+class ChannelSettings:
+    """IM Channel 渠道层配置（框架设计 §6.1）。
+
+    环境变量:
+        WITTY_CHANNEL_ENABLED: 渠道网关总开关, 默认 true
+        WITTY_CHANNEL_SECRET_KEY: 凭据加密密钥(Fernet, base64 32 字节), 无默认值
+        WITTY_CHANNEL_STALL_WINDOW_SECONDS: 停滞窗口长度(秒), 默认 90
+        WITTY_CHANNEL_HEALTH_INTERVAL_SECONDS: 连接健康复查间隔(秒), 默认 15
+        WITTY_CHANNEL_QUEUE_DEPTH: 每会话队列深度(排队等待中的条数), 默认 3
+        WITTY_CHANNEL_EDIT_THROTTLE_MS: 占位消息节流更新间隔(毫秒), 默认 0
+        WITTY_CHANNEL_INBOUND_RETENTION_DAYS: 入站去重记录保留天数, 默认 7
+
+    **本类绝不做密钥解析**：`secret_key` 只保存原始字符串。Fernet 密钥的解析
+    与校验发生在 `ChannelGateway.start()`（失败则实例状态置 disabled 并拒绝启动），
+    因为 `ServiceContainer.__post_init__` 会被大量测试以 `MagicMock()` 依赖反复
+    构造，在配置读取阶段抛异常会让无关测试连带失败。
+    """
+
+    enabled: bool = True
+    secret_key: str | None = None
+    stall_window_seconds: float = 90.0
+    health_interval_seconds: float = 15.0
+    queue_depth: int = 3
+    edit_throttle_ms: int = 0
+    inbound_retention_days: int = 7
+
+    @classmethod
+    def from_env(cls) -> "ChannelSettings":
+        raw_secret = os.getenv("WITTY_CHANNEL_SECRET_KEY")
+        secret_key = raw_secret.strip() or None if raw_secret is not None else None
+        return cls(
+            enabled=os.getenv("WITTY_CHANNEL_ENABLED", "true").lower()
+            in ("1", "true", "yes"),
+            secret_key=secret_key,
+            stall_window_seconds=float(
+                os.getenv("WITTY_CHANNEL_STALL_WINDOW_SECONDS", "90")
+            ),
+            health_interval_seconds=float(
+                os.getenv("WITTY_CHANNEL_HEALTH_INTERVAL_SECONDS", "15")
+            ),
+            queue_depth=int(os.getenv("WITTY_CHANNEL_QUEUE_DEPTH", "3")),
+            edit_throttle_ms=int(os.getenv("WITTY_CHANNEL_EDIT_THROTTLE_MS", "0")),
+            inbound_retention_days=int(
+                os.getenv("WITTY_CHANNEL_INBOUND_RETENTION_DAYS", "7")
+            ),
+        )
+
+
+# ==============================================================================
 # 主配置类
 # ==============================================================================
 
@@ -453,6 +516,8 @@ class Settings:
     opencode: OpenCodeSettings
     runtime: RuntimeSettings
     scheduler: SchedulerSettings
+    #: IM Channel 渠道配置；带默认值是为了让既有测试的显式构造保持可用
+    channel: ChannelSettings = field(default_factory=ChannelSettings)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -470,6 +535,7 @@ class Settings:
             opencode=OpenCodeSettings.from_env(),
             runtime=RuntimeSettings.from_env(),
             scheduler=SchedulerSettings.from_env(),
+            channel=ChannelSettings.from_env(),
         )
 
 

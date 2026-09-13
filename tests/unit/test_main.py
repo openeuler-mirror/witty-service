@@ -16,14 +16,27 @@ def test_create_app_closes_services_on_shutdown(monkeypatch) -> None:
         lambda **_kwargs: None,
     )
 
+    order: list[str] = []
+
     services = MagicMock()
     services.repository = MagicMock()
     services.repository.find_stale_generating_messages.return_value = []
     services.repository.list_agents_needing_recovery.return_value = []
-    services.close = AsyncMock()
+    services.close = AsyncMock(side_effect=lambda: order.append("close"))
     services.scheduled_task_service = MagicMock()
-    services.scheduled_task_service.start = AsyncMock()
-    services.scheduled_task_service.shutdown = AsyncMock()
+    services.scheduled_task_service.start = AsyncMock(
+        side_effect=lambda: order.append("scheduler.start")
+    )
+    services.scheduled_task_service.shutdown = AsyncMock(
+        side_effect=lambda: order.append("scheduler.shutdown")
+    )
+    services.channel_gateway = MagicMock()
+    services.channel_gateway.start = AsyncMock(
+        side_effect=lambda: order.append("gateway.start") or True
+    )
+    services.channel_gateway.stop = AsyncMock(
+        side_effect=lambda: order.append("gateway.stop")
+    )
 
     with TestClient(main_module.create_app(services=services)):
         pass
@@ -31,6 +44,10 @@ def test_create_app_closes_services_on_shutdown(monkeypatch) -> None:
     services.close.assert_awaited_once_with()
     services.scheduled_task_service.start.assert_awaited_once_with()
     services.scheduled_task_service.shutdown.assert_awaited_once_with()
+    services.channel_gateway.start.assert_awaited_once_with()
+    services.channel_gateway.stop.assert_awaited_once_with()
+    # 关闭顺序（框架设计 §7.2）：网关 -> 调度器 -> services.close()
+    assert order[-3:] == ["gateway.stop", "scheduler.shutdown", "close"]
 
 
 @pytest.mark.asyncio
@@ -55,6 +72,8 @@ async def test_scheduler_starts_after_agent_recovery(monkeypatch) -> None:
     startup_handlers = list(app.router.on_startup)
     names = [getattr(handler, "__name__", str(handler)) for handler in startup_handlers]
     assert names.index("recover_agents") < names.index("start_scheduled_tasks")
+    # 渠道网关必须在 agent 恢复与定时任务之后启动（框架设计 §7.2）
+    assert names.index("start_scheduled_tasks") < names.index("start_channel_gateway")
 
     calls: list[str] = []
     services.repository.list_agents_needing_recovery.side_effect = lambda **_kwargs: (
@@ -63,11 +82,14 @@ async def test_scheduler_starts_after_agent_recovery(monkeypatch) -> None:
     services.scheduled_task_service.start.side_effect = lambda: calls.append(
         "scheduler"
     )
+    services.channel_gateway.start = AsyncMock(
+        side_effect=lambda: calls.append("gateway") or True
+    )
 
-    for name in ("recover_agents", "start_scheduled_tasks"):
+    for name in ("recover_agents", "start_scheduled_tasks", "start_channel_gateway"):
         result = startup_handlers[names.index(name)]()
         if inspect.isawaitable(result):
             await result
 
     assert calls[:2] == ["recovery", "recovery"]
-    assert calls[-1] == "scheduler"
+    assert calls[-2:] == ["scheduler", "gateway"]
