@@ -90,6 +90,7 @@ def _complete_legacy_schema(
         Column("runtime_type", String(32)),
         Column("runtime_session_id", String(255)),
         Column("runtime_session_key", Text()),
+        Column("origin", String(64)),
         UniqueConstraint(
             "runtime_type", "runtime_session_key",
             name="uq_sessions_runtime_type_session_key",
@@ -143,6 +144,20 @@ def _complete_legacy_schema(
         Column("created_at", String(64)),
         Column("updated_at", String(64)),
     )
+    _add_channel_tables(meta)
+
+
+def _add_channel_tables(meta: MetaData) -> None:
+    """20260913_01 新增的渠道表（存量库判定必需对象清单包含它们）。"""
+    for table_name in (
+        "channel_instances",
+        "channel_provisionings",
+        "channel_routes",
+        "channel_inbound_events",
+        "channel_deliveries",
+        "channel_access_policies",
+    ):
+        Table(table_name, meta, Column("id", String(36), primary_key=True))
 
 
 def test_legacy_db_schema_complete_stamps_head(monkeypatch) -> None:
@@ -163,6 +178,55 @@ def test_legacy_db_missing_migration_objects_skips_stamp(monkeypatch) -> None:
     meta = MetaData()
     Table("agents", meta, Column("id", String(36), primary_key=True))  # 无 model_id/mcp_server_list
     Table("sessions", meta, Column("id", String(36), primary_key=True))  # 无 runtime_*
+    meta.create_all(engine)
+    calls: list = []
+    _stamp_spy(monkeypatch, calls)
+    _handle_legacy_db_if_needed(engine, None)
+    assert calls == []
+
+
+def test_legacy_db_missing_channel_tables_skips_stamp(monkeypatch) -> None:
+    """缺渠道表的存量库不得 stamp，否则渠道表永远不会被创建（实施计划 §4.1）。"""
+    engine = create_engine("sqlite:///:memory:")
+    meta = MetaData()
+    _complete_legacy_schema(meta)
+    meta.remove(meta.tables["channel_routes"])
+    meta.create_all(engine)
+    calls: list = []
+    _stamp_spy(monkeypatch, calls)
+    _handle_legacy_db_if_needed(engine, None)
+    assert calls == []
+
+
+def test_legacy_db_missing_sessions_origin_skips_stamp(monkeypatch) -> None:
+    """缺 sessions.origin 的存量库不得 stamp。"""
+    engine = create_engine("sqlite:///:memory:")
+    meta = MetaData()
+    Table(
+        "agents",
+        meta,
+        Column("id", String(36), primary_key=True),
+        Column("model_id", String(36)),
+        Column("mcp_server_list", String(255)),
+    )
+    Table(
+        "sessions",
+        meta,
+        Column("id", String(36), primary_key=True),
+        Column("runtime_type", String(32)),
+        Column("runtime_session_id", String(255)),
+        Column("runtime_session_key", Text()),
+        # 缺 origin
+        UniqueConstraint(
+            "runtime_type", "runtime_session_key",
+            name="uq_sessions_runtime_type_session_key",
+        ),
+        UniqueConstraint(
+            "runtime_type", "runtime_session_id",
+            name="uq_sessions_runtime_type_session_id",
+        ),
+    )
+    _add_channel_tables(meta)
     meta.create_all(engine)
     calls: list = []
     _stamp_spy(monkeypatch, calls)

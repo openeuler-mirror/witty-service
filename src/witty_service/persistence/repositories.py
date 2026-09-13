@@ -141,6 +141,8 @@ class SessionRecord:
     title: str | None = None
     pinned: bool = False
     scheduled_task_id: str | None = None
+    #: 会话来源：web（控制台）/ channel:<渠道标识符> / scheduled（定时任务）
+    origin: str | None = None
 
 
 @dataclass(slots=True)
@@ -498,6 +500,11 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
 class SqliteRepository:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
+
+    @property
+    def session_factory(self) -> sessionmaker[Session]:
+        """供渠道仓储（ChannelRepository）共用同一引擎，**不新建连接**。"""
+        return self._session_factory
 
     def create_agent(
         self,
@@ -1435,6 +1442,22 @@ class SqliteRepository:
             session.refresh(row)
             return self._to_session_record(row)
 
+    def mark_session_origin(self, session_id: str, origin: str) -> SessionRecord:
+        """写入会话来源（框架设计 §5.2）。
+
+        渠道产生的会话由 `AgentTurnGateway` 创建后立即写入 `channel:<渠道标识符>`；
+        控制台（默认 `web`）与定时任务（`scheduled`）沿用既有行为。
+        """
+        with self._session_factory() as session:
+            row = session.get(SessionORM, session_id)
+            if row is None:
+                raise session_not_found(session_id=session_id)
+            row.origin = origin
+            row.updated_at = datetime.now(UTC)
+            session.commit()
+            session.refresh(row)
+            return self._to_session_record(row)
+
     def list_sessions_with_summary(
         self, agent_id: str, *, exclude_scheduled: bool = True
     ) -> list[dict[str, Any]]:
@@ -1601,6 +1624,7 @@ class SqliteRepository:
             title=row.title,
             pinned=row.pinned,
             scheduled_task_id=row.scheduled_task_id,
+            origin=row.origin,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
