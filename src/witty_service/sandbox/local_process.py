@@ -32,6 +32,10 @@ def find_free_port() -> int:
 class LocalProcessSandboxBackend(SandboxBackend):
     sandbox_type = "local_process"
 
+    # ws keepalive 参数，见 _build_command 里的说明。
+    ws_ping_interval_seconds: float = 20.0
+    ws_ping_timeout_seconds: float = 120.0
+
     def __init__(
         self,
         *,
@@ -39,11 +43,17 @@ class LocalProcessSandboxBackend(SandboxBackend):
         agent_server_app_dir: str | None = None,
         stop_timeout: float = 5.0,
         startup_poll_interval: float = 0.1,
+        ws_ping_interval_seconds: float | None = None,
+        ws_ping_timeout_seconds: float | None = None,
     ) -> None:
         self.host = host
         self.agent_server_app_dir = agent_server_app_dir
         self.stop_timeout = stop_timeout
         self.startup_poll_interval = startup_poll_interval
+        if ws_ping_interval_seconds is not None:
+            self.ws_ping_interval_seconds = ws_ping_interval_seconds
+        if ws_ping_timeout_seconds is not None:
+            self.ws_ping_timeout_seconds = ws_ping_timeout_seconds
         self._handles: dict[str, SandboxHandle] = {}
         self._processes: dict[str, Any] = {}
 
@@ -175,7 +185,14 @@ class LocalProcessSandboxBackend(SandboxBackend):
     def _build_command(self, *, port: int, app_dir: str) -> list[str]:
         """构造 witty-agent-server 的启动命令。"""
         witty_service_dir = str(Path(app_dir).parent)
-        
+
+        # ws keepalive：uvicorn 默认 ping_interval=20s / ping_timeout=20s，即"20 秒内
+        # 收不到 pong 就掐连接(1011)"。消费端是 witty-service 的 AgentManager，与本
+        # 进程同机；当它因为落库/GC/机器负载一时回不过神，默认值就会把一次正常的
+        # 长任务判死（表现为前端"任务突然变 error"）。这里放宽超时——真正的断连由
+        # 对端主动 close / TCP RST 立刻发现，不依赖这个心跳超时。
+        # 注意：这是**兜底**，根因（同步落库堵死事件循环）在 witty-service 侧修复，
+        # 见 persistence.db._configure_sqlite_engine 与 agent_manager.PERSIST_BATCH_*。
         return [
             sys.executable,
             "-m",
@@ -188,6 +205,10 @@ class LocalProcessSandboxBackend(SandboxBackend):
             self.host,
             "--port",
             str(port),
+            "--ws-ping-interval",
+            str(self.ws_ping_interval_seconds),
+            "--ws-ping-timeout",
+            str(self.ws_ping_timeout_seconds),
         ]
 
     def _resolve_agent_server_app_dir(self) -> str:

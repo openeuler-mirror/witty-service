@@ -1259,6 +1259,87 @@ def test_create_assistant_message_and_stream_updates(repo: SqliteRepository) -> 
     assert messages[0]["content"] == "hello"
 
 
+def test_create_message_events_bulk_writes_batch_in_one_commit(
+    repo: SqliteRepository,
+) -> None:
+    """批量落库：一次写入整批事件，seq_no 按传入顺序保留。"""
+    _create_agent(repo)
+    _create_session(repo)
+    message_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="",
+        status=MessageStatus.generating,
+    )
+
+    written = repo.create_message_events_bulk(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=message_id,
+        events=[
+            (1, "thinking.delta", {"delta": "a"}),
+            (2, "message.delta", {"delta": "b"}),
+            (3, "message.delta", {"delta": "c"}),
+        ],
+    )
+
+    assert written == 3
+    with repo._session_factory() as db:  # noqa: SLF001 - 断言原始行，绕开组装/压缩
+        rows = (
+            db.query(MessageEventORM)
+            .filter(MessageEventORM.session_id == "session-1")
+            .order_by(MessageEventORM.seq_no)
+            .all()
+        )
+    assert [(row.seq_no, row.event_type) for row in rows] == [
+        (1, "thinking.delta"),
+        (2, "message.delta"),
+        (3, "message.delta"),
+    ]
+    assert all(row.message_id == message_id for row in rows)
+
+
+def test_create_message_events_bulk_retries_on_seq_conflict(
+    repo: SqliteRepository,
+) -> None:
+    """seq_no 撞车（并发写）时整批平移重试，不丢事件。"""
+    _create_agent(repo)
+    _create_session(repo)
+    repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        event_type="message.delta",
+        payload_json={"delta": "已有"},
+        seq_no=1,
+    )
+
+    written = repo.create_message_events_bulk(
+        agent_id="agent-1",
+        session_id="session-1",
+        events=[
+            (1, "message.delta", {"delta": "撞车-a"}),
+            (2, "message.delta", {"delta": "撞车-b"}),
+        ],
+    )
+
+    assert written == 2
+    with repo._session_factory() as db:  # noqa: SLF001
+        rows = (
+            db.query(MessageEventORM)
+            .filter(MessageEventORM.session_id == "session-1")
+            .order_by(MessageEventORM.seq_no)
+            .all()
+        )
+    # 冲突批整批平移到已有最大 seq_no 之后，原有事件不受影响
+    assert [row.seq_no for row in rows] == [1, 2, 3]
+    assert [row.payload_json["delta"] for row in rows] == [
+        "已有",
+        "撞车-a",
+        "撞车-b",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # _assemble_message question 事件处理
 # ---------------------------------------------------------------------------

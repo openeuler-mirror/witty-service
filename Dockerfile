@@ -56,7 +56,9 @@ EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8080/ping || exit 1
 
-CMD ["uvicorn", "witty_agent_server.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]
+# ws keepalive 与本地进程沙箱保持一致（见 sandbox/local_process.py 的说明）：
+# 默认 ping_timeout=20s 会把消费端一时回不过神的长任务直接掐掉(1011)。
+CMD ["uvicorn", "witty_agent_server.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--ws-ping-interval", "20", "--ws-ping-timeout", "120"]
 
 # -------------------- Stage 4a: OpenClaw runtime --------------------
 FROM final-base AS openclaw

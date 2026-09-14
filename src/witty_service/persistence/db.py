@@ -18,7 +18,7 @@ def create_sqlite_engine(database_url: str) -> Engine:
         connect_args={"check_same_thread": False},
         future=True,
     )
-    _enable_sqlite_foreign_keys(engine)
+    _configure_sqlite_engine(engine)
     return engine
 
 
@@ -193,9 +193,34 @@ def _handle_legacy_db_if_needed(engine: Engine, alembic_cfg: AlembicConfig) -> N
     )
     alembic_command.stamp(alembic_cfg, "head")
 
-def _enable_sqlite_foreign_keys(engine: Engine) -> None:
+def _configure_sqlite_engine(engine: Engine) -> None:
+    """统一配置 SQLite 连接级 PRAGMA。
+
+    ⚠️ 这里的 WAL / synchronous=NORMAL 不是"调优选项"，而是**可用性**前提。
+    默认的 ``journal_mode=DELETE`` + ``synchronous=FULL`` 让每次 commit 都要在
+    主库文件上做一次 fsync + 目录同步，本机（ext4/virtio）实测 **4.8 ms/次**。
+    witty-service 的 WS 消费循环是"每收到一个事件就同步落库一次"，而 opencode
+    这类 runtime 是**按 token** 下发 ``message.delta`` / ``thinking.delta``
+    （实测峰值 151~176 事件/秒）——于是 150 × 4.8ms ≈ 720ms/s 的同步磁盘等待
+    全部压在 asyncio 事件循环上。更糟的是 ``websockets`` 已经把帧收进内存队列时
+    ``async for`` 不会真正让出循环，落库会在**不回到事件循环**的情况下连续跑完
+    整个积压（实测单次 30 s），期间 uvicorn 的 ws keepalive ping 拿不到 pong
+    （默认 ping_interval=20s / ping_timeout=20s），连接被以
+    ``1011 keepalive ping timeout`` 掐断 —— 前端看到的就是"任务突然变 error"。
+
+    WAL 把 commit 变成对 ``-wal`` 的顺序追加（实测 0.032 ms/次，约 150 倍），
+    ``synchronous=NORMAL`` 只在 checkpoint 时 fsync：WAL 下应用崩溃不丢已提交
+    事务，只有整机掉电才可能丢最后几条 —— 对本服务（可由 runtime 重放/重试）
+    是合适的取舍。
+    """
+
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        # journal_mode 会返回当前模式（内存库返回 "memory"），必须取走结果集。
+        cursor.execute("PRAGMA journal_mode=WAL").fetchall()
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        # 多会话/多线程并发写时不要立刻抛 "database is locked"。
+        cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
