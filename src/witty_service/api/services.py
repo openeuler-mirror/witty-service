@@ -9,7 +9,7 @@ from witty_service.adapter.websocket_client_pool import WebSocketClientPool
 from witty_service.application.agent_manager import AGENT_NOT_FOUND, AgentManager
 from witty_service.application.scheduled_task_service import ScheduledTaskService
 from witty_service.application.session_manager import SessionManager
-from witty_service.channels.crypto import CredentialCipher
+from witty_service.channels.credential_store import ChannelCredentialStore
 from witty_service.channels.dedup import DEFAULT_RETENTION_DAYS, InboundDedup
 from witty_service.channels.gateway import ChannelGateway
 from witty_service.channels.provisioning.flow import ProvisioningFlow
@@ -43,10 +43,10 @@ class ServiceContainer:
     session_manager: SessionManager = field(init=False)
     insight_facade: Any = field(init=False, default=None)
     scheduled_task_service: ScheduledTaskService = field(init=False)
-    # --- IM Channel 渠道层（框架设计 §3.3 / §3.4） ---------------------------
-    # 这些成员在 __post_init__ 里**只做装配、不做 IO、不解析密钥**：ServiceContainer
-    # 会被大量测试以 MagicMock() 依赖反复构造，任何 IO 或密钥解析都会让无关测试连带
-    # 失败。凭据加密器与数据库枚举都推迟到 ChannelGateway.start()。
+    # --- IM Channel 渠道层 ---------------------------
+    # 这些成员在 __post_init__ 里**只做装配、不做 IO**：ServiceContainer 会被大量
+    # 测试以 MagicMock() 依赖反复构造，任何 IO（含建凭据目录）都会让无关测试连带
+    # 失败。凭据目录的创建与校验都推迟到 ChannelGateway.start()。
     channel_repository: ChannelRepository = field(init=False)
     channel_dedup: InboundDedup = field(init=False)
     channel_turn_gateway: AgentTurnGateway = field(init=False)
@@ -101,16 +101,16 @@ class ServiceContainer:
             dedup=self.channel_dedup,
         )
 
-    def get_channel_cipher(self) -> CredentialCipher:
-        """凭据加密器；密钥缺失或非法时抛 `CHANNEL_SECRET_KEY_INVALID`（fail-closed）。"""
-        return CredentialCipher.from_settings(get_settings().channel.secret_key)
+    def get_channel_credentials(self) -> ChannelCredentialStore:
+        """渠道凭据存储。只构造一个路径对象"""
+        return ChannelCredentialStore.from_settings(get_settings().channel)
 
     def get_channel_provisioning(self) -> ProvisioningFlow:
         """扫码接入编排（进程内单例：同一实例的进行中尝试与节流都记在内存里）。"""
         if self.channel_provisioning is None:
             self.channel_provisioning = ProvisioningFlow(
                 repository=self.channel_repository,
-                cipher=self.get_channel_cipher(),
+                store=self.get_channel_credentials(),
                 on_instance_ready=self.notify_channel_instance_ready,
             )
         return self.channel_provisioning
@@ -120,7 +120,7 @@ class ServiceContainer:
         if self.channel_manual_binder is None:
             self.channel_manual_binder = ManualCredentialBinder(
                 repository=self.channel_repository,
-                cipher=self.get_channel_cipher(),
+                store=self.get_channel_credentials(),
                 on_instance_ready=self.notify_channel_instance_ready,
             )
         return self.channel_manual_binder

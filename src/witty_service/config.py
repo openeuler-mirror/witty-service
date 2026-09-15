@@ -45,7 +45,7 @@ Witty Service 统一配置管理
 
     # IM Channel 渠道配置
     WITTY_CHANNEL_ENABLED                 渠道网关总开关 (默认: true)
-    WITTY_CHANNEL_SECRET_KEY              凭据加密密钥(Fernet, base64 32 字节; 必填, 缺失则渠道网关拒绝启动)
+    WITTY_CHANNEL_CREDENTIALS_DIR         渠道凭据目录(默认: ~/.witty/channel-credentials; 必须 0700)
     WITTY_CHANNEL_STALL_WINDOW_SECONDS    停滞窗口长度(秒) (默认: 90)
     WITTY_CHANNEL_HEALTH_INTERVAL_SECONDS 连接健康复查间隔(秒) (默认: 15)
     WITTY_CHANNEL_QUEUE_DEPTH             每会话队列深度(排队等待中的条数) (默认: 3)
@@ -442,27 +442,37 @@ class SchedulerSettings:
 # ==============================================================================
 
 
+#: 渠道凭据目录的默认位置：与默认数据库同属 `~/.witty`，但**不在库文件旁边**——
+#: 备份/同步主库时不会顺带带走凭据（ADR 0004）
+DEFAULT_CREDENTIALS_DIR = Path("~/.witty/channel-credentials")
+
+
 @dataclass(frozen=True)
 class ChannelSettings:
     """IM Channel 渠道层配置（框架设计 §6.1）。
 
     环境变量:
         WITTY_CHANNEL_ENABLED: 渠道网关总开关, 默认 true
-        WITTY_CHANNEL_SECRET_KEY: 凭据加密密钥(Fernet, base64 32 字节), 无默认值
+        WITTY_CHANNEL_CREDENTIALS_DIR: 渠道凭据目录, 默认 ~/.witty/channel-credentials
         WITTY_CHANNEL_STALL_WINDOW_SECONDS: 停滞窗口长度(秒), 默认 90
         WITTY_CHANNEL_HEALTH_INTERVAL_SECONDS: 连接健康复查间隔(秒), 默认 15
         WITTY_CHANNEL_QUEUE_DEPTH: 每会话队列深度(排队等待中的条数), 默认 3
         WITTY_CHANNEL_EDIT_THROTTLE_MS: 占位消息节流更新间隔(毫秒), 默认 0
         WITTY_CHANNEL_INBOUND_RETENTION_DAYS: 入站去重记录保留天数, 默认 7
 
-    **本类绝不做密钥解析**：`secret_key` 只保存原始字符串。Fernet 密钥的解析
-    与校验发生在 `ChannelGateway.start()`（失败则实例状态置 disabled 并拒绝启动），
-    因为 `ServiceContainer.__post_init__` 会被大量测试以 `MagicMock()` 依赖反复
-    构造，在配置读取阶段抛异常会让无关测试连带失败。
+    **凭据不是配置**：平台凭据既不在环境变量里，也不在主库里。它们存放在
+    `credentials_dir` 下的 0600 文件里（目录 0700），主库只保存一个不透明的
+    引用；目录与文件的权限由 `ChannelGateway.start()` 校验，不合规即拒绝启动
+    （fail-closed）。见 `channels/credential_store.py` 与 ADR 0004。
+
+    **本类不做任何文件系统操作**：`credentials_dir` 只保存路径字符串。目录的
+    创建与校验发生在 `ChannelGateway.start()`，因为
+    `ServiceContainer.__post_init__` 会被大量测试以 `MagicMock()` 依赖反复构造，
+    在配置读取阶段做 IO 会让无关测试连带失败。
     """
 
     enabled: bool = True
-    secret_key: str | None = None
+    credentials_dir: str = str(DEFAULT_CREDENTIALS_DIR)
     stall_window_seconds: float = 90.0
     health_interval_seconds: float = 15.0
     queue_depth: int = 3
@@ -471,12 +481,11 @@ class ChannelSettings:
 
     @classmethod
     def from_env(cls) -> "ChannelSettings":
-        raw_secret = os.getenv("WITTY_CHANNEL_SECRET_KEY")
-        secret_key = raw_secret.strip() or None if raw_secret is not None else None
+        credentials_dir = (os.getenv("WITTY_CHANNEL_CREDENTIALS_DIR") or "").strip()
         return cls(
             enabled=os.getenv("WITTY_CHANNEL_ENABLED", "true").lower()
             in ("1", "true", "yes"),
-            secret_key=secret_key,
+            credentials_dir=credentials_dir or str(DEFAULT_CREDENTIALS_DIR),
             stall_window_seconds=float(
                 os.getenv("WITTY_CHANNEL_STALL_WINDOW_SECONDS", "90")
             ),

@@ -36,7 +36,8 @@ CHANNEL_TURN_FAILED = "CHANNEL_TURN_FAILED"
 CHANNEL_TURN_ABORTED = "CHANNEL_TURN_ABORTED"
 CHANNEL_INSTANCE_GENERATION_MISMATCH = "CHANNEL_INSTANCE_GENERATION_MISMATCH"
 CHANNEL_ADAPTER_UNKNOWN = "CHANNEL_ADAPTER_UNKNOWN"
-CHANNEL_SECRET_KEY_INVALID = "CHANNEL_SECRET_KEY_INVALID"
+CHANNEL_CREDENTIAL_STORE_INSECURE = "CHANNEL_CREDENTIAL_STORE_INSECURE"
+CHANNEL_CREDENTIAL_STORE_UNAVAILABLE = "CHANNEL_CREDENTIAL_STORE_UNAVAILABLE"
 CHANNEL_GATEWAY_DISABLED = "CHANNEL_GATEWAY_DISABLED"
 CHANNEL_INSTANCE_OFFLINE = "CHANNEL_INSTANCE_OFFLINE"
 
@@ -190,12 +191,25 @@ def channel_adapter_unknown(*, channel: str) -> DomainError:
     )
 
 
-def channel_secret_key_invalid(*, reason: str) -> DomainError:
+def channel_credential_store_insecure(
+    *, path: str, kind: str, reason: str
+) -> DomainError:
+    """凭据文件/目录的权限比"仅所有者"更宽，或所有者不是当前用户。"""
     return channel_error(
-        CHANNEL_SECRET_KEY_INVALID,
-        "WITTY_CHANNEL_SECRET_KEY is missing or invalid.",
+        CHANNEL_CREDENTIAL_STORE_INSECURE,
+        "Channel credential store is readable beyond its owner.",
         status_code=500,
-        details={"reason": reason},
+        details={"path": path, "kind": kind, "reason": reason},
+    )
+
+
+def channel_credential_store_unavailable(*, path: str, reason: str) -> DomainError:
+    """凭据存储不可用（建不了目录、读不了、写不了）。"""
+    return channel_error(
+        CHANNEL_CREDENTIAL_STORE_UNAVAILABLE,
+        "Channel credential store is not usable.",
+        status_code=500,
+        details={"path": path, "reason": reason},
     )
 
 
@@ -257,6 +271,8 @@ __all__ = [
     "CHANNEL_AGENT_NOT_RUNNABLE",
     "CHANNEL_CREDENTIALS_INVALID",
     "CHANNEL_CREDENTIAL_INVALID",
+    "CHANNEL_CREDENTIAL_STORE_INSECURE",
+    "CHANNEL_CREDENTIAL_STORE_UNAVAILABLE",
     "CHANNEL_DELIVERY_UNCERTAIN",
     "CHANNEL_GATEWAY_DISABLED",
     "CHANNEL_INSTANCE_GENERATION_MISMATCH",
@@ -266,7 +282,6 @@ __all__ = [
     "CHANNEL_PROVISIONING_FAILED",
     "CHANNEL_PROVISIONING_NOT_FOUND",
     "CHANNEL_QUEUE_FULL",
-    "CHANNEL_SECRET_KEY_INVALID",
     "CHANNEL_TURN_ABORTED",
     "CHANNEL_TURN_FAILED",
     "CHANNEL_UNSUPPORTED_CONTENT",
@@ -274,6 +289,8 @@ __all__ = [
     "channel_agent_not_bound",
     "channel_agent_not_runnable",
     "channel_credential_invalid",
+    "channel_credential_store_insecure",
+    "channel_credential_store_unavailable",
     "channel_credentials_invalid",
     "channel_delivery_uncertain",
     "channel_error",
@@ -282,7 +299,6 @@ __all__ = [
     "channel_provisioning_failed",
     "channel_provisioning_not_found",
     "channel_queue_full",
-    "channel_secret_key_invalid",
     "channel_turn_aborted",
     "channel_turn_failed",
     "channel_unsupported_content",

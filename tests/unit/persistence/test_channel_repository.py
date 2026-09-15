@@ -49,7 +49,7 @@ def test_create_and_read_instance(repository: ChannelRepository) -> None:
         owner_ref="owner-1",
         agent_id="agent-1",
         config={"bot_id": "bot-1234"},
-        credential_ciphertext=b"cipher",
+        credential_ref="chan_" + "a" * 32,
         credential_mask="bot-****1234",
     )
 
@@ -60,7 +60,7 @@ def test_create_and_read_instance(repository: ChannelRepository) -> None:
     assert loaded.status == "pending"
     assert loaded.generation == 1
     assert loaded.config == {"bot_id": "bot-1234"}
-    assert loaded.credential_ciphertext == b"cipher"
+    assert loaded.credential_ref == "chan_" + "a" * 32
     assert loaded.credential_mask == "bot-****1234"
 
 
@@ -244,7 +244,7 @@ def test_provisioning_lifecycle(repository: ChannelRepository) -> None:
         poll_interval_ms=2000,
         expires_at=_now() + timedelta(minutes=5),
         qr_content="https://example/qr",
-        state_ciphertext=b"tmp",
+        state_ref="prov_" + "b" * 32,
     )
 
     waiting = repository.find_waiting_provisioning(channel="wecom_bot", owner_ref="o1")
@@ -254,11 +254,11 @@ def test_provisioning_lifecycle(repository: ChannelRepository) -> None:
     done = repository.update_provisioning(
         attempt.id,
         status=ProvisioningStatus.succeeded.value,
-        state_ciphertext=None,
+        state_ref=None,
         error_code=None,
     )
     assert done is not None
-    assert done.state_ciphertext is None
+    assert done.state_ref is None
     # 成功之后不再属于"进行中的尝试"
     assert (
         repository.find_waiting_provisioning(channel="wecom_bot", owner_ref="o1")
@@ -318,18 +318,18 @@ def test_update_provisioning_clears_state_on_expiry(
         owner_ref="o1",
         poll_interval_ms=1000,
         expires_at=_now() + timedelta(minutes=5),
-        state_ciphertext=b"tmp",
+        state_ref="prov_" + "b" * 32,
     )
 
     expired = repository.update_provisioning(
         attempt.id,
         status=ProvisioningStatus.expired.value,
-        state_ciphertext=None,
+        state_ref=None,
     )
 
     assert expired is not None
     assert expired.status == "expired"
-    assert expired.state_ciphertext is None
+    assert expired.state_ref is None
 
 
 # ==============================================================================

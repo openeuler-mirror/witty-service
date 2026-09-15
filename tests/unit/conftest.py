@@ -23,6 +23,10 @@ def _disable_file_logging(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     db_path = tmp_path / "db"
     db_path.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("WITTY_WORKSPACE_ROOT", str(workspace))
+    # 渠道凭据目录同样隔离：否则写凭据的测试会在真实的家目录里建出目录
+    monkeypatch.setenv(
+        "WITTY_CHANNEL_CREDENTIALS_DIR", str(tmp_path / "channel-credentials")
+    )
     monkeypatch.setenv("WITTY_DATABASE_URL", f"sqlite:///{db_path / 'witty.sqlite3'}")
     monkeypatch.setenv("PATCHFLOW_STATE_ROOT", str(tmp_path / ".patchflow"))
     # 强制刷新 settings 缓存

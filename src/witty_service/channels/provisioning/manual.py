@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import Any
 
 from witty_service.channels import errors as err
 from witty_service.channels.adapters.base import resolve_adapter_class
+from witty_service.channels.credential_store import ChannelCredentialStore
 from witty_service.channels.provisioning.flow import (
     InstanceReadyHook,
     persist_instance_from_credentials,
@@ -33,11 +33,11 @@ class ManualCredentialBinder:
         self,
         *,
         repository: ChannelRepository,
-        cipher: Any,
+        store: ChannelCredentialStore,
         on_instance_ready: InstanceReadyHook | None = None,
     ) -> None:
         self._repository = repository
-        self._cipher = cipher
+        self._store = store
         self._on_instance_ready = on_instance_ready
 
     async def bind(
@@ -59,7 +59,7 @@ class ManualCredentialBinder:
 
         instance = persist_instance_from_credentials(
             repository=self._repository,
-            cipher=self._cipher,
+            store=self._store,
             channel=channel,
             credentials=material_input,
             owner_ref=owner_ref,

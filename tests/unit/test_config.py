@@ -124,7 +124,7 @@ def test_settings_from_env_includes_insight_settings(monkeypatch) -> None:
 def _clear_channel_env(monkeypatch) -> None:
     for key in (
         "WITTY_CHANNEL_ENABLED",
-        "WITTY_CHANNEL_SECRET_KEY",
+        "WITTY_CHANNEL_CREDENTIALS_DIR",
         "WITTY_CHANNEL_STALL_WINDOW_SECONDS",
         "WITTY_CHANNEL_HEALTH_INTERVAL_SECONDS",
         "WITTY_CHANNEL_QUEUE_DEPTH",
@@ -140,7 +140,8 @@ def test_channel_settings_defaults(monkeypatch) -> None:
     settings = config_module.ChannelSettings.from_env()
 
     assert settings.enabled is True
-    assert settings.secret_key is None
+    # 凭据目录有默认值：凭据不是"必须由部署者提供的密钥"，装好即可用
+    assert settings.credentials_dir == "~/.witty/channel-credentials"
     assert settings.stall_window_seconds == 90.0
     assert settings.health_interval_seconds == 15.0
     assert settings.queue_depth == 3
@@ -150,7 +151,7 @@ def test_channel_settings_defaults(monkeypatch) -> None:
 
 def test_channel_settings_reads_env(monkeypatch) -> None:
     monkeypatch.setenv("WITTY_CHANNEL_ENABLED", "false")
-    monkeypatch.setenv("WITTY_CHANNEL_SECRET_KEY", "not-parsed-here")
+    monkeypatch.setenv("WITTY_CHANNEL_CREDENTIALS_DIR", "/srv/witty/credentials")
     monkeypatch.setenv("WITTY_CHANNEL_STALL_WINDOW_SECONDS", "30")
     monkeypatch.setenv("WITTY_CHANNEL_HEALTH_INTERVAL_SECONDS", "5")
     monkeypatch.setenv("WITTY_CHANNEL_QUEUE_DEPTH", "7")
@@ -160,8 +161,8 @@ def test_channel_settings_reads_env(monkeypatch) -> None:
     settings = config_module.ChannelSettings.from_env()
 
     assert settings.enabled is False
-    # 配置层不做任何密钥解析：原样保存，解析与校验在 ChannelGateway.start()
-    assert settings.secret_key == "not-parsed-here"
+    # 配置层不做任何文件系统操作：原样保存路径，建目录与校验在 ChannelGateway.start()
+    assert settings.credentials_dir == "/srv/witty/credentials"
     assert settings.stall_window_seconds == 30.0
     assert settings.health_interval_seconds == 5.0
     assert settings.queue_depth == 7
@@ -169,10 +170,12 @@ def test_channel_settings_reads_env(monkeypatch) -> None:
     assert settings.inbound_retention_days == 14
 
 
-def test_channel_settings_normalizes_blank_secret(monkeypatch) -> None:
-    monkeypatch.setenv("WITTY_CHANNEL_SECRET_KEY", "   ")
+def test_channel_settings_falls_back_on_blank_credentials_dir(monkeypatch) -> None:
+    monkeypatch.setenv("WITTY_CHANNEL_CREDENTIALS_DIR", "   ")
 
-    assert config_module.ChannelSettings.from_env().secret_key is None
+    settings = config_module.ChannelSettings.from_env()
+
+    assert settings.credentials_dir == "~/.witty/channel-credentials"
 
 
 def test_settings_from_env_includes_channel_settings(monkeypatch) -> None:

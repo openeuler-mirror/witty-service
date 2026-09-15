@@ -2,7 +2,7 @@
 
 职责边界：
 
-- **worker 守卫**：进程数不为 1、或凭据加密密钥非法时**拒绝启动任何渠道连接**，
+- **worker 守卫**：进程数不为 1、或凭据存储不可用时**拒绝启动任何渠道连接**，
   并把实例状态写为 `disabled`——调用方能从实例列表区分"网关没起来"与
   "配置了但从未连上"（框架设计 §7.1）；
 - **装配与监督**：按 `ADAPTER_REGISTRY` 构造适配器；未连接按固定退避序列重试，
@@ -11,9 +11,9 @@
 - **周期清理**：入站去重记录与已结束接入尝试的回收任务在启动时注册（§3.9、§7.2）；
 - **优雅关闭**：停止接收新消息 -> 等待在飞回合（有上限）-> 断开连接。
 
-本模块**不做密钥解析以外的事情**：密钥在 `start()` 里解析一次，失败即拒绝启动；
-`__init__` 保持纯函数（无 IO），因为 `ServiceContainer.__post_init__` 会被大量测试
-以 `MagicMock()` 依赖反复构造。
+凭据在 `start()` 里**校验一次**（目录存在且 0700，否则拒绝启动）；每个实例的凭据在
+装配时按 `credential_ref` 从 0600 文件读回。`__init__` 保持纯函数（无 IO），因为
+`ServiceContainer.__post_init__` 会被大量测试以 `MagicMock()` 依赖反复构造。
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from witty_service.channels.contracts import (
     InboundMessage,
     Route,
 )
-from witty_service.channels.crypto import CredentialCipher
+from witty_service.channels.credential_store import ChannelCredentialStore
 from witty_service.channels.dedup import (
     DEFAULT_RETENTION_DAYS,
     ChannelMaintenanceTask,
@@ -65,6 +65,9 @@ DEFAULT_HEALTH_INTERVAL_SECONDS = 15.0
 
 #: 关闭时等待在飞回合的上限
 DEFAULT_SHUTDOWN_TURN_TIMEOUT_SECONDS = 10.0
+
+#: 已废弃的主密钥环境变量：设置它不再有任何作用（ADR 0004），启动时提醒一次
+LEGACY_SECRET_KEY_ENV = "WITTY_CHANNEL_SECRET_KEY"
 
 #: 监督循环的最小间隔：只用于避免忙循环
 MIN_SUPERVISE_DELAY_SECONDS = 0.01
@@ -178,7 +181,7 @@ class ChannelGateway:
                 else 6 * 60 * 60
             ),
         )
-        self._cipher: CredentialCipher | None = None
+        self._credentials: ChannelCredentialStore | None = None
         self._instances: dict[str, InstanceSupervision] = {}
         self._supervisor: asyncio.Task[None] | None = None
         self._running = False
@@ -203,11 +206,11 @@ class ChannelGateway:
         return self._guard_reason
 
     @property
-    def cipher(self) -> CredentialCipher:
-        """凭据加密器；未成功启动时抛域错误（接口层据此返回明确错误码）。"""
-        if self._cipher is None:
-            raise self._cipher_unavailable()
-        return self._cipher
+    def credentials(self) -> ChannelCredentialStore:
+        """凭据存储；未成功启动时抛域错误（接口层据此返回明确错误码）。"""
+        if self._credentials is None:
+            raise self._credentials_unavailable()
+        return self._credentials
 
     def snapshot(self) -> GatewaySnapshot:
         return GatewaySnapshot(
@@ -246,17 +249,21 @@ class ChannelGateway:
             return False
 
         try:
-            self._cipher = CredentialCipher.from_settings(self._settings.secret_key)
+            store = ChannelCredentialStore.from_settings(self._settings)
+            store.ensure_ready()
         except DomainError as exc:
-            # 密钥缺失/非法：同样拒绝启动，并把实例状态写为 disabled（§7.1）
             logger.error(
-                "Channel gateway refused to start: credential secret key is invalid "
-                "(%s). No channel connection is established.",
+                "Channel gateway refused to start: the credential store at %s is not "
+                "usable (%s: %s). No channel connection is established.",
+                self._settings.credentials_dir,
                 exc.code,
+                exc.details.get("reason") or exc.message,
             )
             self._guard_reason = exc.code
             self._disable_all_instances(exc.code)
             return False
+        # 只有真正起来之后才对外可见：`credentials` 属性是"网关在跑"的断言
+        self._credentials = store
 
         # 上一次因守卫拒绝被置为 disabled 的实例，在成功启动时回到 pending 并重新连接：
         # `disabled` 只表达"网关没起来"，不是"这个实例被停用"（库里没有后者这个状态）。
@@ -285,7 +292,7 @@ class ChannelGateway:
             await self._stop_adapter(state)
         self._instances.clear()
         await self._maintenance.stop()
-        self._cipher = None
+        self._credentials = None
         logger.info("Channel gateway stopped")
 
     # ==========================================================================
@@ -393,31 +400,17 @@ class ChannelGateway:
     def _build(self, record: ChannelInstanceRecord) -> InstanceSupervision | None:
         adapter_cls = self._adapter_resolver(record.channel)
         if adapter_cls is None:
-            logger.error(
-                "Unknown channel '%s' on instance %s; skipping it. Known channels: %s",
-                record.channel,
+            self._mark_instance_error(
                 record.id,
-                ", ".join(sorted(_known_channels())) or "(none)",
-            )
-            self._repository.update_instance(
-                record.id, status=ChannelInstanceStatus.error.value
+                message=(
+                    f"Unknown channel '{record.channel}'; skipping it. "
+                    f"Known channels: {', '.join(sorted(_known_channels())) or '(none)'}"
+                ),
             )
             return None
-        credentials: Mapping[str, str] = {}
-        if record.credential_ciphertext:
-            try:
-                credentials = self.cipher.decrypt_json(record.credential_ciphertext)
-            except DomainError as exc:
-                logger.error(
-                    "Cannot decrypt credentials of channel instance %s (%s); "
-                    "the instance needs to be provisioned again.",
-                    record.id,
-                    exc.code,
-                )
-                self._repository.update_instance(
-                    record.id, status=ChannelInstanceStatus.error.value
-                )
-                return None
+        credentials = self._resolve_credentials(adapter_cls, record)
+        if credentials is None:
+            return None
         adapter = self._adapter_builder(
             adapter_cls,
             instance_id=record.id,
@@ -431,6 +424,82 @@ class ChannelGateway:
             generation=record.generation,
             adapter=adapter,
         )
+
+    def _resolve_credentials(
+        self, adapter_cls: type[ChannelAdapter], record: ChannelInstanceRecord
+    ) -> dict[str, str] | None:
+        """按引用取回实例凭据；不可用时把实例标为 `error` 并返回 None。
+
+        三种"不可用"都必须**显式落成 error**，而不是拿一份空凭据去连：
+        引用缺失（v0.x 遗留的实例）、凭据文件丢失、凭据文件损坏或权限过宽。
+        否则适配器会拿着空凭据反复重连，日志里只有平台侧的"鉴权失败"，
+        排查方向从一开始就是错的。
+        """
+        credentials: dict[str, str] = {}
+        if record.credential_ref:
+            try:
+                credentials = self.credentials.resolve(record.credential_ref) or {}
+            except DomainError as exc:
+                self._mark_instance_error(
+                    record.id,
+                    message=(
+                        f"Cannot read the credentials of channel instance {record.id} "
+                        f"({exc.code}: {exc.details.get('reason') or exc.message}); "
+                        f"the instance needs to be provisioned again."
+                    ),
+                )
+                return None
+            if not credentials:
+                # 引用存在但文件不见了/是空的：接入路径不允许落成"有实例、无密文字段"
+                # 的实例，因此这只可能是文件被删或存储被换过
+                self._mark_instance_error(
+                    record.id,
+                    message=(
+                        f"The credential file of channel instance {record.id} is missing "
+                        f"or empty (ref={record.credential_ref}); the instance needs to "
+                        f"be provisioned again."
+                    ),
+                )
+                return None
+        # `required_credentials` 是"接入时调用方必须提供这些字段"（其中可能包含
+        # 非密配置，例如企微的 bot_id），而这里手上只有密文字段，因此只校验
+        # 那些**确实存放在凭据文件里**的必填字段。
+        config_fields = tuple(getattr(adapter_cls, "config_fields", ()) or ())
+        required = tuple(
+            field
+            for field in (getattr(adapter_cls, "required_credentials", ()) or ())
+            if field not in config_fields
+        )
+        missing = [field for field in required if not credentials.get(field)]
+        if missing:
+            self._mark_instance_error(
+                record.id,
+                message=(
+                    f"Channel instance {record.id} has no usable credentials "
+                    f"(missing: {', '.join(missing)}; ref={record.credential_ref or 'none'}); "
+                    f"it must be provisioned again."
+                ),
+            )
+            return None
+        return credentials
+
+    def _mark_instance_error(self, instance_id: str, *, message: str) -> None:
+        """把实例标为 `error`，并且**只在状态真正变化时**记 ERROR 日志。
+
+        监督循环每 15s 会重新装配一次无法装配的实例；每次都记一条 ERROR 会让真正
+        新的故障淹没在重复里。重复时降级为 DEBUG——状态该改还是照样改，这样
+        "把凭据文件 chmod 回 0600"这类修复仍能在下一个周期自愈。
+        """
+        record = self._repository.get_instance(instance_id)
+        already_marked = (
+            record is not None and record.status == ChannelInstanceStatus.error.value
+        )
+        if not already_marked:
+            self._repository.update_instance(
+                instance_id, status=ChannelInstanceStatus.error.value
+            )
+        log = logger.debug if already_marked else logger.error
+        log(message)
 
     # ==========================================================================
     # 监督循环
@@ -574,11 +643,12 @@ class ChannelGateway:
                 message.route.instance_id,
             )
 
-    def _cipher_unavailable(self) -> DomainError:
+    def _credentials_unavailable(self) -> DomainError:
         from witty_service.channels import errors as err
 
-        return err.channel_secret_key_invalid(
-            reason=self._guard_reason or "channel gateway is not running"
+        return err.channel_credential_store_unavailable(
+            path=str(self._settings.credentials_dir),
+            reason=self._guard_reason or "channel gateway is not running",
         )
 
 

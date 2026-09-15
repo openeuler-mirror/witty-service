@@ -273,3 +273,13 @@ test-results
 .worktrees/
 
 build/
+
+# IM 渠道联调用的本地产物（内含明文密钥与数据库副本，绝不入库）
+/data/im-channel-dev.env
+/data/im-channel-dev.sqlite3
+/data/im-workspace/
+/data/dev-smoke.py
+/data/_manual_probe.py
+# 渠道凭据目录（若把 WITTY_CHANNEL_CREDENTIALS_DIR 指到仓库内，绝不入库）
+/channel-credentials/
+/data/channel-credentials/

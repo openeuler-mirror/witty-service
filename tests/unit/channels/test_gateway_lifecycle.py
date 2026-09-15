@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import pytest
-from cryptography.fernet import Fernet
 
 from tests.unit.channels.fakes import FakeAdapter, FakeTurnGateway, FakeTurnScript
 from witty_service.channels import errors as err
@@ -31,7 +30,6 @@ from witty_service.persistence.channel_repository import ChannelRepository
 from witty_service.persistence.db import create_session_factory, create_sqlite_engine
 from witty_service.persistence.orm import Base, ChannelInstanceStatus
 
-SECRET_KEY = Fernet.generate_key().decode("utf-8")
 HEALTH_INTERVAL = 60.0
 
 
@@ -83,7 +81,7 @@ def _build(
     tmp_path,
     *,
     workers: int | None = 1,
-    secret_key: str | None = SECRET_KEY,
+    credentials_dir: str | None = None,
     enabled: bool = True,
     instance_channel: str = "fake_bot",
     with_instance: bool = True,
@@ -146,7 +144,7 @@ def _build(
         router=router,
         settings=ChannelSettings(
             enabled=enabled,
-            secret_key=secret_key,
+            credentials_dir=credentials_dir or str(tmp_path / "channel-credentials"),
             health_interval_seconds=HEALTH_INTERVAL,
         ),
         dedup=dedup,
@@ -199,23 +197,63 @@ async def test_worker_count_not_one_refuses_to_connect_and_disables_instances(
 
 
 @pytest.mark.asyncio
-async def test_invalid_secret_key_refuses_to_connect_and_disables_instances(
+async def test_insecure_credential_directory_refuses_to_connect_and_disables_instances(
     tmp_path,
 ) -> None:
-    harness = _build(tmp_path, workers=1, secret_key=None)
+    """凭据目录对 group/other 可读：**拒绝启动**，而不是带着已经泄露的凭据继续跑。"""
+    credentials_dir = tmp_path / "channel-credentials"
+    credentials_dir.mkdir(mode=0o755)
+    harness = _build(tmp_path, workers=1, credentials_dir=str(credentials_dir))
     started = await harness.gateway.start()
 
     assert started is False
-    assert harness.gateway.guard_reason == err.CHANNEL_SECRET_KEY_INVALID
+    assert harness.gateway.guard_reason == err.CHANNEL_CREDENTIAL_STORE_INSECURE
     assert harness.adapters == {}
     record = harness.repository.get_instance(harness.instance_id)
     assert record is not None
     assert record.status == ChannelInstanceStatus.disabled.value
-    cipher: object = "not-read"
+    credentials: object = "not-read"
     with pytest.raises(DomainError) as excinfo:
-        cipher = harness.gateway.cipher
-    assert excinfo.value.code == err.CHANNEL_SECRET_KEY_INVALID
-    assert cipher == "not-read"
+        credentials = harness.gateway.credentials
+    assert excinfo.value.code == err.CHANNEL_CREDENTIAL_STORE_UNAVAILABLE
+    assert credentials == "not-read"
+
+
+@pytest.mark.asyncio
+async def test_credential_directory_is_created_owner_only(tmp_path) -> None:
+    """目录不存在时由网关创建，权限必须是 0700。"""
+    credentials_dir = tmp_path / "nested" / "channel-credentials"
+    harness = _build(tmp_path, workers=1, credentials_dir=str(credentials_dir))
+
+    assert await harness.gateway.start() is True
+
+    assert (credentials_dir.stat().st_mode & 0o777) == 0o700
+    await harness.gateway.stop()
+
+
+@pytest.mark.asyncio
+async def test_instance_without_usable_credentials_is_marked_error(
+    tmp_path, caplog
+) -> None:
+    """引用指向的凭据文件不见了：实例落成 error，而不是拿空凭据反复重连。"""
+    harness = _build(tmp_path, workers=1)
+    assert await harness.gateway.start() is True
+    # 模拟"文件被删掉"：实例行里留着一个指向不存在文件的引用
+    harness.repository.update_instance(
+        harness.instance_id, credential_ref="chan_" + "0" * 32
+    )
+    await harness.gateway.disconnect_instance(harness.instance_id)
+    harness.adapters.clear()
+
+    with caplog.at_level(logging.ERROR):
+        await harness.gateway.connect_instance(harness.instance_id)
+
+    assert harness.adapters == {}
+    record = harness.repository.get_instance(harness.instance_id)
+    assert record is not None
+    assert record.status == ChannelInstanceStatus.error.value
+    assert "is missing or empty" in caplog.text
+    await harness.gateway.stop()
 
 
 @pytest.mark.asyncio

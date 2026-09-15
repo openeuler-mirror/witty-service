@@ -12,7 +12,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -573,9 +572,9 @@ class ChannelInstanceORM(Base):
     # 实例世代：实例被删除后重建时递增，用于丢弃旧世代的在途回调
     generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    credential_ciphertext: Mapped[bytes | None] = mapped_column(
-        LargeBinary, nullable=True
-    )
+    # 凭据**不在本表里**：这里只有一个不透明引用，凭据本体在服务用户的
+    # 0600 文件里（channels/credential_store.py、ADR 0004）
+    credential_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     credential_mask: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
@@ -606,8 +605,9 @@ class ChannelProvisioningORM(Base):
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
-    # 平台侧临时凭据：加密存放、绝不外发；接入结束（成功/失败/取消/过期）即清除
-    state_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    # 平台侧临时凭据：存在主库之外（0600 文件）、绝不外发；
+    # 接入结束（成功/失败/取消/过期）即清除引用并删除文件
+    state_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow

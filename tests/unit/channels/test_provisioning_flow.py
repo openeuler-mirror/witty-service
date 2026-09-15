@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from cryptography.fernet import Fernet
 
 from witty_service.channels import errors as err
-from witty_service.channels.crypto import CredentialCipher
+from witty_service.channels.credential_store import ChannelCredentialStore
 from witty_service.channels.provisioning import drivers as driver_module
 from witty_service.channels.provisioning.drivers import (
     STATUS_EXPIRED,
@@ -20,6 +20,7 @@ from witty_service.channels.provisioning.drivers import (
     ProvisioningSession,
 )
 from witty_service.channels.provisioning.flow import (
+    STATE_FIELD,
     ProvisioningAttemptView,
     ProvisioningFlow,
 )
@@ -85,13 +86,13 @@ def repository(tmp_path) -> ChannelRepository:
 
 
 @pytest.fixture
-def cipher() -> CredentialCipher:
-    return CredentialCipher(Fernet.generate_key().decode())
+def store(tmp_path) -> ChannelCredentialStore:
+    return ChannelCredentialStore(tmp_path / "channel-credentials")
 
 
 def _flow(
     repository: ChannelRepository,
-    cipher: CredentialCipher,
+    store: ChannelCredentialStore,
     driver: FakeDriver,
     *,
     ready: list[str] | None = None,
@@ -102,7 +103,7 @@ def _flow(
 
     return ProvisioningFlow(
         repository=repository,
-        cipher=cipher,
+        store=store,
         driver_factory=lambda _channel: driver,
         on_instance_ready=_on_ready if ready is not None else None,
     )
@@ -115,10 +116,10 @@ def _flow(
 
 @pytest.mark.asyncio
 async def test_begin_returns_qr_without_state(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     driver = FakeDriver()
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
 
     view = await flow.begin(channel="wecom_bot", owner_ref="owner-1", agent_id="agent-1")
 
@@ -139,19 +140,19 @@ async def test_begin_returns_qr_without_state(
     }
     stored = repository.get_provisioning(view.attempt_id)
     assert stored is not None
-    assert stored.state_ciphertext is not None
-    assert INSTANCE_LESS_STATE not in stored.state_ciphertext
-    assert cipher.decrypt_json(stored.state_ciphertext)["state"] == (
-        INSTANCE_LESS_STATE.decode()
-    )
+    # 库里只有一个引用；平台临时凭据本体在 0600 文件里
+    assert stored.state_ref is not None
+    payload = store.resolve(stored.state_ref)
+    assert payload is not None
+    assert base64.b64decode(payload[STATE_FIELD]) == INSTANCE_LESS_STATE
 
 
 @pytest.mark.asyncio
 async def test_begin_does_not_create_agent_or_session(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     """接入流程不创建 agent、不创建会话、不发送任何消息（特性设计文档 1.4）。"""
-    flow = _flow(repository, cipher, FakeDriver())
+    flow = _flow(repository, store, FakeDriver())
 
     await flow.begin(channel="wecom_bot", owner_ref="o", agent_id="agent-1")
 
@@ -160,11 +161,11 @@ async def test_begin_does_not_create_agent_or_session(
 
 @pytest.mark.asyncio
 async def test_duplicate_begin_returns_existing_attempt(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     """同一实例同时只允许一个进行中的接入尝试：重复发起返回既有尝试而不是报错。"""
     driver = FakeDriver()
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
 
     first = await flow.begin(channel="wecom_bot", owner_ref="owner-1")
     second = await flow.begin(channel="wecom_bot", owner_ref="owner-1")
@@ -175,9 +176,9 @@ async def test_duplicate_begin_returns_existing_attempt(
 
 @pytest.mark.asyncio
 async def test_other_owner_can_provision_concurrently(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
-    flow = _flow(repository, cipher, FakeDriver())
+    flow = _flow(repository, store, FakeDriver())
 
     first = await flow.begin(channel="wecom_bot", owner_ref="owner-1")
     second = await flow.begin(channel="wecom_bot", owner_ref="owner-2")
@@ -187,9 +188,9 @@ async def test_other_owner_can_provision_concurrently(
 
 @pytest.mark.asyncio
 async def test_unknown_channel_is_rejected(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
-    flow = _flow(repository, cipher, FakeDriver())
+    flow = _flow(repository, store, FakeDriver())
 
     with pytest.raises(DomainError) as excinfo:
         await flow.begin(channel="nope_bot")
@@ -204,7 +205,7 @@ async def test_unknown_channel_is_rejected(
 
 @pytest.mark.asyncio
 async def test_poll_succeeded_persists_credentials_and_creates_instance(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     driver = FakeDriver(
         outcomes=[
@@ -216,7 +217,7 @@ async def test_poll_succeeded_persists_credentials_and_creates_instance(
         ]
     )
     ready: list[str] = []
-    flow = _flow(repository, cipher, driver, ready=ready)
+    flow = _flow(repository, store, driver, ready=ready)
     view = await flow.begin(channel="wecom_bot", owner_ref="owner-1", agent_id="agent-1")
 
     first = await flow.poll(view.attempt_id)
@@ -230,12 +231,13 @@ async def test_poll_succeeded_persists_credentials_and_creates_instance(
     # 对外只有掩码（首 4 末 4），密文字段不进 config
     assert instance.credential_mask == "bot-****5678"
     assert instance.config == {"bot_id": "bot-12345678"}
-    assert instance.credential_ciphertext is not None
-    assert cipher.decrypt_json(instance.credential_ciphertext) == {"secret": "s3cr3t"}
-    # 平台临时凭据已清除
+    assert instance.credential_ref is not None
+    assert store.resolve(instance.credential_ref) == {"secret": "s3cr3t"}
+    # 平台临时凭据已清除：引用置空，文件也删掉
     stored = repository.get_provisioning(view.attempt_id)
     assert stored is not None
-    assert stored.state_ciphertext is None
+    assert stored.state_ref is None
+    assert store.resolve(store.ref_for_provisioning(view.attempt_id)) is None
     assert stored.status == STATUS_SUCCEEDED
     # 编排衔接到实例装配
     import asyncio
@@ -246,7 +248,7 @@ async def test_poll_succeeded_persists_credentials_and_creates_instance(
 
 @pytest.mark.asyncio
 async def test_poll_throttles_by_poll_interval(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     driver = FakeDriver(
         session=ProvisioningSession(
@@ -256,7 +258,7 @@ async def test_poll_throttles_by_poll_interval(
             state=INSTANCE_LESS_STATE,
         )
     )
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
     view = await flow.begin(channel="wecom_bot", owner_ref="owner-1")
 
     await flow.poll(view.attempt_id)
@@ -267,7 +269,7 @@ async def test_poll_throttles_by_poll_interval(
 
 @pytest.mark.asyncio
 async def test_poll_after_terminal_state_is_read_only(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     driver = FakeDriver(
         outcomes=[
@@ -278,7 +280,7 @@ async def test_poll_after_terminal_state_is_read_only(
             )
         ]
     )
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
     view = await flow.begin(channel="wecom_bot", owner_ref="owner-1")
     await flow.poll(view.attempt_id)
 
@@ -295,11 +297,11 @@ async def test_poll_after_terminal_state_is_read_only(
 
 @pytest.mark.asyncio
 async def test_begin_driver_failure_raises_domain_error(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     """驱动无法开始：抛域错误（502），且库里**不留下**任何接入尝试。"""
     driver = FakeDriver(begin_error=RuntimeError("platform unreachable"))
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
 
     with pytest.raises(DomainError) as excinfo:
         await flow.begin(channel="wecom_bot", owner_ref="owner-1")
@@ -312,11 +314,11 @@ async def test_begin_driver_failure_raises_domain_error(
 
 @pytest.mark.asyncio
 async def test_poll_driver_failure_marks_attempt_failed(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     """轮询失败是"这次尝试失败"，不是接口错误：写回终态，前端据此停止轮询。"""
     driver = FakeDriver(poll_error=RuntimeError("platform unreachable"))
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
     view = await flow.begin(channel="wecom_bot", owner_ref="owner-1")
 
     result = await flow.poll(view.attempt_id)
@@ -333,16 +335,16 @@ async def test_poll_driver_failure_marks_attempt_failed(
 
 @pytest.mark.asyncio
 async def test_begin_failure_allows_retry(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     """开始失败不占用"进行中"名额：修好平台后可以立刻重试。"""
     failing = FakeDriver(begin_error=RuntimeError("boom"))
-    flow = _flow(repository, cipher, failing)
+    flow = _flow(repository, store, failing)
     with pytest.raises(DomainError):
         await flow.begin(channel="wecom_bot", owner_ref="owner-1")
 
     working = FakeDriver()
-    flow_ok = _flow(repository, cipher, working)
+    flow_ok = _flow(repository, store, working)
     view = await flow_ok.begin(channel="wecom_bot", owner_ref="owner-1")
 
     assert view.status == STATUS_WAITING
@@ -351,9 +353,9 @@ async def test_begin_failure_allows_retry(
 
 @pytest.mark.asyncio
 async def test_poll_unknown_attempt_raises(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
-    flow = _flow(repository, cipher, FakeDriver())
+    flow = _flow(repository, store, FakeDriver())
 
     with pytest.raises(DomainError) as excinfo:
         await flow.poll("missing")
@@ -363,10 +365,10 @@ async def test_poll_unknown_attempt_raises(
 
 @pytest.mark.asyncio
 async def test_succeeded_without_credentials_marks_failed(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     driver = FakeDriver(outcomes=[ProvisioningOutcome(status=STATUS_SUCCEEDED)])
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
     view = await flow.begin(channel="wecom_bot", owner_ref="o")
 
     result = await flow.poll(view.attempt_id)
@@ -377,12 +379,12 @@ async def test_succeeded_without_credentials_marks_failed(
 
 @pytest.mark.asyncio
 async def test_failed_outcome_clears_state(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     driver = FakeDriver(
         outcomes=[ProvisioningOutcome(status=STATUS_FAILED, error_code="WECOM_NOPE")]
     )
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
     view = await flow.begin(channel="wecom_bot", owner_ref="o")
 
     result = await flow.poll(view.attempt_id)
@@ -391,12 +393,13 @@ async def test_failed_outcome_clears_state(
     assert result.attempt.error_code == "WECOM_NOPE"
     stored = repository.get_provisioning(view.attempt_id)
     assert stored is not None
-    assert stored.state_ciphertext is None
+    assert stored.state_ref is None
+    assert store.resolve(store.ref_for_provisioning(view.attempt_id)) is None
 
 
 @pytest.mark.asyncio
 async def test_waiting_outcome_may_refresh_qr(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     new_expiry = _now() + timedelta(minutes=10)
     driver = FakeDriver(
@@ -406,7 +409,7 @@ async def test_waiting_outcome_may_refresh_qr(
             )
         ]
     )
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
     view = await flow.begin(channel="wecom_bot", owner_ref="o")
 
     result = await flow.poll(view.attempt_id)
@@ -421,8 +424,8 @@ async def test_waiting_outcome_may_refresh_qr(
 
 
 @pytest.mark.asyncio
-async def test_expired_clears_state_ciphertext(
-    repository: ChannelRepository, cipher: CredentialCipher
+async def test_expired_clears_the_stored_state(
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     driver = FakeDriver(
         session=ProvisioningSession(
@@ -432,7 +435,7 @@ async def test_expired_clears_state_ciphertext(
             state=INSTANCE_LESS_STATE,
         )
     )
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
     view = await flow.begin(channel="wecom_bot", owner_ref="o")
 
     result = await flow.poll(view.attempt_id)
@@ -440,17 +443,18 @@ async def test_expired_clears_state_ciphertext(
     assert result.attempt.status == STATUS_EXPIRED
     stored = repository.get_provisioning(view.attempt_id)
     assert stored is not None
-    assert stored.state_ciphertext is None
+    assert stored.state_ref is None
+    assert store.resolve(store.ref_for_provisioning(view.attempt_id)) is None
     # 平台都没有被问过：过期判定优先于轮询
     assert driver.poll_calls == []
 
 
 @pytest.mark.asyncio
 async def test_driver_reported_expiry_clears_state(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     driver = FakeDriver(outcomes=[ProvisioningOutcome(status=STATUS_EXPIRED)])
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
     view = await flow.begin(channel="wecom_bot", owner_ref="o")
 
     result = await flow.poll(view.attempt_id)
@@ -458,7 +462,8 @@ async def test_driver_reported_expiry_clears_state(
     assert result.attempt.status == STATUS_EXPIRED
     stored = repository.get_provisioning(view.attempt_id)
     assert stored is not None
-    assert stored.state_ciphertext is None
+    assert stored.state_ref is None
+    assert store.resolve(store.ref_for_provisioning(view.attempt_id)) is None
 
 
 # ==============================================================================
@@ -468,10 +473,10 @@ async def test_driver_reported_expiry_clears_state(
 
 @pytest.mark.asyncio
 async def test_cancel_stops_polling(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     driver = FakeDriver()
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
     view = await flow.begin(channel="wecom_bot", owner_ref="o")
 
     cancelled = await flow.cancel(view.attempt_id)
@@ -479,7 +484,8 @@ async def test_cancel_stops_polling(
     assert cancelled.status == "cancelled"
     stored = repository.get_provisioning(view.attempt_id)
     assert stored is not None
-    assert stored.state_ciphertext is None
+    assert stored.state_ref is None
+    assert store.resolve(store.ref_for_provisioning(view.attempt_id)) is None
 
     # 取消之后即使再被轮询也不会去问平台
     result = await flow.poll(view.attempt_id)
@@ -490,7 +496,7 @@ async def test_cancel_stops_polling(
 @pytest.mark.asyncio
 async def test_manual_path_shares_persistence_order(
     repository: ChannelRepository,
-    cipher: CredentialCipher,
+    store: ChannelCredentialStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """手填凭据走与扫码完全相同的落库顺序：先凭据、后配置。"""
@@ -509,7 +515,7 @@ async def test_manual_path_shares_persistence_order(
     monkeypatch.setattr(repository, "create_instance", _create)
     monkeypatch.setattr(repository, "update_instance", _update)
 
-    binder = ManualCredentialBinder(repository=repository, cipher=cipher)
+    binder = ManualCredentialBinder(repository=repository, store=store)
     instance = await binder.bind(
         channel="wecom_bot",
         credentials={"bot_id": "bot-12345678", "secret": "s3cr3t"},
@@ -519,7 +525,7 @@ async def test_manual_path_shares_persistence_order(
 
     assert [step for step, _ in order] == ["create", "update"]
     created = order[0][1]
-    assert created["credential_ciphertext"] is not None
+    assert created["credential_ref"] is not None
     assert created["credential_mask"] == "bot-****5678"
     assert created["config"] == {}
     assert order[1][1]["config"] == {"bot_id": "bot-12345678"}
@@ -528,9 +534,9 @@ async def test_manual_path_shares_persistence_order(
 
 @pytest.mark.asyncio
 async def test_manual_bind_requires_credentials(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
-    binder = ManualCredentialBinder(repository=repository, cipher=cipher)
+    binder = ManualCredentialBinder(repository=repository, store=store)
 
     with pytest.raises(DomainError) as excinfo:
         await binder.bind(channel="wecom_bot", credentials={})
@@ -540,9 +546,9 @@ async def test_manual_bind_requires_credentials(
 
 @pytest.mark.asyncio
 async def test_manual_bind_rejects_unknown_channel(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
-    binder = ManualCredentialBinder(repository=repository, cipher=cipher)
+    binder = ManualCredentialBinder(repository=repository, store=store)
 
     with pytest.raises(DomainError) as excinfo:
         await binder.bind(channel="nope", credentials={"secret": "s"})
@@ -553,7 +559,7 @@ async def test_manual_bind_rejects_unknown_channel(
 @pytest.mark.asyncio
 async def test_rollback_leaves_no_half_state(
     repository: ChannelRepository,
-    cipher: CredentialCipher,
+    store: ChannelCredentialStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """任一步失败即回滚：不出现"有配置没凭据"的半成品，也不留下实例行。"""
@@ -573,7 +579,7 @@ async def test_rollback_leaves_no_half_state(
             )
         ]
     )
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
     view = await flow.begin(channel="wecom_bot", owner_ref="o")
 
     result = await flow.poll(view.attempt_id)
@@ -583,19 +589,20 @@ async def test_rollback_leaves_no_half_state(
     assert repository.list_instances() == []
     stored = repository.get_provisioning(view.attempt_id)
     assert stored is not None
-    assert stored.state_ciphertext is None
+    assert stored.state_ref is None
+    assert store.resolve(store.ref_for_provisioning(view.attempt_id)) is None
 
 
 @pytest.mark.asyncio
 async def test_missing_required_credential_field_fails_without_instance(
-    repository: ChannelRepository, cipher: CredentialCipher
+    repository: ChannelRepository, store: ChannelCredentialStore
 ) -> None:
     driver = FakeDriver(
         outcomes=[
             ProvisioningOutcome(status=STATUS_SUCCEEDED, credentials={"bot_id": "b"})
         ]
     )
-    flow = _flow(repository, cipher, driver)
+    flow = _flow(repository, store, driver)
     view = await flow.begin(channel="wecom_bot", owner_ref="o")
 
     result = await flow.poll(view.attempt_id)

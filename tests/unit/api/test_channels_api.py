@@ -11,7 +11,6 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 import witty_service.config as _config
@@ -28,7 +27,6 @@ from witty_service.main import create_app
 from witty_service.persistence.db import create_session_factory, create_sqlite_engine
 from witty_service.persistence.orm import Base
 
-SECRET_KEY = Fernet.generate_key().decode("utf-8")
 AUTH = {"Authorization": "Bearer test-token"}
 BOT_ID = "bot-1234567890"
 BOT_SECRET = "super-secret-value-xyz"
@@ -159,9 +157,13 @@ def _build(
     *,
     gateway_running: bool = True,
     outcome: ProvisioningOutcome | None = None,
+    credentials_dir: str | None = None,
 ) -> Env:
     monkeypatch.setenv("AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("WITTY_CHANNEL_SECRET_KEY", SECRET_KEY)
+    monkeypatch.setenv(
+        "WITTY_CHANNEL_CREDENTIALS_DIR",
+        credentials_dir or str(tmp_path / "channel-credentials"),
+    )
     monkeypatch.setattr(_config, "_settings", None)
 
     engine = create_sqlite_engine(f"sqlite:///{tmp_path / 'channels-api.sqlite3'}")
@@ -176,7 +178,7 @@ def _build(
     services.channel_gateway = gateway  # type: ignore[assignment]
     services.channel_provisioning = ProvisioningFlow(
         repository=services.channel_repository,
-        cipher=services.get_channel_cipher(),
+        store=services.get_channel_credentials(),
         driver_factory=lambda _channel: driver,
         on_instance_ready=services.notify_channel_instance_ready,
     )

@@ -17,7 +17,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from cryptography.fernet import Fernet
 
 import witty_service.config as _config
 from tests.unit.channels.fakes import (
@@ -43,7 +42,6 @@ from witty_service.persistence.db import create_session_factory, create_sqlite_e
 from witty_service.persistence.orm import Base
 from witty_service.persistence.repositories import SqliteRepository
 
-SECRET_KEY = Fernet.generate_key().decode("utf-8")
 AGENT_ID = "agent-1"
 CREDENTIALS = {"bot_id": "e2e-bot-1234567890", "secret": "e2e-secret-value"}
 
@@ -116,7 +114,9 @@ class Env:
 
 
 def _build(tmp_path: Path, monkeypatch, *, stall_window: float = 30.0) -> Env:
-    monkeypatch.setenv("WITTY_CHANNEL_SECRET_KEY", SECRET_KEY)
+    monkeypatch.setenv(
+        "WITTY_CHANNEL_CREDENTIALS_DIR", str(tmp_path / "channel-credentials")
+    )
     monkeypatch.setenv("AUTH_TOKEN", "test-token")
     monkeypatch.setattr(_config, "_settings", None)
 

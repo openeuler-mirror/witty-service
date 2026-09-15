@@ -59,7 +59,8 @@ class ChannelInstanceRecord:
     status: str
     generation: int
     config: dict[str, Any]
-    credential_ciphertext: bytes | None
+    #: 凭据文件的引用（非密）；凭据本体不在主库里
+    credential_ref: str | None
     credential_mask: str | None
     created_at: datetime
     updated_at: datetime
@@ -75,7 +76,8 @@ class ChannelProvisioningRecord:
     qr_content: str | None
     poll_interval_ms: int
     expires_at: datetime
-    state_ciphertext: bytes | None
+    #: 平台临时凭据文件的引用（非密）；接入结束即置空并删除文件
+    state_ref: str | None
     error_code: str | None
     created_at: datetime
     updated_at: datetime
@@ -144,7 +146,7 @@ class ChannelRepository:
         agent_id: str | None = None,
         status: str = ChannelInstanceStatus.pending.value,
         config: dict[str, Any] | None = None,
-        credential_ciphertext: bytes | None = None,
+        credential_ref: str | None = None,
         credential_mask: str | None = None,
         instance_id: str | None = None,
     ) -> ChannelInstanceRecord:
@@ -158,7 +160,7 @@ class ChannelRepository:
                 status=status,
                 generation=1,
                 config=dict(config or {}),
-                credential_ciphertext=credential_ciphertext,
+                credential_ref=credential_ref,
                 credential_mask=credential_mask,
             )
             session.add(row)
@@ -207,7 +209,7 @@ class ChannelRepository:
         agent_id: str | _Unset | None = UNSET,
         status: str | _Unset = UNSET,
         config: dict[str, Any] | _Unset = UNSET,
-        credential_ciphertext: bytes | _Unset | None = UNSET,
+        credential_ref: str | _Unset | None = UNSET,
         credential_mask: str | _Unset | None = UNSET,
         bump_generation: bool = False,
     ) -> ChannelInstanceRecord | None:
@@ -223,8 +225,8 @@ class ChannelRepository:
                 row.status = status
             if not isinstance(config, _Unset):
                 row.config = dict(config)
-            if not isinstance(credential_ciphertext, _Unset):
-                row.credential_ciphertext = credential_ciphertext
+            if not isinstance(credential_ref, _Unset):
+                row.credential_ref = credential_ref
             if not isinstance(credential_mask, _Unset):
                 row.credential_mask = credential_mask
             if bump_generation:
@@ -258,7 +260,7 @@ class ChannelRepository:
         agent_id: str | None = None,
         status: str = ProvisioningStatus.waiting.value,
         qr_content: str | None = None,
-        state_ciphertext: bytes | None = None,
+        state_ref: str | None = None,
         attempt_id: str | None = None,
     ) -> ChannelProvisioningRecord:
         with self._session_factory() as session:
@@ -271,7 +273,7 @@ class ChannelRepository:
                 qr_content=qr_content,
                 poll_interval_ms=poll_interval_ms,
                 expires_at=expires_at,
-                state_ciphertext=state_ciphertext,
+                state_ref=state_ref,
             )
             session.add(row)
             session.commit()
@@ -316,7 +318,7 @@ class ChannelRepository:
         *,
         status: str | _Unset = UNSET,
         qr_content: str | _Unset | None = UNSET,
-        state_ciphertext: bytes | _Unset | None = UNSET,
+        state_ref: str | _Unset | None = UNSET,
         error_code: str | _Unset | None = UNSET,
         agent_id: str | _Unset | None = UNSET,
         expires_at: datetime | _Unset = UNSET,
@@ -329,8 +331,8 @@ class ChannelRepository:
                 row.status = status
             if not isinstance(qr_content, _Unset):
                 row.qr_content = qr_content
-            if not isinstance(state_ciphertext, _Unset):
-                row.state_ciphertext = state_ciphertext
+            if not isinstance(state_ref, _Unset):
+                row.state_ref = state_ref
             if not isinstance(error_code, _Unset):
                 row.error_code = error_code
             if not isinstance(agent_id, _Unset):
@@ -641,7 +643,7 @@ class ChannelRepository:
             status=row.status,
             generation=int(row.generation),
             config=dict(row.config or {}),
-            credential_ciphertext=row.credential_ciphertext,
+            credential_ref=row.credential_ref,
             credential_mask=row.credential_mask,
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -658,7 +660,7 @@ class ChannelRepository:
             qr_content=row.qr_content,
             poll_interval_ms=int(row.poll_interval_ms),
             expires_at=row.expires_at,
-            state_ciphertext=row.state_ciphertext,
+            state_ref=row.state_ref,
             error_code=row.error_code,
             created_at=row.created_at,
             updated_at=row.updated_at,

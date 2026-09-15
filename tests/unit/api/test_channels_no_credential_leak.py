@@ -9,11 +9,8 @@ from __future__ import annotations
 
 import re
 
-import pytest
-
 from tests.unit.api.test_channels_api import (
     AUTH,
-    SECRET_KEY,
     TEMP_STATE,
     _build,
 )
@@ -139,7 +136,8 @@ def test_responses_only_carry_the_declared_mask(tmp_path, monkeypatch) -> None:
     assert "secret" not in created["config"]
 
 
-def test_credentials_are_never_stored_in_plaintext(tmp_path, monkeypatch) -> None:
+def test_credentials_never_enter_the_main_database(tmp_path, monkeypatch) -> None:
+    """主库里既没有明文，也没有密文：只有一个不含任何凭据信息的不透明引用。"""
     env = _build(tmp_path, monkeypatch)
     created = env.client.post(
         "/channels/instances", json=_instance_payload(), headers=AUTH
@@ -147,12 +145,35 @@ def test_credentials_are_never_stored_in_plaintext(tmp_path, monkeypatch) -> Non
 
     record = env.services.channel_repository.get_instance(created["id"])
     assert record is not None
-    assert record.credential_ciphertext is not None
-    # 落库的是密文；密钥不落库（框架设计 §6.2）
-    assert CANARY_SECRET.encode() not in record.credential_ciphertext
-    assert CANARY_BOT_ID.encode() not in record.credential_ciphertext
+    assert record.credential_ref is not None
+    assert record.credential_ref.startswith("chan_")
+    # 引用是实例 id 的摘要，反推不出实例，更推不出凭据
+    assert CANARY_SECRET not in record.credential_ref
+    assert CANARY_BOT_ID not in record.credential_ref
     assert record.credential_mask is not None
     assert CANARY_SECRET not in str(record.config)
+
+    # 整个库文件里也搜不到那串金丝雀
+    database = tmp_path / "channels-api.sqlite3"
+    assert CANARY_SECRET.encode() not in database.read_bytes()
+
+
+def test_credentials_live_in_an_owner_only_file(tmp_path, monkeypatch) -> None:
+    """凭据本体在 0600 文件里、目录 0700（目录与文件的权限都必须显式校验）。"""
+    env = _build(tmp_path, monkeypatch)
+    created = env.client.post(
+        "/channels/instances", json=_instance_payload(), headers=AUTH
+    ).json()
+
+    store = env.services.get_channel_credentials()
+    record = env.services.channel_repository.get_instance(created["id"])
+    assert record is not None and record.credential_ref is not None
+    # bot_id 由适配器声明为**非密配置**，因此落在 config 列；只有 secret 进凭据文件
+    assert store.resolve(record.credential_ref) == {"secret": CANARY_SECRET}
+
+    path = store.directory / f"{record.credential_ref}.json"
+    assert (path.stat().st_mode & 0o777) == 0o600
+    assert (store.directory.stat().st_mode & 0o777) == 0o700
 
 
 def test_openapi_schema_exposes_no_credential_response_field(
@@ -161,30 +182,25 @@ def test_openapi_schema_exposes_no_credential_response_field(
     env = _build(tmp_path, monkeypatch)
     schema = env.client.get("/openapi.json").text
     assert "credential_ciphertext" not in schema
+    assert "credential_ref" not in schema
     # 请求体允许提交凭据，但响应模型里没有任何 "credentials" 字段
     responses = env.client.get("/openapi.json").json()["components"]["schemas"]
     assert "credentials" not in responses["ChannelInstanceResponse"]["properties"]
 
 
-@pytest.mark.parametrize("secret_key_env", [None, "not-a-fernet-key"])
-def test_invalid_secret_key_fails_closed(secret_key_env, tmp_path, monkeypatch) -> None:
-    from witty_service.channels.crypto import CredentialCipher
-    from witty_service.domain.errors import DomainError
+def test_insecure_credential_directory_refuses_to_store(tmp_path, monkeypatch) -> None:
+    """凭据目录对 group/other 可读时**拒绝写入**：接口给出明确错误码，且不留半成品。"""
+    credentials_dir = tmp_path / "leaky-credentials"
+    credentials_dir.mkdir(mode=0o755)
+    env = _build(tmp_path, monkeypatch, credentials_dir=str(credentials_dir))
 
-    if secret_key_env is None:
-        monkeypatch.delenv("WITTY_CHANNEL_SECRET_KEY", raising=False)
-    else:
-        monkeypatch.setenv("WITTY_CHANNEL_SECRET_KEY", secret_key_env)
-
-    with pytest.raises(DomainError) as excinfo:
-        CredentialCipher.from_settings(secret_key_env)
-    assert excinfo.value.code == "CHANNEL_SECRET_KEY_INVALID"
-
-
-def test_secret_key_is_not_returned_by_any_endpoint(tmp_path, monkeypatch) -> None:
-    env = _build(tmp_path, monkeypatch)
-    created = env.client.post(
+    response = env.client.post(
         "/channels/instances", json=_instance_payload(), headers=AUTH
-    ).json()
-    for name, body in _all_responses(env.client, created["id"]):
-        assert SECRET_KEY not in body, f"{name} response leaked the encryption key"
+    )
+
+    assert response.status_code == 500
+    assert (
+        response.json()["error"]["code"] == "CHANNEL_CREDENTIAL_STORE_INSECURE"
+    )
+    assert env.services.channel_repository.list_instances() == []
+    assert list(credentials_dir.iterdir()) == []
