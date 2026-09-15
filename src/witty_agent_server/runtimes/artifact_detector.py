@@ -40,8 +40,6 @@ _CODE_MIME_BY_EXTENSION: dict[str, str] = {
     ".kts": "text/x-kotlin",
     ".scala": "text/x-scala",
     ".sh": "text/x-shellscript",
-    ".bash": "text/x-shellscript",
-    ".zsh": "text/x-shellscript",
     ".sql": "text/x-sql",
     ".vue": "text/x-vue",
     ".svelte": "text/x-svelte",
@@ -54,11 +52,8 @@ _CODE_MIME_BY_EXTENSION: dict[str, str] = {
     ".hs": "text/x-haskell",
     ".clj": "text/x-clojure",
     ".groovy": "text/x-groovy",
-    ".yaml": "application/yaml",
-    ".yml": "application/yaml",
-    ".toml": "application/toml",
-    ".xml": "application/xml",
 }
+
 
 @dataclass(frozen=True)
 class _ArtifactSpec:
@@ -138,6 +133,7 @@ SENSITIVE_FILE_PATTERNS: tuple[str, ...] = (
     "*secrets*",
     "*.secret",
 )
+
 
 def normalize_relative_path(path_value: Any) -> str | None:
     if not isinstance(path_value, str) or not path_value.strip():

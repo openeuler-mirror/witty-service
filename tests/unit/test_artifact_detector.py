@@ -64,7 +64,7 @@ def test_normalize_relative_path_keeps_plain_absolute_path() -> None:
         ("src/app.py", "code", "text/x-python"),
         ("src/main.ts", "code", "text/typescript"),
         ("scripts/run.sh", "code", "text/x-shellscript"),
-        ("config/deploy.yaml", "code", "application/yaml"),
+        ("config/deploy.json", "code", "application/json"),
         ("docs/report.pdf", "pdf", "application/pdf"),
     ],
 )
@@ -85,6 +85,14 @@ def test_detect_artifact_hits_whitelist(
     [
         "src/main.txt",  # 扩展名不在白名单
         "output/notes.txt",  # 扩展名不在白名单
+        # 配置类扩展名已从白名单移除：不再产出 artifact.* 事件，也不内联 content
+        "config/deploy.yaml",
+        "config/deploy.yml",
+        "config/pyproject.toml",
+        "config/pom.xml",
+        # 脚本类只保留 .sh，bash/zsh 扩展名同样移除
+        "scripts/setup.bash",
+        "scripts/setup.zsh",
         "output/sub/../../etc/passwd",
         "demo.exe",
     ],
@@ -188,7 +196,7 @@ def test_artifact_event_none_outside_whitelist_and_accepts_json_args() -> None:
     "file_path",
     [
         "config/credentials.json",
-        "deploy/secrets.yaml",
+        "deploy/secrets.sh",
         "secrets.py",
         "data/credentials.csv",
     ],
@@ -208,7 +216,7 @@ def test_artifact_completed_omits_content_for_sensitive_files(
     [
         "output/demo.html",
         "src/app.py",
-        "config/deploy.yaml",
+        "config/deploy.json",
         "tokenizer.py",  # 名称含 token 但不属于敏感文件，刻意不命中
     ],
 )
