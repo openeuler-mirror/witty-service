@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
+
 from witty_agent_server.infra.clients.base import ClientBase
 from witty_service.config import get_settings
 
@@ -25,7 +26,9 @@ _DEFAULT_EVENT_TIMEOUT = 30.0
 
 _settings = get_settings()
 _DEFAULT_IDLE_TIMEOUT = _settings.openclaw_gateway.idle_timeout
-_DEFAULT_LIFECYCLE_END_DRAIN_TIMEOUT = _settings.openclaw_gateway.lifecycle_end_drain_timeout
+_DEFAULT_LIFECYCLE_END_DRAIN_TIMEOUT = (
+    _settings.openclaw_gateway.lifecycle_end_drain_timeout
+)
 _DEFAULT_MIN_PROTOCOL = 3
 _DEFAULT_MAX_PROTOCOL = 4
 _DEFAULT_SCOPES = [
@@ -88,7 +91,7 @@ class OpenClawGatewayClient(ClientBase):
 
     def _get_token(self) -> str | None:
         """获取 gateway token，延迟解析直到实际使用时。
-        
+
         因为 token 需要在 gateway 创建完成后才能获取到，
         所以不在构造函数中解析，而是延迟到实际需要时。
         """
@@ -174,7 +177,7 @@ class OpenClawGatewayClient(ClientBase):
     def list_agents(self) -> dict[str, Any]:
         with self._open_connection() as ws:
             payload = self._rpc(ws, method="agents.list", params={})
-        logger.info(f"list_agents success")
+        logger.info("list_agents success")
         return payload
 
     def list_sessions(self, *, agent_id: str) -> dict[str, Any]:
@@ -392,7 +395,9 @@ class OpenClawGatewayClient(ClientBase):
 
     def _open_connection(self) -> Any:
         if not self._get_token():
-            logger.warning("_open_connection token check failed, token=%r", self._get_token())
+            logger.warning(
+                "_open_connection token check failed, token=%r", self._get_token()
+            )
             raise OpenClawGatewayClientError(
                 code="GATEWAY_AUTH_MISSING",
                 message="openclaw gateway token not configured",
@@ -536,7 +541,7 @@ class OpenClawGatewayClient(ClientBase):
                 error,
                 message,
                 method,
-            )            
+            )
             if isinstance(error, dict):
                 raw_code = error.get("code")
                 if isinstance(raw_code, str) and raw_code:
@@ -553,6 +558,8 @@ class OpenClawGatewayClient(ClientBase):
         session_key: str,
         run_id: str | None,
     ) -> Iterator[dict[str, Any]]:
+        # 这里不采集用量：网关的 ``sessions.usage`` 是会话累计快照（且刚跑完一轮
+        # 时常为 stale），本轮用量随 assistant message 的 ``usage`` 由 runtime 采集。
         pending_lifecycle_end: dict[str, Any] | None = None
         lifecycle_end_deadline: float | None = None
 
@@ -561,11 +568,8 @@ class OpenClawGatewayClient(ClientBase):
             if lifecycle_end_deadline is not None:
                 remaining = lifecycle_end_deadline - time.monotonic()
                 if remaining <= 0:
-                    yield from self._flush_lifecycle_end(
-                        ws=ws,
-                        session_key=session_key,
-                        pending_lifecycle_end=pending_lifecycle_end,
-                    )
+                    if pending_lifecycle_end is not None:
+                        yield pending_lifecycle_end
                     return
                 recv_timeout = min(recv_timeout, remaining)
 
@@ -577,12 +581,7 @@ class OpenClawGatewayClient(ClientBase):
                 )
             except TimeoutError:
                 if pending_lifecycle_end is not None:
-                    yield from self._flush_lifecycle_end(
-                        ws=ws,
-                        session_key=session_key,
-                        pending_lifecycle_end=pending_lifecycle_end,
-                    )
-                    return
+                    yield pending_lifecycle_end
                 return
             if message.get("type") != "event":
                 continue
@@ -628,11 +627,11 @@ class OpenClawGatewayClient(ClientBase):
                     stop_reason = message_payload.get("stopReason")
                     content = message_payload.get("content")
                     has_text = isinstance(content, list) and any(
-                            isinstance(item, dict)
-                            and item.get("type") == "text"
-                            and isinstance(item.get("text"), str)
-                            and item.get("text")
-                            for item in content
+                        isinstance(item, dict)
+                        and item.get("type") == "text"
+                        and isinstance(item.get("text"), str)
+                        and item.get("text")
+                        for item in content
                     )
                     if stop_reason == "stop" and not has_text:
                         continue
@@ -700,22 +699,6 @@ class OpenClawGatewayClient(ClientBase):
                 lifecycle_end_deadline = (
                     time.monotonic() + self._lifecycle_end_drain_timeout
                 )
-
-    def _flush_lifecycle_end(
-        self,
-        *,
-        ws: Any,
-        session_key: str,
-        pending_lifecycle_end: dict[str, Any] | None,
-    ) -> Iterator[dict[str, Any]]:
-        usage_payload = self._fetch_session_usage(ws=ws, session_key=session_key)
-        if usage_payload is not None:
-            yield {
-                "type": "session.usage",
-                "payload": usage_payload,
-            }
-        if pending_lifecycle_end is not None:
-            yield pending_lifecycle_end
 
     # 统一抽取事件里的 session key，用于并发场景隔离不同会话事件流。
     def _extract_session_key(self, payload: dict[str, Any]) -> str | None:
@@ -801,29 +784,6 @@ class OpenClawGatewayClient(ClientBase):
         except OpenClawGatewayClientError:
             # Best-effort tuning. If subscribe is rejected, keep normal turn flow.
             return
-
-    def _fetch_session_usage(
-        self,
-        *,
-        ws: Any,
-        session_key: str,
-    ) -> dict[str, Any] | None:
-        try:
-            payload = self._rpc(
-                ws,
-                method="sessions.usage",
-                params={"key": session_key},
-            )
-            logger.debug("session usage: %s", json.dumps(payload, ensure_ascii=False))
-        except (OpenClawGatewayClientError, TimeoutError) as exc:
-            # Best-effort usage snapshot. If rejected, keep normal turn flow.
-            logger.debug(
-                "skip session usage snapshot due to fetch failure: session_key=%s error=%r",
-                session_key,
-                exc,
-            )
-            return None
-        return payload if payload else None
 
     def _recv_json(self, ws: Any, *, timeout: float) -> dict[str, Any]:
         try:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from enum import StrEnum
 from typing import Any, Literal, NotRequired, TypedDict
 
@@ -13,6 +13,7 @@ from witty_agent_server.runtimes.artifact_detector import (
     artifact_started_event,
     extract_write_arguments,
 )
+from witty_agent_server.runtimes.usage import normalize_usage_payload
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,16 @@ class TurnEventType(StrEnum):
     QUESTION_ASKED = "question.asked"
     QUESTION_REPLIED = "question.replied"
     QUESTION_REJECTED = "question.rejected"
+
+
+# 终止事件：agentd/agent_manager 见到它们即结束本轮消费，用量必须早于它们下发。
+_TERMINAL_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        TurnEventType.MESSAGE_COMPLETED,
+        TurnEventType.TURN_COMPLETED,
+        TurnEventType.STREAM_ERROR,
+    }
+)
 
 
 class RuntimeResult(TypedDict):
@@ -94,6 +105,10 @@ class RuntimeBase(ABC):
     ) -> Iterator[RuntimeTurnEvent]:
         """执行单轮对话并输出统一的运行时事件流。
 
+        用量：各 runtime 的 ``session.usage``（上游每个 step 一条）在本轮内累计，
+        并在终止事件之前只下发一条 —— 终止事件一到 agentd 即停止转发本轮事件，
+        用量只能早不能晚；载荷契约见 ``runtimes.usage``。
+
         子类只需实现 ``_map_events()``，可按需覆盖 hook 方法：
         - ``_on_turn_begin()`` — 每轮开始时的状态初始化
         - ``_on_raw_event()`` — 每条原始事件映射前的预处理
@@ -102,7 +117,10 @@ class RuntimeBase(ABC):
         （默认实现即可，子类一般无需覆盖）
         """
         seen_started: set[str] = set()
-        last_usage: dict[str, Any] | None = None
+        # 上游每个 step 都给一条 session.usage：本轮累计、收尾只发一条（前端对
+        # 同名事件是覆盖语义，逐条下发只会剩下最后一步的用量）。
+        usage_total: dict[str, Any] = {}
+        usage_emitted = False
         client = self._ensure_client()
 
         # 每轮独立的 write 工具参数缓存（供 completed 阶段构建 artifact）。
@@ -116,18 +134,27 @@ class RuntimeBase(ABC):
                     event=event, seen_started_tool_calls=seen_started
                 ):
                     continue
-                if self._should_skip_duplicate_usage(
-                    event=event,
-                    last_usage_payload=last_usage,
+                for emitted in (
+                    *self._on_mapped_event(event),
+                    *self._on_artifact_event(event),
                 ):
-                    continue
-                if event.get("type") == TurnEventType.SESSION_USAGE:
-                    payload = event.get("payload")
-                    if isinstance(payload, dict):
-                        last_usage = dict(payload)
+                    if self._sync_usage(emitted, usage_total):
+                        continue
+                    if (
+                        usage_total
+                        and not usage_emitted
+                        and emitted["type"] in _TERMINAL_EVENT_TYPES
+                    ):
+                        usage_emitted = True
+                        yield {
+                            "type": TurnEventType.SESSION_USAGE,
+                            "payload": usage_total,
+                        }
+                    yield emitted
 
-                yield from self._on_mapped_event(event)
-                yield from self._on_artifact_event(event)
+        if usage_total and not usage_emitted:
+            # 兜底：畸形流没有终止事件时，在流结束时补发本轮累计用量。
+            yield {"type": TurnEventType.SESSION_USAGE, "payload": usage_total}
 
     @abstractmethod
     def _map_events(self, raw: dict[str, Any]) -> Iterator[RuntimeTurnEvent]:
@@ -304,18 +331,22 @@ class RuntimeBase(ABC):
         return False
 
     @staticmethod
-    def _should_skip_duplicate_usage(
-        *,
-        event: RuntimeTurnEvent,
-        last_usage_payload: Mapping[str, Any] | None,
-    ) -> bool:
-        """跳过重复的 ``session.usage`` 事件（按 payload 内容相等去重）。"""
-        if event.get("type") != TurnEventType.SESSION_USAGE:
+    def _sync_usage(event: RuntimeTurnEvent, total: dict[str, Any]) -> bool:
+        """把 ``session.usage`` 的用量并入本轮累计并吞掉该事件（返回是否吞掉）。"""
+        if event["type"] != TurnEventType.SESSION_USAGE:
             return False
-        payload = event.get("payload")
-        if not isinstance(payload, dict):
-            return False
-        return last_usage_payload is not None and dict(last_usage_payload) == payload
+        normalized = normalize_usage_payload(event.get("payload"))
+        for field, value in normalized.items():
+            current = total.get(field)
+            total[field] = (
+                current + value
+                if isinstance(current, (int, float))
+                and not isinstance(current, bool)
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                else value
+            )
+        return True
 
     def _ensure_client(self) -> ClientBase:
         if self._client is None:

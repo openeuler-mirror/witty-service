@@ -492,7 +492,7 @@ class SessionWSOrchestrator:
             return "assistant"
         if event_type.startswith("tool"):
             return "tool"
-        if event_type.startswith("usage"):
+        if event_type.startswith("session.usage"):
             return "system"
         if event_type.startswith("question"):
             return "assistant"

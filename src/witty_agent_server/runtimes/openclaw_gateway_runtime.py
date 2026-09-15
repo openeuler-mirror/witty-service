@@ -12,6 +12,10 @@ from witty_agent_server.runtimes.runtime_base import (
     TurnEventType,
     tool_call_delta_event,
 )
+from witty_agent_server.runtimes.usage import (
+    has_token_usage,
+    normalize_usage_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,14 +151,6 @@ class OpenClawGatewayRuntime(RuntimeBase):
             payload if isinstance(payload, dict) else {}
         )
 
-        if raw_type == "session.usage":
-            if normalized_payload:
-                yield {
-                    "type": TurnEventType.SESSION_USAGE,
-                    "payload": normalized_payload,
-                }
-            return
-
         if raw_type == "sessions.changed":
             runtime_session_id = self._pick_string(normalized_payload, "sessionId")
             if runtime_session_id is None:
@@ -205,14 +201,6 @@ class OpenClawGatewayRuntime(RuntimeBase):
             if stream == "tool":
                 yield from self._map_agent_tool_stream(data)
                 return
-            if stream == "sessions.usage":
-                usage_payload = self._extract_usage_payload(data)
-                if usage_payload is not None:
-                    yield {
-                        "type": TurnEventType.SESSION_USAGE,
-                        "payload": usage_payload,
-                    }
-                return
             if stream == "lifecycle":
                 phase = self._pick_string(data, "phase")
                 if not isinstance(phase, str):
@@ -262,6 +250,12 @@ class OpenClawGatewayRuntime(RuntimeBase):
             yield from self._map_tool_result_message(message)
             return
         if role == "assistant":
+            # 用量挂在每个 step 的 assistant message 上，是流内唯一的按轮用量来源
+            # （网关不推送用量事件，``sessions.usage`` 只是返回会话累计快照的 RPC）；
+            # 每 step 一条，由 ``RuntimeBase.run_turn`` 累计成一条下发。
+            usage = normalize_usage_payload(message.get("usage"))
+            if has_token_usage(usage):
+                yield {"type": TurnEventType.SESSION_USAGE, "payload": usage}
             if message.get("stopReason") != "stop":
                 yield from self._extract_thinking_events(message)
             if isinstance(content, list):
@@ -421,68 +415,4 @@ class OpenClawGatewayRuntime(RuntimeBase):
         value = self._pick_value(payload, *keys)
         if isinstance(value, bool):
             return value
-        return None
-
-    def _extract_usage_payload(
-        self, payload: Mapping[str, Any]
-    ) -> dict[str, Any] | None:
-        seen: set[int] = set()
-        queue: list[Mapping[str, Any]] = [payload]
-        while queue:
-            current = queue.pop(0)
-            identity = id(current)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            usage = self._parse_usage_fields(current)
-            if usage is not None:
-                return usage
-            nested_usage = current.get("usage")
-            if isinstance(nested_usage, dict):
-                queue.append(nested_usage)
-            totals = current.get("totals")
-            if isinstance(totals, dict):
-                queue.append(totals)
-            sessions = current.get("sessions")
-            if isinstance(sessions, list):
-                for session_item in sessions:
-                    if not isinstance(session_item, dict):
-                        continue
-                    session_usage = session_item.get("usage")
-                    if isinstance(session_usage, dict):
-                        queue.append(session_usage)
-        return None
-
-    def _parse_usage_fields(self, payload: Mapping[str, Any]) -> dict[str, Any] | None:
-        output: dict[str, Any] = {}
-        input_tokens = self._pick_usage_int(payload, "inputTokens")
-        output_tokens = self._pick_usage_int(payload, "outputTokens")
-        total_tokens = self._pick_usage_int(payload, "totalTokens")
-        total_cost = self._pick_usage_float(
-            payload,
-            "estimatedCostUsd",
-            "totalCost",
-        )
-        if input_tokens is not None:
-            output["input_tokens"] = input_tokens
-        if output_tokens is not None:
-            output["output_tokens"] = output_tokens
-        if total_tokens is not None:
-            output["total_tokens"] = total_tokens
-        if total_cost is not None:
-            output["total_cost"] = total_cost
-        return output if output else None
-
-    def _pick_usage_int(self, payload: Mapping[str, Any], *keys: str) -> int | None:
-        for key in keys:
-            value = payload.get(key)
-            if isinstance(value, int):
-                return value
-        return None
-
-    def _pick_usage_float(self, payload: Mapping[str, Any], *keys: str) -> float | None:
-        for key in keys:
-            value = payload.get(key)
-            if isinstance(value, (int, float)):
-                return float(value)
         return None

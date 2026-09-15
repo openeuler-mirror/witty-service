@@ -273,16 +273,12 @@ def test_run_turn_suppress_not_leak_across_thinking_blocks() -> None:
     runtime = OpenClawGatewayRuntime(
         client=StubGatewayClient(
             [
-                _thinking_delta_raw(
-                    THINKING_FULL[:10], THINKING_FULL[:10]
-                ),
+                _thinking_delta_raw(THINKING_FULL[:10], THINKING_FULL[:10]),
                 _two_block_assistant_raw(),
                 # 第一个 block 的迟到 delta（suppress 已被 block2 清空，正常透传）
                 _thinking_delta_raw(THINKING_FULL[10:], THINKING_FULL),
                 # 第二个 block 的 delta（正常透传）
-                _thinking_delta_raw(
-                    THINKING_BLOCK2, THINKING_BLOCK2
-                ),
+                _thinking_delta_raw(THINKING_BLOCK2, THINKING_BLOCK2),
             ]
         )
     )
@@ -294,14 +290,14 @@ def test_run_turn_suppress_not_leak_across_thinking_blocks() -> None:
     # _on_thinking_event 处理 block2 时会在开头清空 block1 的 suppress，
     # 因此迟到 delta 不会被 suppress 吞掉而是正常透传。
     assert types == [
-        "thinking.delta",      # block1 initial delta
-        "thinking.delta",      # 补发的 block1 尾巴
-        "thinking",            # block1 complete
-        "thinking",            # block2 complete
-        "tool.call.started",   # exec
-        "tool.call.started",   # read
-        "thinking.delta",      # block1 迟到 delta（未被抑制，正常透传）
-        "thinking.delta",      # block2 delta（正常透传）
+        "thinking.delta",  # block1 initial delta
+        "thinking.delta",  # 补发的 block1 尾巴
+        "thinking",  # block1 complete
+        "thinking",  # block2 complete
+        "tool.call.started",  # exec
+        "tool.call.started",  # read
+        "thinking.delta",  # block1 迟到 delta（未被抑制，正常透传）
+        "thinking.delta",  # block2 delta（正常透传）
     ]
 
 
@@ -366,12 +362,19 @@ def _tool_stream_event(
         "type": "agent",
         "payload": {
             "stream": "tool",
-            "data": {"phase": phase, "toolName": "write", "toolCallId": "call-1", **data},
+            "data": {
+                "phase": phase,
+                "toolName": "write",
+                "toolCallId": "call-1",
+                **data,
+            },
         },
     }
 
 
-def _write_turn_events(*, args: dict[str, Any], is_error: bool = False) -> list[dict[str, Any]]:
+def _write_turn_events(
+    *, args: dict[str, Any], is_error: bool = False
+) -> list[dict[str, Any]]:
     runtime = OpenClawGatewayRuntime(
         client=StubGatewayClient(
             [
@@ -379,7 +382,10 @@ def _write_turn_events(*, args: dict[str, Any], is_error: bool = False) -> list[
                 _tool_stream_event(
                     phase="result",
                     isError=is_error,
-                    result={"content": "wrote", "details": {"exitCode": 1 if is_error else 0}},
+                    result={
+                        "content": "wrote",
+                        "details": {"exitCode": 1 if is_error else 0},
+                    },
                 ),
             ]
         )
@@ -429,3 +435,102 @@ def test_run_turn_ignores_write_with_non_whitelisted_extension() -> None:
         "tool.call.started",
         "tool.call.response",
     ]
+
+
+# ---------------------------------------------------------------------------
+# session.usage — assistant message 上的 step 用量：归一化 + 单轮聚合
+# ---------------------------------------------------------------------------
+
+
+def _usage_message_raw(
+    *,
+    usage: dict[str, Any] | None,
+    stop_reason: str = "stop",
+    text: str | None = "done",
+) -> dict[str, Any]:
+    """带用量的 assistant session.message（字段形态取自网关真实事件）。"""
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "stopReason": stop_reason,
+        "content": [{"type": "text", "text": text}] if text else [],
+    }
+    if usage is not None:
+        message["usage"] = usage
+    return {"type": "session.message", "payload": {"message": message}}
+
+
+def test_run_turn_aggregates_step_usage_before_message_completed() -> None:
+    """用量随每个 step 的 assistant message 流出：本轮内累计为一条，
+    且必须早于 message.completed —— agentd 见到终止事件即停止转发本轮事件。"""
+    runtime = OpenClawGatewayRuntime(
+        client=StubGatewayClient(
+            [
+                _usage_message_raw(
+                    stop_reason="toolUse",
+                    text=None,
+                    usage={
+                        "input": 215,
+                        "output": 27,
+                        "cacheRead": 19712,
+                        "cacheWrite": 0,
+                        "totalTokens": 19954,
+                        "cost": {"input": 3.01e-05, "total": 0.000589596},
+                    },
+                ),
+                _usage_message_raw(
+                    usage={
+                        "input": 18381,
+                        "output": 7099,
+                        "cacheRead": 1152,
+                        "cacheWrite": 0,
+                        "reasoningTokens": 4246,
+                        "totalTokens": 26632,
+                        "cost": {"input": 0.00257334, "total": 0.004593316},
+                    },
+                ),
+                {
+                    "type": "agent",
+                    "payload": {"stream": "lifecycle", "data": {"phase": "end"}},
+                },
+            ]
+        )
+    )
+
+    events = list(runtime.run_turn(session_key="session-key", message="hello"))
+
+    types = [event["type"] for event in events]
+    # 用量必须排在终止事件之前：agentd 收到 message.completed 即停止转发本轮事件。
+    assert types.index("session.usage") < types.index("message.completed")
+    assert types.count("session.usage") == 1
+    assert types[-1] == "turn.completed"
+    usage_event = events[types.index("session.usage")]
+    assert usage_event["payload"] == {
+        "input_tokens": 18596,
+        "output_tokens": 7126,
+        "cache_read_tokens": 20864,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": 4246,
+        "total_tokens": 46586,
+        "total_cost": 0.005182912,
+    }
+
+
+def test_run_turn_skips_usage_when_step_has_no_token_counters() -> None:
+    """只有 cost（或干脆没有 usage）的 step 不产生用量事件，
+    避免前端显示一个没有 token 计数的空用量块。"""
+    runtime = OpenClawGatewayRuntime(
+        client=StubGatewayClient(
+            [
+                _usage_message_raw(
+                    usage={"cost": {"total": 0.1}},
+                    stop_reason="toolUse",
+                    text=None,
+                ),
+                _usage_message_raw(usage=None),
+            ]
+        )
+    )
+
+    events = list(runtime.run_turn(session_key="session-key", message="hello"))
+
+    assert [event["type"] for event in events] == ["message.delta", "message.completed"]

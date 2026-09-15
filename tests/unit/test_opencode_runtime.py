@@ -381,6 +381,83 @@ def test_run_turn_write_streams_delta_after_started() -> None:
 
 
 # =============================================================================
+# session.usage — step-finish 用量归一化 + 单轮聚合
+# =============================================================================
+
+
+def _step_finish_raw(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+) -> dict[str, Any]:
+    """OpenCode step-finish 样本：用量挂在 part.usage，cost 与 usage 同级。"""
+    return {
+        "type": "message.part.updated",
+        "part": {
+            "type": "step-finish",
+            "usage": {
+                "input": input_tokens,
+                "output": output_tokens,
+                "reasoning": 0,
+                "cache": {"read": cache_read_tokens, "write": 0},
+                "total": input_tokens + output_tokens + cache_read_tokens,
+            },
+            "cost": 0.001,
+        },
+    }
+
+
+def test_map_opencode_event_step_finish_without_tokens_yields_nothing() -> None:
+    """只有 cost 或干脆没有 usage 的 step 不产生用量事件。"""
+    raw = {"type": "message.part.updated", "part": {"type": "step-finish"}}
+
+    assert list(OpenCodeRuntime._map_opencode_event(raw)) == []
+
+
+def test_run_turn_aggregates_multi_step_usage_before_completed() -> None:
+    """多 step 的用量在 run_turn 内累计为一条，并早于终止事件下发。
+
+    归一化本身（``input/output/cache{read,write}/total`` + 同级 ``cost``）由
+    ``test_usage.py`` 覆盖，这里只锁 run_turn 的聚合与顺序。
+    """
+    runtime = OpenCodeRuntime(
+        client=_StreamingClient(
+            [
+                _step_finish_raw(
+                    input_tokens=100, output_tokens=10, cache_read_tokens=5
+                ),
+                _step_finish_raw(
+                    input_tokens=200, output_tokens=20, cache_read_tokens=7
+                ),
+                {
+                    "type": "message.updated",
+                    "info": {"role": "assistant", "finish": "stop"},
+                },
+                {"type": "session.idle"},
+            ]
+        )
+    )
+
+    events = list(runtime.run_turn(session_key="session-key", message="hello"))
+
+    assert [event["type"] for event in events] == [
+        "session.usage",
+        "message.completed",
+        "turn.completed",
+    ]
+    assert events[0]["payload"] == {
+        "input_tokens": 300,
+        "output_tokens": 30,
+        "cache_read_tokens": 12,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 342,
+        "total_cost": 0.002,
+    }
+
+
+# =============================================================================
 # Fake HTTP client for OpenCodeClient testing
 # =============================================================================
 

@@ -16,6 +16,10 @@ from witty_agent_server.runtimes.runtime_base import (
     RuntimeType,
     TurnEventType,
 )
+from witty_agent_server.runtimes.usage import (
+    has_token_usage,
+    normalize_usage_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -254,11 +258,13 @@ class DshRuntime(RuntimeBase):
 
     @staticmethod
     def _map_assistant_message(data: Mapping[str, Any]) -> Iterator[RuntimeTurnEvent]:
-        usage = data.get("usage")
-        if isinstance(usage, dict) and usage:
+        # dsh 的用量（camelCase）与 assistant/message 同级，经共享归一化落成
+        # 扁平 snake_case 契约载荷。
+        usage = normalize_usage_payload(data)
+        if has_token_usage(usage):
             yield {
                 "type": TurnEventType.SESSION_USAGE,
-                "payload": {"usage": dict(usage)},
+                "payload": usage,
             }
 
         message = data.get("message")

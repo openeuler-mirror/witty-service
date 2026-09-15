@@ -262,16 +262,17 @@ def test_assistant_message_final_yields_usage_and_completed() -> None:
 
     events = list(DshRuntime._map_dsh_event(raw, session_id="s1"))
 
+    # 载荷契约：扁平 snake_case；上游未给总量时按 dsh 口径派生
+    # （input + cache_read + cache_write + output）。
     assert events == [
         {
             "type": "session.usage",
             "payload": {
-                "usage": {
-                    "inputTokens": 10,
-                    "outputTokens": 5,
-                    "cacheReadTokens": 0,
-                    "reasoningTokens": 2,
-                }
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_tokens": 0,
+                "reasoning_tokens": 2,
+                "total_tokens": 15,
             },
         },
         {"type": "message.completed", "payload": {"text": "答案"}},
@@ -654,12 +655,11 @@ def test_text_only_fixture_replay() -> None:
         {
             "type": "session.usage",
             "payload": {
-                "usage": {
-                    "inputTokens": 2171,
-                    "outputTokens": 36,
-                    "cacheReadTokens": 0,
-                    "reasoningTokens": 34,
-                }
+                "input_tokens": 2171,
+                "output_tokens": 36,
+                "cache_read_tokens": 0,
+                "reasoning_tokens": 34,
+                "total_tokens": 2207,
             },
         }
     ]
@@ -681,11 +681,12 @@ def test_tools_fixture_replay() -> None:
     assert len(completed) == 1
     assert completed[0]["payload"]["text"].startswith("命令已成功执行")
 
-    # assistant/message 每个 step 一条 → session.usage 两条（spike-2）。
+    # 映射层：assistant/message 每个 step 一条 → session.usage 两条（spike-2）；
+    # 归一化由 run_turn 聚合为一条（见 test_run_turn_*_aggregates_usage）。
     usage_events = _of_type(events, "session.usage")
     assert len(usage_events) == 2
-    assert usage_events[0]["payload"]["usage"]["inputTokens"] == 2197
-    assert usage_events[1]["payload"]["usage"]["cacheReadTokens"] == 2432
+    assert usage_events[0]["payload"]["input_tokens"] == 2197
+    assert usage_events[1]["payload"]["cache_read_tokens"] == 2432
 
     # 工具事件：call → result，callId 一致，名称经 tool/call 记录回填。
     started = _of_type(events, "tool.call.started")
@@ -745,6 +746,10 @@ def test_run_turn_text_only_pipeline() -> None:
     assert len(completed) == 1
     assert completed[0]["payload"]["text"] == "2"
 
+    # 用量聚合为一条，且必须早于 message.completed（agentd 见到它即停止本轮消费）。
+    assert types.count("session.usage") == 1
+    assert types.index("session.usage") < types.index("message.completed")
+
 
 def test_run_turn_tools_pipeline() -> None:
     client = _ReplayClient(_load_fixture("turn-with-tools"))
@@ -760,6 +765,103 @@ def test_run_turn_tools_pipeline() -> None:
     assert types.count("message.completed") == 1
     assert types.count("tool.call.started") == 1
     assert types.count("tool.call.response") == 1
+    # 两个 step 的用量在 run_turn 内聚合为一条
+    assert types.count("session.usage") == 1
+
+
+def _usage_step(step: int, *, usage: dict[str, Any], last: bool) -> dict[str, Any]:
+    content = (
+        [{"type": "text", "text": "done"}]
+        if last
+        else [{"type": "tool-call", "id": "call-1", "name": "bash"}]
+    )
+    return _notification(
+        "s1",
+        "assistant/message",
+        {
+            "turn": 1,
+            "step": step,
+            "message": {"role": "assistant", "content": content},
+            "usage": usage,
+        },
+    )
+
+
+def test_run_turn_aggregates_usage_into_single_event_before_terminal() -> None:
+    """上游每 step 一条 usage：本轮累计后只在终止事件之前下发一条。
+
+    终止事件一到 agentd 即停止消费本轮（agent_manager 见到 message.completed /
+    stream.error 就 break），用量事件晚到等于丢事件；而前端对同名事件是覆盖
+    语义，逐 step 下发只会剩下最后一步。
+    """
+    notifications = [
+        _notification("s1", "turn/start", {"turn": 1}),
+        _usage_step(
+            1,
+            last=False,
+            usage={
+                "inputTokens": 100,
+                "outputTokens": 10,
+                "cacheReadTokens": 5,
+                "reasoningTokens": 3,
+            },
+        ),
+        _usage_step(
+            2,
+            last=True,
+            usage={
+                "inputTokens": 200,
+                "outputTokens": 20,
+                "cacheReadTokens": 7,
+                "reasoningTokens": 4,
+            },
+        ),
+        _notification("s1", "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
+    ]
+
+    events = _run_turn_with(_ReplayClient(notifications), session_key="s1")
+
+    assert _event_types(events) == [
+        "message.started",
+        "session.usage",
+        "message.completed",
+        "turn.completed",
+    ]
+    assert events[1]["payload"] == {
+        "input_tokens": 300,
+        "output_tokens": 30,
+        "cache_read_tokens": 12,
+        "reasoning_tokens": 7,
+        # 每步各自派生总量后求和 = 115 + 227
+        "total_tokens": 342,
+    }
+
+
+def test_run_turn_emits_usage_before_terminal_event_on_error_turn() -> None:
+    """error 轮同样在终止事件（stream.error / turn.completed）之前下发用量。"""
+    notifications = [
+        _notification("s1", "turn/start", {"turn": 1}),
+        _usage_step(1, last=False, usage={"inputTokens": 8, "outputTokens": 2}),
+        _notification(
+            "s1",
+            "turn/end",
+            {"turn": 1, "reason": {"kind": "error", "error": {"code": "X"}}},
+        ),
+    ]
+
+    events = _run_turn_with(_ReplayClient(notifications), session_key="s1")
+
+    assert _event_types(events) == [
+        "message.started",
+        "session.usage",
+        "stream.error",
+        "turn.completed",
+    ]
+    assert events[1]["payload"] == {
+        "input_tokens": 8,
+        "output_tokens": 2,
+        "total_tokens": 10,
+    }
 
 
 def test_run_turn_write_emits_artifact_events() -> None:
