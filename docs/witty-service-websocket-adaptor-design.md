@@ -400,25 +400,39 @@ def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoi
 | `message.completed` | assistant 输出完成 | `text` |
 | `tool.call.started` | 工具调用开始 | `tool_name`, `tool_call_id`, `arguments`, `stage` |
 | `tool.call.response` | 工具结果 | `name`, `tool_call_id`, `content`, `is_error`, `stage` |
-| `usage.updated` | 用量更新 | `input_tokens`, `output_tokens`, `total_cost` |
+| `session.usage` | 本轮 token 用量（跨 step 累计，每轮仅一条） | `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, `total_tokens`, `total_cost`（可选） |
 | `thinking` | 思考内容（可选） | `thinking`, `signature` |
 | `session.runtime.changed` | runtime session 标识变化 | `runtime_session_id` 等 runtime 字段 |
 | `stream.error` | 运行时流异常 | `code`, `message` |
 | `client.error` | 客户端事件错误 | `code`, `message`, `details` |
 
+> **`session.usage` 语义**：表示**本轮**（跨 step 累计）的用量增量，不是会话累计值。
+> 上游 runtime 每个 step 都会产出一条，witty-agent-server 在 `RuntimeBase.run_turn` 内跨 step 聚合，
+> 每轮只在终止事件（`message.completed` / `turn.completed` / `stream.error`）**之前**下发一条 ——
+> 终止事件一到，上层（agentd / agent_manager）即停止消费本轮事件，用量事件晚到等于丢事件；
+> 而前端对同名事件是覆盖语义，逐 step 下发只会剩下最后一步。
+> payload 为扁平 snake_case，各 runtime 的上游形态（dsh camelCase、opencode `input/output/cache{read,write}/total`、
+> openclaw assistant message 的 `input/output/cacheRead/cacheWrite/totalTokens` + `cost{...}`）统一由
+> `witty_agent_server/runtimes/usage.py` 归一化；
+> 上游未给 `total_tokens` 时按 dsh 口径派生（`input + cache_read + cache_write + output`）。
+
 ### 4.4 OpenClaw 事件映射
 
 | OpenClaw 原始事件 | 标准事件 | 说明 |
 |------------------|----------|------|
-| `agent(stream=assistant)` | `message.delta` | assistant 流式 token |
-| `chat(state=final/error)` | `message.completed` | 一轮消息结束 |
-| `session.message(delta)` | `message.delta` | session 维度增量 |
-| `session.message(message)` | `usage.updated`/`tool.*`/`message.completed` | 从 message 内容抽取 |
-| `session.tool` | `tool.call.started`/`tool.call.response` | 由 runtime 事件归一化后输出 |
-| `session.usage` | `usage.updated` | 直接映射 |
+| `agent(stream=assistant)` | `message.delta` | assistant 流式增量 |
+| `agent(stream=thinking)` | `thinking.delta` | 思考流式增量（块尾迟到经 `thinking_suppress` 抵扣） |
+| `agent(stream=tool)` | `tool.call.started` / `tool.call.response` / `tool.call.delta` | 按 `phase` 分派 |
+| `agent(stream=lifecycle)` | `message.started` / `turn.completed` / `stream.error` | 按 `phase=start/end/error` 分派 |
+| `session.message(role=assistant)` | `session.usage` / `thinking` / `tool.call.started` / `message.completed` | 每个 step 的用量取自 `message.usage` |
+| `session.message(role=toolResult)` | `tool.call.response` | 工具结果 |
 | `sessions.changed` | `session.runtime.changed` | 运行时 session 标识更新 |
 
 > **注意**：v2.2 移除了 `exec.approval.*` 事件的映射。runtime 层不再透传审批相关事件。
+> **用量来源**：网关**不推送**用量事件 —— `sessions.usage` 只是 RPC 方法，返回的是**会话累计**快照，
+> 且刚跑完一轮时其缓存常为 stale（`usage: null`）。因此本轮用量取自每个 step 的 assistant message 的
+> `usage` 字段（`{input, output, cacheRead, cacheWrite, reasoningTokens, totalTokens, cost{...}}`），
+> 由 `RuntimeBase.run_turn` 跨 step 聚合成一条 `session.usage`。
 
 ### 4.5 非流式接口响应（保留）
 
@@ -546,7 +560,7 @@ def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoi
 | `message.completed` | 结束标志 | assistant输出完成 |
 | `tool.call.started` | `events[].payload` | 工具调用开始 |
 | `tool.call.response` | `events[].payload` | 工具调用结果 |
-| `usage.updated` | `events[].payload` | 用量更新 |
+| `session.usage` | `events[].payload` | 本轮 token 用量（跨 step 累计） |
 | `session.runtime.changed` | `events[].payload` | runtime session变化 |
 | `stream.error` | SSE错误关闭 | 运行时流异常 |
 | `client.error` | SSE错误关闭 | 客户端事件错误 |

@@ -942,7 +942,7 @@ data: {"sandbox_type":"local_process","event":{"type":"message.delta","session_i
 | `message.completed` | assistant 输出完成 | `text` |
 | `tool.call.started` | 工具调用开始 | `tool_name`, `tool_call_id`, `arguments`, `stage` |
 | `tool.call.response` | 工具调用结果/过程输出 | `tool_name`, `tool_call_id`, `content`, `is_error`, `stage` |
-| `usage.updated` | 用量更新 | `input_tokens`, `output_tokens`, `total_cost` |
+| `session.usage` | 本轮 token 用量（跨 step 累计，每轮仅一条） | `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, `total_tokens`, `total_cost`（可选） |
 | `session.runtime.changed` | runtime session 标识变化 | runtime 原始字段 |
 | `stream.error` | 运行时流异常 | `code`, `message` |
 | `client.error` | 客户端事件错误 | `code`, `message`, `details` |

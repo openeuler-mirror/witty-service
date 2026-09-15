@@ -417,12 +417,14 @@ def test_message_events_retry_and_summary_methods(
         agent_id="agent-1",
         session_id="session-1",
         message_id=assistant_message_id,
-        event_type="usage.updated",
-        payload_json={
-            "input_tokens": 1,
-            "output_tokens": 2,
-            "total_cost": 0.1,
-        },
+        event_type="session.usage",
+        payload_json=dict(
+            input_tokens=1,
+            output_tokens=2,
+            cache_read_tokens=3,
+            reasoning_tokens=1,
+            total_cost=0.1,
+        ),
         seq_no=1,
     )
 
@@ -445,10 +447,95 @@ def test_message_events_retry_and_summary_methods(
     assert messages[1]["content"] == "done"
     assert messages[1]["status"] == "completed"
     assert messages[1]["thinking"] == ["plan"]
+    # 事件载荷是扁平 snake_case，REST 响应转成 camelCase；上游没给总量时派生。
     assert messages[1]["usage"] == {
         "inputTokens": 1,
         "outputTokens": 2,
+        "totalTokens": 6,
+        "cacheReadTokens": 3,
+        "reasoningTokens": 1,
         "totalCost": 0.1,
+    }
+
+
+def _create_assistant_message_with_usage_events(
+    repo: SqliteRepository,
+    payloads: list[dict[str, Any]],
+) -> None:
+    _create_agent(repo)
+    _create_session(repo)
+    repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="user",
+        content="hello",
+    )
+    assistant_message_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="done",
+        status=MessageStatus.completed,
+    )
+    for seq_no, payload in enumerate(payloads, start=1):
+        repo.create_message_event_with_retry(
+            agent_id="agent-1",
+            session_id="session-1",
+            message_id=assistant_message_id,
+            event_type="session.usage",
+            payload_json=payload,
+            seq_no=seq_no,
+        )
+
+
+def test_get_messages_aggregates_multi_step_session_usage(
+    repo: SqliteRepository,
+) -> None:
+    """消息级用量按轮累计：一轮落多条 session.usage 时求和而非只取最后一条。"""
+    _create_assistant_message_with_usage_events(
+        repo,
+        [
+            {"input_tokens": 10, "output_tokens": 1},
+            {"input_tokens": 20, "output_tokens": 2, "cache_read_tokens": 5},
+        ],
+    )
+
+    messages, _ = repo.get_messages_with_events("session-1", limit=10)
+
+    assert messages[1]["usage"] == {
+        "inputTokens": 30,
+        "outputTokens": 3,
+        "totalTokens": 38,
+        "cacheReadTokens": 5,
+    }
+
+
+def test_get_messages_reads_raw_runtime_usage_payload(
+    repo: SqliteRepository,
+) -> None:
+    """历史行里的载荷是 runtime 原始形态（dsh 曾把用量包在 usage 下且为 camelCase）。"""
+    _create_assistant_message_with_usage_events(
+        repo,
+        [
+            {
+                "usage": {
+                    "inputTokens": 2171,
+                    "outputTokens": 36,
+                    "cacheReadTokens": 0,
+                    "reasoningTokens": 34,
+                }
+            },
+        ],
+    )
+
+    messages, _ = repo.get_messages_with_events("session-1", limit=10)
+
+    assert messages[1]["usage"] == {
+        "inputTokens": 2171,
+        "outputTokens": 36,
+        "totalTokens": 2207,
+        "cacheReadTokens": 0,
+        "reasoningTokens": 34,
     }
 
 

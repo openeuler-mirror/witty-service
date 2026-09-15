@@ -9,6 +9,7 @@ from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from witty_agent_server.runtimes.usage import merge_usage, normalize_usage_payload
 from witty_service.domain.enums import AgentStatus, ScheduledTaskRunStatus
 from witty_service.domain.errors import session_not_found
 from witty_service.persistence.orm import (
@@ -233,6 +234,27 @@ def _artifact_item_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+# session.usage 事件载荷（归一化后的扁平 snake_case）→ REST 响应用的 camelCase。
+_USAGE_REST_FIELDS: tuple[tuple[str, str], ...] = (
+    ("input_tokens", "inputTokens"),
+    ("output_tokens", "outputTokens"),
+    ("total_tokens", "totalTokens"),
+    ("cache_read_tokens", "cacheReadTokens"),
+    ("cache_write_tokens", "cacheWriteTokens"),
+    ("reasoning_tokens", "reasoningTokens"),
+    ("total_cost", "totalCost"),
+)
+
+
+def _usage_to_rest(usage: dict[str, Any]) -> dict[str, Any]:
+    """把归一化用量载荷转成 camelCase 对象（缺项不输出，避免前端显示假 0）。"""
+    return {
+        rest_key: usage[snake_key]
+        for snake_key, rest_key in _USAGE_REST_FIELDS
+        if usage.get(snake_key) is not None
+    }
+
+
 def _delta_text_from_payload(payload: dict[str, Any]) -> str:
     """取出流式增量事件携带的文本（兼容 delta / text / content 三种键）。"""
     for key in ("delta", "text", "content"):
@@ -247,7 +269,8 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
     tool_calls_by_id: dict[str, dict[str, Any]] = {}
     artifacts: dict[str, dict[str, Any]] = {}
     thinking: list[str] = []
-    usage: dict[str, Any] | None = None
+    # 本轮用量（跨 step 累计）：历史数据里一轮可能落多条 session.usage。
+    usage: dict[str, Any] = {}
     event_items: list[dict[str, Any]] = []
     # 正文分段（连续 message.delta 合并为一条时间线事件）
     delta_items: list[dict[str, Any]] = []
@@ -341,13 +364,12 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
             prev_item_type = "message.delta"
             continue
 
-        elif evt.event_type == "usage.updated":
-            usage = {
-                "inputTokens": payload.get("input_tokens"),
-                "outputTokens": payload.get("output_tokens"),
-                "totalCost": payload.get("total_cost"),
-            }
-            item["usage"] = usage
+        elif evt.event_type == "session.usage":
+            # 兼容历史/现行形态（dsh camelCase、opencode usage+cost、openclaw 原样）
+            step_usage = normalize_usage_payload(payload)
+            if step_usage:
+                usage = merge_usage(usage, step_usage)
+                item["usage"] = _usage_to_rest(step_usage)
 
         elif evt.event_type == "question.asked":
             raw_questions = payload.get("questions")
@@ -459,7 +481,7 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
     if thinking:
         result["thinking"] = thinking
     if usage:
-        result["usage"] = usage
+        result["usage"] = _usage_to_rest(usage)
     if question is not None:
         result["question"] = question
     if question_id is not None:

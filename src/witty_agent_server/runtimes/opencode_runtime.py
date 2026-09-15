@@ -12,6 +12,10 @@ from witty_agent_server.runtimes.runtime_base import (
     TurnEventType,
     tool_call_delta_event,
 )
+from witty_agent_server.runtimes.usage import (
+    has_token_usage,
+    normalize_usage_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -270,12 +274,11 @@ class OpenCodeRuntime(RuntimeBase):
             return {"type": TurnEventType.MESSAGE_STARTED, "payload": {"part": part}}
 
         if part_type == "step-finish":
-            usage = part.get("usage") or part.get("tokens") or {}
-            cost = part.get("cost")
-            payload: dict[str, Any] = {"usage": usage}
-            if cost is not None:
-                payload["cost"] = cost
-            return {"type": TurnEventType.SESSION_USAGE, "payload": payload}
+            # step-finish 带 usage（或 tokens）与同级 cost，统一归一化后下发。
+            usage = normalize_usage_payload(part)
+            if not has_token_usage(usage):
+                return None
+            return {"type": TurnEventType.SESSION_USAGE, "payload": usage}
 
         return None
 
