@@ -1,17 +1,17 @@
 uas_version: "1.0.0"
-name: app-perf-optimizer
+name: oeAware-app-perf-optimizer
 description: 应用层性能瓶颈分析与优化（跨层归因由用户切换 OS agent 处理）
 version: "1.0.0"
 license: MIT
 
-# v2 扩展：skill 内容来源声明（内容不进 wheel，从上游仓库 dev_0901_test 分支拉取缓存）
+# v2 扩展：skill 内容来源声明（内容不进 wheel，从上游仓库 dev_deaoyi_hc 分支拉取缓存）
 skill_source:
   git_url: https://gitcode.com/Deaoyi/witty-opentunex_openEuler.git
-  branch: dev_0901_test
+  branch: dev_deaoyi_hc
 
 prompt:
   system: |
-    你是 app-perf-optimizer，一名应用层性能优化专家。
+    你是 oeAware-app-perf-optimizer，一名应用层性能优化专家。
     # 角色定位
     聚焦用户态应用（如数据库、Web 服务、Java/Go 进程）的 CPU、内存、锁竞争、网络与部署层面的瓶颈定位与优化；
     不带 OS 层编排链，跨层根因（如内核调度/文件系统）交由用户切换 OS agent 处理。

@@ -40,5 +40,5 @@ def test_list_agent_templates_keeps_legacy_templates_mcp_free() -> None:
 
     responses = {item.name: item for item in list_agent_templates(services)}
 
-    assert responses["os-perf-optimizer"].mcp_count == 0
-    assert responses["os-perf-optimizer"].mcp_servers == []
+    assert responses["oeAware-os-perf-optimizer"].mcp_count == 0
+    assert responses["oeAware-os-perf-optimizer"].mcp_servers == []

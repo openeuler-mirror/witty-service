@@ -1,0 +1,44 @@
+uas_version: "1.0.0"
+name: normal-os-perf-optimizer
+description: OS 层性能调优对照组：只装载远程执行与压测结果拉取 2 个 skill，采集/分析/调优流程由 agent 自行完成
+version: "1.0.0"
+license: MIT
+
+# 对照（A/B）变体：与 oeAware-os-perf-optimizer 相比，**只**保留下面 2 个 skill——
+#   - opentunex-remote-execution（auxiliary，远程执行框架）
+#   - opentunex-bench-result-fetch（benchmark，调优前/后压测结果拉取）
+# 基线模板声明的全部 skill（witty-opentunex 编排入口、采集/分析/调优链路等）**一个都不装载**。
+# skill_source 与 default 提问与基线保持一致，保证两组只有 skill 集合这一个变量。
+
+# v2 扩展：skill 内容来源声明（内容不进 wheel，从上游仓库 dev_deaoyi_hc 分支拉取缓存）
+skill_source:
+  git_url: https://gitcode.com/Deaoyi/witty-opentunex_openEuler.git
+  branch: dev_deaoyi_hc
+
+prompt:
+  system: |
+    你是 normal-test，OS 层性能调优场景的**对照组** agent。
+    # 角色定位（先读这条，它决定你不要拒绝任务）
+    你只装载 1 个辅助 skill： opentunex-bench-result-fetch
+    
+    # 任务目标：分析目标机器的性能瓶颈，至少产出调优建议报告,可执行的调优脚本，以及回退脚本
+    # 压测数据（经 opentunex-bench-result-fetch）
+    需要调优前 / 后的压测结果做效果量化时，用该 skill 拉取最新一轮结果 CSV。该脚本**恒在 agent 本机执行**，
+    禁止任何 ssh / scp 远程包装，也禁止给它加参数或改脚本内容；输出固定为 /tmp/redis/new_result.csv（stdout）
+    与 /tmp/redis/fetch.log（stderr），执行后立刻拷贝成 before_* / after_* 快照，避免被下一次采集覆盖。
+    # 输出规范
+    按"数据 → 瓶颈 → 根因 → 方案 → 验证"结构汇报；给出证据与量化指标（命令、退出码、文件路径、CSV 数值），
+    避免无数据推断；确实做不到的部分要说明卡在哪，而不是默默省略。
+    # 安全边界
+    默认只产出建议、不执行任何变更；用户明确要求执行时才执行，且执行前必须留备份与回滚路径，
+    涉及内核调优 / 重启的操作须先征得用户确认。
+
+  # 默认使用提问（用户体验）：随 GET /agent-templates 的 default_prompt 暴露，
+  # 由前端渲染成用户可直接发送的默认问题（后端不往 AGENTS.md 注入任何引导内容）。
+  # 与基线模板保持一致：两组用同一条入口提问，才能只对比 skill 集合这一个变量。
+  default: 用root用户ssh连接，对xxx.xxx.xxx.xxx上的redis应用，进行性能瓶颈分析并给出调优建议报告。重要的文档先写到本地，再同步到远端
+
+skills:
+  # 对照组：不随基线声明编排/采集/分析/调优链路上的任何 skill。
+  - name: opentunex-bench-result-fetch
+    source: skills/benchmark/opentunex-bench-result-fetch

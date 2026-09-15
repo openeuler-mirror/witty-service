@@ -1067,6 +1067,33 @@ class SqliteRepository:
             )
             session.commit()
 
+    def finalize_message(
+        self,
+        message_id: str,
+        *,
+        status: MessageStatus,
+        content: str | None = None,
+        last_stream_at: datetime | None = None,
+    ) -> None:
+        """一次事务里落定"正文 + 终态"，用于流被异常中断时的收尾。
+
+        ⚠️ 中断收尾**必须**同时写正文与状态：只写状态会让已生成的内容永远停在
+        库里最后一次 checkpoint 的样子，而只写正文会让消息永远停在
+        ``generating`` —— 前端据此把消息渲染成"生成回复中"，重启后重连又拿不到
+        活动流，于是永久卡住（见 polymind chat-area 的重连逻辑）。
+        """
+        values: dict[Any, Any] = {MessageORM.status: status}
+        if content is not None:
+            values[MessageORM.content] = content
+        if last_stream_at is not None:
+            values[MessageORM.last_stream_at] = last_stream_at
+        with self._session_factory() as session:
+            session.query(MessageORM).filter(MessageORM.id == message_id).update(
+                values,
+                synchronize_session=False,
+            )
+            session.commit()
+
     def find_stale_generating_messages(
         self, stale_threshold_seconds: int
     ) -> list[MessageORM]:
@@ -1231,6 +1258,65 @@ class SqliteRepository:
                 .scalar()
             )
             return int(max_seq_no or 0) + 1
+
+    def create_message_events_bulk(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        events: list[tuple[int, str, dict[str, Any]]],
+        message_id: str | None = None,
+        max_retries: int = 5,
+    ) -> int:
+        """一个事务写入一批消息事件，返回写入条数。
+
+        ``events`` 是 ``(seq_no, event_type, payload)`` 的列表（已按 seq_no 升序）。
+
+        为什么需要它：``create_message_event_with_retry`` 每条事件单独 commit，
+        在默认 journal 模式下每次提交都要一次 fsync（本机实测 4.8 ms）。流式增量
+        事件每秒上百条，逐条提交会把 asyncio 事件循环按秒级阻塞（详见
+        ``persistence.db._configure_sqlite_engine`` 的说明）。这里把同一窗口内的
+        事件合并成**一次**提交，把提交次数从"每事件一次"降到"每窗口一次"。
+
+        seq_no 冲突（同 session 并发写）时按当前最大 seq_no 平移后整批重试。
+        """
+        if not events:
+            return 0
+
+        pending = sorted(events, key=lambda item: item[0])
+        last_error: IntegrityError | None = None
+        for _ in range(max_retries):
+            try:
+                with self._session_factory() as session:
+                    session.add_all(
+                        [
+                            MessageEventORM(
+                                id=str(uuid4()),
+                                agent_id=agent_id,
+                                session_id=session_id,
+                                message_id=message_id,
+                                event_type=event_type,
+                                payload_json=dict(payload_json),
+                                seq_no=seq_no,
+                            )
+                            for seq_no, event_type, payload_json in pending
+                        ]
+                    )
+                    session.commit()
+                    return len(pending)
+            except IntegrityError as exc:
+                if not self._is_message_event_seq_conflict(exc):
+                    raise
+                last_error = exc
+                base = self._get_next_message_event_seq(session_id=session_id)
+                pending = [
+                    (base + offset, event_type, payload_json)
+                    for offset, (_, event_type, payload_json) in enumerate(pending)
+                ]
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Failed to bulk create message events.")
 
     def _create_message_event_once(
         self,

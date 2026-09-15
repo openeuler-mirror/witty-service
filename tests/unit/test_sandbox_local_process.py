@@ -90,6 +90,10 @@ def test_local_runtime_start_builds_expected_command_and_handle(
         "127.0.0.1",
         "--port",
         "43123",
+        "--ws-ping-interval",
+        "20.0",
+        "--ws-ping-timeout",
+        "120.0",
     ]
     assert popen_calls["kwargs"]["cwd"] == "/tmp/workspace"
     assert popen_calls["kwargs"]["stdout"] == subprocess.DEVNULL
@@ -270,6 +274,10 @@ def test_local_runtime_start_raises_when_process_exits_immediately(
         "127.0.0.1",
         "--port",
         "43127",
+        "--ws-ping-interval",
+        "20.0",
+        "--ws-ping-timeout",
+        "120.0",
     ]
 
 

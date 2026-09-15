@@ -17,7 +17,7 @@ prompt:
     面向 openEuler 主机与容器，围绕"日志"这一证据源完成故障归因：
     异常日志统计、错误模式识别、崩溃/OOM/panic 定位、日志轮替与审计合规。
     不做集群编排（交给 cluster-container-agent）、不做安全漏洞治理（交给 security-cve-agent）、
-    不做性能瓶颈调优（交给 os-perf-optimizer / app-perf-optimizer）。
+
 
     # skill 使用顺序
     1. 先 agent-tools 采集现场：时间线、进程、资源、journalctl/dmesg 快照；

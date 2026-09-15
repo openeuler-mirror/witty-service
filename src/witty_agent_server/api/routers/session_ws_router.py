@@ -14,7 +14,11 @@ from witty_agent_server.application.services.session_state_sync_service import (
 from witty_agent_server.application.services.session_ws_orchestrator import (
     SessionWSOrchestratorError,
 )
-from witty_agent_server.application.services.task_pool import SessionBusyError, TaskPool
+from witty_agent_server.application.services.task_pool import (
+    EventCallback,
+    SessionBusyError,
+    TaskPool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +63,26 @@ def create_session_ws_router(
     async def session_ws(websocket: WebSocket, agent_id: str, session_id: str) -> None:
         await websocket.accept()
 
+        # 本轮是否已经把终态事件（completed / stream.error）交给对端。
+        # 正常收尾时对端会主动断开，此时**不能**去 abort —— 见 finally 里的说明。
+        terminal_forwarded = False
+
         try:
             async with connection_registry.hold(
                 agent_id=agent_id, session_id=session_id
             ):
                 outbound: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+                async def _forward(event: dict[str, Any]) -> None:
+                    nonlocal terminal_forwarded
+                    if event.get("type") in {
+                        "message.completed",
+                        "turn.completed",
+                        "stream.error",
+                    }:
+                        terminal_forwarded = True
+                    await outbound.put(event)
+
                 loop = asyncio.get_running_loop()
                 resolved_state_sync.bind_connection(
                     agent_id=agent_id,
@@ -92,6 +111,7 @@ def create_session_ws_router(
                             event=message,
                             task_pool=task_pool,
                             outbound=outbound,
+                            on_event=_forward,
                         )
                 except WebSocketDisconnect:
                     return
@@ -100,6 +120,21 @@ def create_session_ws_router(
                         agent_id=agent_id,
                         session_id=session_id,
                     )
+                    if not terminal_forwarded:
+                        # 消费端（witty-service 的 AgentManager）断开了，而本轮还没
+                        # 下发终态事件：后续事件已经没有接收方，继续跑只会让该
+                        # session 长期停留在 in-flight —— 用户在同一个会话里重新
+                        # 提问就会一直收到 SESSION_BUSY（"session is busy"），
+                        # 看起来就是"发消息没有任何反应"。这里主动收尾释放 in-flight。
+                        logger.warning(
+                            "ws client disconnected mid-turn, abort session: "
+                            "agent_id=%s session_id=%s",
+                            agent_id,
+                            session_id,
+                        )
+                        task_pool.abort_session(
+                            agent_id=agent_id, session_id=session_id
+                        )
                     await outbound.put(None)
                     await sender_task
         except SessionAlreadyConnectedError:
@@ -120,6 +155,7 @@ async def _dispatch_event(
     event: dict[str, Any],
     task_pool: TaskPool,
     outbound: asyncio.Queue[dict[str, Any] | None],
+    on_event: EventCallback | None = None,
 ) -> None:
     event_type = event.get("type")
     payload = event.get("payload")
@@ -168,7 +204,7 @@ async def _dispatch_event(
             agent_id=agent_id,
             session_id=session_id,
             message=text_message,
-            on_event=outbound.put,
+            on_event=on_event or outbound.put,
         )
     except SessionBusyError as exc:
         await outbound.put(

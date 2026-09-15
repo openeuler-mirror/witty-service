@@ -7,7 +7,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -92,6 +92,13 @@ SKILL_INSTALL_TIMEOUT_SECONDS = 180.0
 # 终态 ``tool.call.response`` 已携带完整输出，落库只会让每次 exec 多出成百上千行
 # 永不回读的载荷，并在时间线上划出一道「压缩后会消失」的假分段边界。
 TRANSIENT_EVENT_TYPES = frozenset({"tool.call.delta"})
+
+# 流式事件的落库批窗口。逐条 commit 在默认 journal 模式下每次都要 fsync
+# （本机 ext4 实测 4.8 ms/事件，而 opencode 按 token 下发事件、峰值 151~176 事件/秒），
+# 会把 asyncio 事件循环按秒级堵死 —— 见 persistence.db._configure_sqlite_engine 的说明。
+# 合并成"每窗口一次提交"后，单次提交仍是同步的，但窗口内最多只阻塞一次。
+PERSIST_BATCH_MAX_EVENTS = 64
+PERSIST_BATCH_INTERVAL_S = 0.25
 
 INTERRUPTION_PREFIX = """[CRITICAL SYSTEM INSTRUCTION - OVERRIDE ALL PREVIOUS CONTEXT]
 
@@ -1507,6 +1514,77 @@ class AgentManager:
             nonlocal seq_no, assistant_text, assistant_msg_id, terminal_received
             nonlocal tokens_since_checkpoint, last_checkpoint_time
 
+            # 落库缓冲：窗口内的事件合并成一次事务（见 PERSIST_BATCH_* 说明）。
+            pending_events: list[tuple[int, str, dict[str, Any]]] = []
+            last_flush_time = time.monotonic()
+            # 非正常结束时的消息终态；None 表示本轮正常结束（已完成/被前端中断）。
+            failure_status: MessageStatus | None = None
+
+            def flush_events() -> None:
+                """把缓冲的事件合并成一次提交落库。"""
+                nonlocal pending_events, last_flush_time
+                if not pending_events or assistant_msg_id is None:
+                    return
+                batch, pending_events = pending_events, []
+                last_flush_time = time.monotonic()
+                try:
+                    self._repository.create_message_events_bulk(
+                        agent_id=agent_id,
+                        session_id=session_id,
+                        events=batch,
+                        message_id=assistant_msg_id,
+                    )
+                except Exception:
+                    self._logger.warning(
+                        "Failed to persist %d events: agent_id=%s session_id=%s",
+                        len(batch),
+                        agent_id,
+                        session_id,
+                        exc_info=True,
+                    )
+
+            def finalize_abnormal_turn(status: MessageStatus) -> None:
+                """流被异常中断时的收尾：落库 + 正文 + 终态 + 会话状态复位。
+
+                不做这件事的后果就是生产上看到的现象：assistant 消息永远停在
+                ``generating``、session 永远停在 ``running``；前端重启后按
+                ``generating`` 判定"生成中"并去重连，而本地已没有活动流，
+                于是永久卡在"生成回复中"且正文被清空。
+                """
+                flush_events()
+                if assistant_msg_id is not None:
+                    try:
+                        self._repository.finalize_message(
+                            assistant_msg_id,
+                            status=status,
+                            content=assistant_text,
+                            last_stream_at=datetime.now(UTC),
+                        )
+                    except Exception:
+                        self._logger.warning(
+                            "Failed to finalize interrupted message: msg_id=%s",
+                            assistant_msg_id,
+                            exc_info=True,
+                        )
+                try:
+                    session_record = self._session_manager.get_session(
+                        agent_id, session_id
+                    )
+                    if session_record is not None and session_record.status == "running":
+                        self._session_manager.upsert_session(
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            status="idle",
+                        )
+                except Exception:
+                    self._logger.warning(
+                        "Failed to reset session state after abnormal stream end: "
+                        "agent_id=%s session_id=%s",
+                        agent_id,
+                        session_id,
+                        exc_info=True,
+                    )
+
             try:
                 async for event in ws_client.recv():
                     event_dict = dict(event)
@@ -1527,6 +1605,7 @@ class AgentManager:
                         error_message = error_payload.get(
                             "message", "Unknown error from adaptor"
                         )
+                        failure_status = MessageStatus.error
                         self._logger.error(
                             "Stream error in background consumer: agent_id=%s session_id=%s code=%s message=%s",
                             agent_id,
@@ -1585,23 +1664,13 @@ class AgentManager:
                         )
                     else:
                         seq_no += 1
-                        try:
-                            self._repository.create_message_event_with_retry(
-                                agent_id=agent_id,
-                                session_id=session_id,
-                                event_type=event_type,
-                                payload_json=payload,
-                                seq_no=seq_no,
-                                message_id=assistant_msg_id,
-                            )
-                        except Exception:
-                            self._logger.warning(
-                                "Failed to persist event: agent_id=%s session_id=%s event_type=%s",
-                                agent_id,
-                                session_id,
-                                event_type,
-                                exc_info=True,
-                            )
+                        pending_events.append((seq_no, event_type, payload))
+                        if (
+                            len(pending_events) >= PERSIST_BATCH_MAX_EVENTS
+                            or time.monotonic() - last_flush_time
+                            >= PERSIST_BATCH_INTERVAL_S
+                        ):
+                            flush_events()
 
                     if event_type == "message.delta":
                         delta = payload.get("delta", "")
@@ -1638,6 +1707,7 @@ class AgentManager:
                     if event_type in {"message.completed", "turn.completed"}:
                         terminal_received = True
                         if assistant_msg_id:
+                            flush_events()
                             try:
                                 self._repository.update_message_status(
                                     assistant_msg_id, MessageStatus.completed
@@ -1666,9 +1736,15 @@ class AgentManager:
 
                     _stream_registry.push_event(session_id, event_dict, stream_gen)
 
+                    # 必须显式让出事件循环：websockets 已经把帧收进内存队列时，
+                    # ``async for`` 不会真正挂起，整个积压会在"不回到事件循环"的
+                    # 一次连续执行里处理完，期间的 keepalive ping 得不到 pong。
+                    await asyncio.sleep(0)
+
                     if event_type in {"message.completed", "turn.completed"}:
                         break
             except Exception:
+                failure_status = MessageStatus.interrupted
                 self._logger.warning(
                     "Background WS consumer error: agent_id=%s session_id=%s",
                     agent_id,
@@ -1687,6 +1763,8 @@ class AgentManager:
                     stream_gen,
                 )
             finally:
+                if failure_status is not None:
+                    finalize_abnormal_turn(failure_status)
                 _stream_registry.end_stream(session_id)
                 _stream_registry.cleanup(session_id)
                 await self._close_ws_message_client(
