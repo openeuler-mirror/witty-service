@@ -494,13 +494,417 @@ def test_stale_generating_messages_and_compaction(
 
     assert [item.id for item in stale] == [message_id]
     with session_factory() as session:
-        event_types = [
-            item.event_type
-            for item in session.query(MessageEventORM)
-            .order_by(MessageEventORM.seq_no)
-            .all()
-        ]
-    assert event_types == ["thinking"]
+        rows = session.query(MessageEventORM).order_by(MessageEventORM.seq_no).all()
+        event_types = [item.event_type for item in rows]
+        payloads = [dict(item.payload_json or {}) for item in rows]
+    # 正文增量保留在时间线上（压缩为一条），不再整段删除
+    assert event_types == ["message.delta", "thinking"]
+    assert payloads == [{"delta": "a"}, {"thinking": "keep"}]
+
+
+def test_compact_message_delta_events_keeps_timeline_order(
+    repo: SqliteRepository,
+) -> None:
+    """压缩后正文分段仍留在原时间线位置：正文/思考/正文 的交替顺序不丢。"""
+    _create_agent(repo)
+    _create_session(repo)
+    message_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="第一段第二段",
+        status=MessageStatus.completed,
+    )
+    events: list[tuple[str, dict[str, Any]]] = [
+        ("message.delta", {"delta": "第一"}),
+        ("message.delta", {"delta": "段"}),
+        ("thinking", {"thinking": "思考"}),
+        ("tool.call.delta", {"delta": '{"pa":'}),
+        ("message.delta", {"delta": "第二段"}),
+    ]
+    for index, (event_type, payload) in enumerate(events, start=1):
+        repo.create_message_event_with_retry(
+            agent_id="agent-1",
+            session_id="session-1",
+            message_id=message_id,
+            event_type=event_type,
+            payload_json=payload,
+            seq_no=index,
+        )
+
+    repo.compact_message_delta_events(message_id)
+
+    messages, _ = repo.get_messages_with_events("session-1")
+    assembled = messages[0]["events"]
+    # tool.call.delta 删除，其余事件保持原顺序，同段增量合并
+    assert [item["type"] for item in assembled] == [
+        "message.delta",
+        "thinking",
+        "message.delta",
+    ]
+    assert [item["content"] for item in assembled] == ["第一段", "思考", "第二段"]
+
+
+def test_compact_message_delta_events_thinking_delta_dedupe(
+    repo: SqliteRepository,
+) -> None:
+    """thinking.delta 被完整 thinking 事件覆盖时删除，否则就地转成 thinking。"""
+    _create_agent(repo)
+    _create_session(repo)
+    message_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="正文",
+        status=MessageStatus.completed,
+    )
+    events: list[tuple[str, dict[str, Any]]] = [
+        ("thinking.delta", {"delta": "覆盖"}),
+        ("thinking.delta", {"delta": "重复"}),
+        ("thinking", {"thinking": "覆盖重复"}),
+        ("thinking.delta", {"delta": "独有思考"}),
+        ("message.delta", {"delta": "正文"}),
+    ]
+    for index, (event_type, payload) in enumerate(events, start=1):
+        repo.create_message_event_with_retry(
+            agent_id="agent-1",
+            session_id="session-1",
+            message_id=message_id,
+            event_type=event_type,
+            payload_json=payload,
+            seq_no=index,
+        )
+
+    repo.compact_message_delta_events(message_id)
+
+    messages, _ = repo.get_messages_with_events("session-1")
+    assembled = messages[0]["events"]
+    assert [item["type"] for item in assembled] == [
+        "thinking",
+        "thinking",
+        "message.delta",
+    ]
+    assert [item["content"] for item in assembled] == [
+        "覆盖重复",
+        "独有思考",
+        "正文",
+    ]
+    assert messages[0]["thinking"] == ["覆盖重复", "独有思考"]
+
+
+def test_assemble_message_appends_missing_delta_tail(repo: SqliteRepository) -> None:
+    """增量只是正文前缀时补齐尾巴，避免刷新后正文缺失。"""
+    _create_agent(repo)
+    _create_session(repo)
+    message_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="Hello world",
+        status=MessageStatus.completed,
+    )
+    repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=message_id,
+        event_type="message.delta",
+        payload_json={"delta": "Hello"},
+        seq_no=1,
+    )
+
+    messages, _ = repo.get_messages_with_events("session-1")
+    assembled = messages[0]["events"]
+    assert [item["type"] for item in assembled] == ["message.delta"]
+    assert assembled[0]["content"] == "Hello world"
+
+
+def test_assemble_message_falls_back_when_deltas_mismatch(
+    repo: SqliteRepository,
+) -> None:
+    """增量与正文完全对不上时回退为整段正文，避免正文丢失或重复。"""
+    _create_agent(repo)
+    _create_session(repo)
+    message_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="完整正文",
+        status=MessageStatus.completed,
+    )
+    repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=message_id,
+        event_type="message.delta",
+        payload_json={"delta": "截断内容"},
+        seq_no=1,
+    )
+
+    messages, _ = repo.get_messages_with_events("session-1")
+    assembled = messages[0]["events"]
+    assert [item["type"] for item in assembled] == ["message.delta"]
+    assert [item["content"] for item in assembled] == ["完整正文"]
+
+
+def test_assemble_message_legacy_message_without_deltas(
+    repo: SqliteRepository,
+) -> None:
+    """老数据（增量已被整段删除）仍把正文挂到时间线末尾，不出现空消息。"""
+    _create_agent(repo)
+    _create_session(repo)
+    message_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="历史正文",
+        status=MessageStatus.completed,
+    )
+    repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=message_id,
+        event_type="thinking",
+        payload_json={"thinking": "旧思考"},
+        seq_no=1,
+    )
+
+    messages, _ = repo.get_messages_with_events("session-1")
+    assembled = messages[0]["events"]
+    assert [item["type"] for item in assembled] == ["thinking", "message.delta"]
+    assert assembled[1]["content"] == "历史正文"
+
+
+# ---------------------------------------------------------------------------
+# 分段一致性：压缩前 / 压缩后 / 重复压缩 必须给出同一份时间线
+#
+# 背景：分段边界必须只由「会渲染的事件」决定。tool.call.delta（前端不消费）与空
+# delta 若被当作边界，压缩把它们删掉后分段就会变，用户会看到布局在压缩前后跳变。
+# ---------------------------------------------------------------------------
+
+
+def _timeline(repo: SqliteRepository, session_id: str, message_id: str) -> list[str]:
+    """把时间线压成可断言的字符串列表：正文/思考各自合并为一段。"""
+    messages, _ = repo.get_messages_with_events(session_id)
+    target = next(item for item in messages if item["id"] == message_id)
+    timeline: list[str] = []
+    for event in target["events"]:
+        kind = event.get("type")
+        if kind not in ("message.delta", "thinking"):
+            timeline.append(str(kind))
+            continue
+        label = "delta" if kind == "message.delta" else "think"
+        text = event.get("content") or ""
+        if timeline and timeline[-1].startswith(f"{label}("):
+            timeline[-1] = f"{timeline[-1][:-1]}{text})"
+        else:
+            timeline.append(f"{label}({text})")
+    return timeline
+
+
+def _seed_message(
+    repo: SqliteRepository,
+    *,
+    content: str,
+    events: list[tuple[str, dict[str, Any]]],
+    suffix: str,
+) -> tuple[str, str]:
+    _create_agent(repo)
+    session_id = f"session-{suffix}"
+    repo.upsert_session(
+        session_id=session_id,
+        agent_id="agent-1",
+        status="idle",
+        runtime_type="openclaw",
+        runtime_session_key=f"agent:agent-1:session:{session_id}",
+        remote_runtime_agent_id="runtime-agent-1",
+    )
+    message_id = repo.create_message(
+        agent_id="agent-1",
+        session_id=session_id,
+        role="assistant",
+        content=content,
+        status=MessageStatus.completed,
+    )
+    for index, (event_type, payload) in enumerate(events, start=1):
+        repo.create_message_event_with_retry(
+            agent_id="agent-1",
+            session_id=session_id,
+            message_id=message_id,
+            event_type=event_type,
+            payload_json=payload,
+            seq_no=index,
+        )
+    return session_id, message_id
+
+
+# 与前端 buildMessageEventGroups 的实际行为对齐的共享向量（正文/思考/工具增量）
+TIMELINE_VECTORS: list[
+    tuple[str, str, str, list[tuple[str, dict[str, Any]]], list[str]]
+] = [
+    (
+        "v1-merge-adjacent",
+        "普通多段合并",
+        "AB",
+        [("message.delta", {"delta": "A"}), ("message.delta", {"delta": "B"})],
+        ["delta(AB)"],
+    ),
+    (
+        "v2-empty-delta",
+        "空 delta 夹在中间仍算同一段",
+        "AB",
+        [
+            ("message.delta", {"delta": "A"}),
+            ("message.delta", {"delta": ""}),
+            ("message.delta", {"delta": "B"}),
+        ],
+        ["delta(AB)"],
+    ),
+    (
+        "v3-tool-call-delta",
+        "tool.call.delta 夹在中间仍算同一段",
+        "AB",
+        [
+            ("message.delta", {"delta": "A"}),
+            ("tool.call.delta", {"content": "stdout..."}),
+            ("message.delta", {"delta": "B"}),
+        ],
+        ["delta(AB)"],
+    ),
+    (
+        "v4-thinking-boundary",
+        "思考段是真正的分段边界",
+        "AB",
+        [
+            ("message.delta", {"delta": "A"}),
+            ("thinking", {"thinking": "想"}),
+            ("message.delta", {"delta": "B"}),
+        ],
+        ["delta(A)", "think(想)", "delta(B)"],
+    ),
+    (
+        "v5-merge-thinking-run",
+        "连续思考合并为一段",
+        "AB",
+        [
+            ("message.delta", {"delta": "A"}),
+            ("thinking", {"thinking": "想"}),
+            ("thinking", {"thinking": "想2"}),
+            ("message.delta", {"delta": "B"}),
+        ],
+        ["delta(A)", "think(想想2)", "delta(B)"],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("suffix", "label", "content", "events", "expected"),
+    TIMELINE_VECTORS,
+    ids=[vector[0] for vector in TIMELINE_VECTORS],
+)
+def test_compact_is_idempotent_and_preserves_timeline(
+    repo: SqliteRepository,
+    suffix: str,
+    label: str,
+    content: str,
+    events: list[tuple[str, dict[str, Any]]],
+    expected: list[str],
+) -> None:
+    """压缩 N 次的结果必须一致，且等于压缩前的读侧装配结果。"""
+    session_id, message_id = _seed_message(
+        repo, content=content, events=events, suffix=suffix
+    )
+
+    before = _timeline(repo, session_id, message_id)
+    assert before == expected, f"{label}: 压缩前装配与预期不符"
+
+    repo.compact_message_delta_events(message_id)
+    after_first = _timeline(repo, session_id, message_id)
+    assert after_first == expected, f"{label}: 压缩后时间线发生变化"
+
+    repo.compact_message_delta_events(message_id)
+    repo.compact_message_delta_events(message_id)
+    assert _timeline(repo, session_id, message_id) == expected, f"{label}: 压缩不幂等"
+
+
+@pytest.mark.parametrize(
+    ("suffix", "label", "content", "events", "expected"),
+    TIMELINE_VECTORS,
+    ids=[vector[0] for vector in TIMELINE_VECTORS],
+)
+def test_compact_and_assemble_agree(
+    repo: SqliteRepository,
+    suffix: str,
+    label: str,
+    content: str,
+    events: list[tuple[str, dict[str, Any]]],
+    expected: list[str],
+) -> None:
+    """读侧装配与压缩必须给出同一份时间线（压缩前 vs 压缩后）。"""
+    session_id, message_id = _seed_message(
+        repo, content=content, events=events, suffix=suffix
+    )
+
+    assembled_before = _timeline(repo, session_id, message_id)
+    repo.compact_message_delta_events(message_id)
+    assembled_after = _timeline(repo, session_id, message_id)
+
+    assert assembled_before == assembled_after, (
+        f"{label}: 压缩改变了时间线布局 {assembled_before} -> {assembled_after}"
+    )
+
+
+def test_assemble_message_delta_lands_in_events(repo: SqliteRepository) -> None:
+    """正文分段必须落在 events 里。
+
+    回归：曾经只把分段累积进 delta_items、忘了 event_items.append，导致刷新后
+    events 里一个 message.delta 都没有，前端只能回退到「整段正文挂末尾」，
+    正文与思考/工具调用的交替顺序全部丢失。
+    """
+    session_id, message_id = _seed_message(
+        repo,
+        content="第一段第二段",
+        events=[
+            ("message.delta", {"delta": "第一段"}),
+            ("thinking", {"thinking": "思考"}),
+            ("message.delta", {"delta": "第二段"}),
+        ],
+        suffix="v6-lands-in-events",
+    )
+
+    messages, _ = repo.get_messages_with_events(session_id)
+    target = next(item for item in messages if item["id"] == message_id)
+    deltas = [item for item in target["events"] if item["type"] == "message.delta"]
+
+    assert [item["content"] for item in deltas] == ["第一段", "第二段"]
+    # 时间线顺序：正文段在思考之前，第二段在思考之后
+    assert [item["type"] for item in target["events"]] == [
+        "message.delta",
+        "thinking",
+        "message.delta",
+    ]
+
+
+def test_assemble_message_does_not_duplicate_trailing_delta(
+    repo: SqliteRepository,
+) -> None:
+    """分段已能还原完整正文时，不得再追加一条整段正文事件。
+
+    回归：对账分支在「增量之和 == content」时也会走到兜底追加，多出一个
+    content 为空的 message.delta 块。
+    """
+    session_id, message_id = _seed_message(
+        repo,
+        content="AB",
+        events=[("message.delta", {"delta": "A"}), ("message.delta", {"delta": "B"})],
+        suffix="v7-no-duplicate",
+    )
+
+    messages, _ = repo.get_messages_with_events(session_id)
+    target = next(item for item in messages if item["id"] == message_id)
+    deltas = [item for item in target["events"] if item["type"] == "message.delta"]
+
+    assert len(deltas) == 1
+    assert deltas[0]["content"] == "AB"
 
 
 def test_model_and_mcp_server_crud(repo: SqliteRepository) -> None:
@@ -617,10 +1021,9 @@ def test_builtin_and_installed_agent_skills_lifecycle(
         )
         is not None
     )
-    assert [
-        item.skill_id
-        for item in repo.list_installed_agent_skills("agent-1")
-    ] == ["builtin-1"]
+    assert [item.skill_id for item in repo.list_installed_agent_skills("agent-1")] == [
+        "builtin-1"
+    ]
 
     repo.delete_installed_agent_skill(
         agent_id="agent-1",
@@ -719,9 +1122,9 @@ def test_replace_installed_agent_skills_from_runtime_preserves_non_builtin_recor
         "Builtin Skill",
     ]
     assert [item.source_type for item in installed] == ["git", "wittyhub", "builtin"]
-    assert [item.skill_id for item in installed if item.skill_name == "Witty Skill"] == [
-        "wittyhub-1"
-    ]
+    assert [
+        item.skill_id for item in installed if item.skill_name == "Witty Skill"
+    ] == ["wittyhub-1"]
 
 
 def test_repository_summary_queries_and_agent_delete(repo: SqliteRepository) -> None:
@@ -1061,7 +1464,10 @@ def test_assemble_message_artifact_events_aggregated_by_id(
     _create_artifact_message(
         repo,
         [
-            ("artifact.started", _artifact_payload("output/demo.html", status="creating")),
+            (
+                "artifact.started",
+                _artifact_payload("output/demo.html", status="creating"),
+            ),
             (
                 "artifact.completed",
                 _artifact_payload(
@@ -1100,8 +1506,14 @@ def test_assemble_message_artifact_error_keeps_error_status(
     _create_artifact_message(
         repo,
         [
-            ("artifact.started", _artifact_payload("output/logo.png", status="creating")),
-            ("artifact.completed", _artifact_payload("output/logo.png", status="error")),
+            (
+                "artifact.started",
+                _artifact_payload("output/logo.png", status="creating"),
+            ),
+            (
+                "artifact.completed",
+                _artifact_payload("output/logo.png", status="error"),
+            ),
         ],
     )
 

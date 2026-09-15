@@ -61,6 +61,24 @@ class RuntimeTurnEvent(TypedDict):
     payload: dict[str, Any]
 
 
+def tool_call_delta_event(
+    *,
+    tool_call_id: str,
+    tool_name: str,
+    delta: str,
+) -> RuntimeTurnEvent:
+    """构造 ``tool.call.delta`` 事件 —— 全仓唯一载荷契约。"""
+    return {
+        "type": TurnEventType.TOOL_CALL_DELTA,
+        "payload": {
+            "stage": "delta",
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_id,
+            "delta": delta,
+        },
+    }
+
+
 class RuntimeBase(ABC):
     runtime_type: RuntimeType
 

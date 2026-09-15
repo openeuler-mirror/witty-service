@@ -87,6 +87,12 @@ AGENT_SKILL_UNINSTALL_FAILED = "AGENT_SKILL_UNINSTALL_FAILED"
 
 SKILL_INSTALL_TIMEOUT_SECONDS = 180.0
 
+# 纯传输事件：实时推送给前端、但不落库（见 consume_ws 中的落库分支）。
+# ``tool.call.delta`` 是工具执行过程中的增量输出，前端只在流式过程中消费它；
+# 终态 ``tool.call.response`` 已携带完整输出，落库只会让每次 exec 多出成百上千行
+# 永不回读的载荷，并在时间线上划出一道「压缩后会消失」的假分段边界。
+TRANSIENT_EVENT_TYPES = frozenset({"tool.call.delta"})
+
 INTERRUPTION_PREFIX = """[CRITICAL SYSTEM INSTRUCTION - OVERRIDE ALL PREVIOUS CONTEXT]
 
 The assistant's previous response in the conversation history was INTERRUPTED and INCOMPLETE before being sent to you.
@@ -1563,30 +1569,39 @@ class AgentManager:
                             status=MessageStatus.generating,
                         )
 
-                    seq_no += 1
                     event_type = event_dict["type"]
                     payload = (
                         event_dict.get("payload")
                         if isinstance(event_dict.get("payload"), dict)
                         else {}
                     )
-                    try:
-                        self._repository.create_message_event_with_retry(
-                            agent_id=agent_id,
-                            session_id=session_id,
-                            event_type=event_type,
-                            payload_json=payload,
-                            seq_no=seq_no,
-                            message_id=assistant_msg_id,
-                        )
-                    except Exception:
-                        self._logger.warning(
-                            "Failed to persist event: agent_id=%s session_id=%s event_type=%s",
+                    if event_type in TRANSIENT_EVENT_TYPES:
+                        # 仍会走到下面的 push_event，只是不落库。
+                        self._logger.debug(
+                            "skip persisting transient event: agent_id=%s session_id=%s event_type=%s",
                             agent_id,
                             session_id,
                             event_type,
-                            exc_info=True,
                         )
+                    else:
+                        seq_no += 1
+                        try:
+                            self._repository.create_message_event_with_retry(
+                                agent_id=agent_id,
+                                session_id=session_id,
+                                event_type=event_type,
+                                payload_json=payload,
+                                seq_no=seq_no,
+                                message_id=assistant_msg_id,
+                            )
+                        except Exception:
+                            self._logger.warning(
+                                "Failed to persist event: agent_id=%s session_id=%s event_type=%s",
+                                agent_id,
+                                session_id,
+                                event_type,
+                                exc_info=True,
+                            )
 
                     if event_type == "message.delta":
                         delta = payload.get("delta", "")

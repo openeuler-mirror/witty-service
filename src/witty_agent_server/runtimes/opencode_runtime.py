@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator, Mapping
-from typing import Any
+from typing import Any, TypedDict
 
 from witty_agent_server.infra.clients.base import ClientBase
 from witty_agent_server.runtimes.runtime_base import (
@@ -10,9 +10,33 @@ from witty_agent_server.runtimes.runtime_base import (
     RuntimeTurnEvent,
     RuntimeType,
     TurnEventType,
+    tool_call_delta_event,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class PartMeta(TypedDict, total=False):
+    """``message.part.updated`` 中对增量归属有用的字段。
+
+    ``message.part.delta`` 只带 ``partID``，而 ``tool.call.delta`` 的载荷契约要求
+    ``tool_call_id``（即 part 的 ``callID``）。因此必须先在 ``message.part.updated``
+    上把 ``partID → callID / 工具名`` 记下来，delta 到达时才能归属。
+    """
+
+    part_type: str
+    call_id: str
+    tool_name: str
+
+
+def _nested_str(source: Any, *keys: str) -> str:
+    """按 ``keys`` 逐层取字符串；任一层不是 dict、或最终值不是 str 时返回空串。"""
+    current = source
+    for key in keys:
+        if not isinstance(current, dict):
+            return ""
+        current = current.get(key)
+    return current if isinstance(current, str) else ""
 
 
 class OpenCodeRuntime(RuntimeBase):
@@ -23,17 +47,17 @@ class OpenCodeRuntime(RuntimeBase):
 
     def _on_turn_begin(self, session_key: str, message: str) -> None:
         del session_key, message
-        self._turn.part_types_by_id = {}
+        self._turn.parts_by_id: dict[str, PartMeta] = {}
         self._turn.started_tool_call_ids = set()
         self._turn.accumulated_text = ""
 
     def _on_raw_event(self, raw: dict[str, Any]) -> None:
-        self._track_part_type(raw, part_types_by_id=self._turn.part_types_by_id)
+        self._track_part(raw, parts_by_id=self._turn.parts_by_id)
 
     def _map_events(self, raw: dict[str, Any]) -> Iterator[RuntimeTurnEvent]:
         yield from self._map_opencode_event(
             raw,
-            part_types_by_id=self._turn.part_types_by_id,
+            parts_by_id=self._turn.parts_by_id,
             started_tool_call_ids=self._turn.started_tool_call_ids,
         )
 
@@ -72,7 +96,7 @@ class OpenCodeRuntime(RuntimeBase):
     def _map_opencode_event(
         raw: dict[str, Any],
         *,
-        part_types_by_id: Mapping[str, str] | None = None,
+        parts_by_id: Mapping[str, PartMeta] | None = None,
         started_tool_call_ids: set[str] | None = None,
     ) -> Iterator[RuntimeTurnEvent]:
         """将 OpenCode SSE 原始事件映射为 ``RuntimeTurnEvent``。"""
@@ -87,9 +111,7 @@ class OpenCodeRuntime(RuntimeBase):
             return
 
         if event_type == "message.part.delta":
-            result = OpenCodeRuntime._map_part_delta(
-                raw, part_types_by_id=part_types_by_id
-            )
+            result = OpenCodeRuntime._map_part_delta(raw, parts_by_id=parts_by_id)
             if result is not None:
                 yield result
             return
@@ -176,26 +198,22 @@ class OpenCodeRuntime(RuntimeBase):
                 # 的输入参数依赖 started（input 在 running 才填充）。即便首条
                 # running 就带增量输出，也必须先发 started，否则统一 artifact
                 # 钩子拿不到参数、会丢失 artifact.* 事件。
+                # 已发过 started 的后续 running（带增量 output）透出为
+                # tool.call.delta，前端「边跑边看」；终态输出仍由 completed /
+                # error 分支的 tool.call.response 完整下发。
                 if (
                     started_tool_call_ids is not None
                     and tool_call_id
                     and tool_call_id in started_tool_call_ids
                 ):
-                    # 已发过 started：有增量输出 → tool.call.delta
-                    if isinstance(state, dict):
-                        output = state.get("metadata", {}).get("output", "")
-                        if output:
-                            return {
-                                "type": TurnEventType.TOOL_CALL_DELTA,
-                                "payload": {
-                                    "stage": "delta",
-                                    "name": tool_name,
-                                    "tool_call_id": tool_call_id,
-                                    "content": output,
-                                    "status": "running",
-                                },
-                            }
-                    return None
+                    output = _nested_str(state, "metadata", "output")
+                    if not output:
+                        return None
+                    return tool_call_delta_event(
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        delta=output,
+                    )
 
                 if started_tool_call_ids is not None and tool_call_id:
                     started_tool_call_ids.add(tool_call_id)
@@ -265,14 +283,16 @@ class OpenCodeRuntime(RuntimeBase):
     def _map_part_delta(
         raw: dict[str, Any],
         *,
-        part_types_by_id: Mapping[str, str] | None = None,
+        parts_by_id: Mapping[str, PartMeta] | None = None,
     ) -> dict[str, Any] | None:
-        """映射 ``message.part.delta`` → ``message.delta`` / ``tool.call.delta`` / ``thinking.delta``。
+        """映射 ``message.part.delta`` → ``message.delta`` / ``thinking.delta``
+        / ``tool.call.delta``。
 
         OpenCode text 流式增量通过独立的 ``message.part.delta`` 事件下发，
 
         扩展支持：
-        - ``field="tool"`` → ``tool.call.delta``（工具执行增量输出）
+        - ``field="tool"`` → ``tool.call.delta``（工具执行增量输出），
+          归属信息取自 ``parts_by_id``（``partID → callID``）
         - ``field="reasoning"`` → ``thinking.delta``（增量思考内容）
         """
         field = raw.get("field", "")
@@ -281,38 +301,53 @@ class OpenCodeRuntime(RuntimeBase):
             return None
 
         part_id = raw.get("partID")
-        part_type = (
-            part_types_by_id.get(part_id)
-            if isinstance(part_id, str) and part_types_by_id is not None
+        meta: PartMeta = (
+            parts_by_id.get(part_id)
+            if isinstance(part_id, str) and parts_by_id is not None
             else None
-        )
-        if part_type == "reasoning":
+        ) or {}
+        if meta.get("part_type") == "reasoning":
             return {"type": TurnEventType.THINKING_DELTA, "payload": {"delta": delta}}
 
         if field == "text":
             return {"type": TurnEventType.MESSAGE_DELTA, "payload": {"delta": delta}}
 
         if field == "tool":
-            return {
-                "type": TurnEventType.TOOL_CALL_DELTA,
-                "payload": {"delta": delta, "part": raw.get("part")},
-            }
+            # 载荷契约要求 tool_call_id：拿不到归属就直接丢弃，不再发一条前端
+            # 注定忽略的事件（见 runtime_base.tool_call_delta_event）。
+            tool_call_id = meta.get("call_id", "")
+            if not tool_call_id:
+                return None
+            return tool_call_delta_event(
+                tool_call_id=tool_call_id,
+                tool_name=meta.get("tool_name", ""),
+                delta=delta,
+            )
 
         return None
 
     @staticmethod
-    def _track_part_type(
-        raw: dict[str, Any], *, part_types_by_id: dict[str, str]
-    ) -> None:
+    def _track_part(raw: dict[str, Any], *, parts_by_id: dict[str, PartMeta]) -> None:
+        """记录 part 元信息（类型 / callID / 工具名），供 ``message.part.delta`` 归属。"""
         if raw.get("type") != "message.part.updated":
             return
         part = raw.get("part")
         if not isinstance(part, dict):
             return
         part_id = part.get("id")
+        if not isinstance(part_id, str) or not part_id:
+            return
+        meta: PartMeta = {}
         part_type = part.get("type")
-        if isinstance(part_id, str) and isinstance(part_type, str):
-            part_types_by_id[part_id] = part_type
+        if isinstance(part_type, str) and part_type:
+            meta["part_type"] = part_type
+        call_id = part.get("callID")
+        if isinstance(call_id, str) and call_id:
+            meta["call_id"] = call_id
+        tool_name = part.get("tool")
+        if isinstance(tool_name, str) and tool_name:
+            meta["tool_name"] = tool_name
+        parts_by_id[part_id] = meta
 
     @staticmethod
     def _map_message_updated(raw: dict[str, Any]) -> dict[str, Any] | None:

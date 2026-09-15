@@ -233,6 +233,15 @@ def _artifact_item_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+def _delta_text_from_payload(payload: dict[str, Any]) -> str:
+    """取出流式增量事件携带的文本（兼容 delta / text / content 三种键）。"""
+    for key in ("delta", "text", "content"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[str, Any]:
     tool_calls: list[dict[str, Any]] = []
     tool_calls_by_id: dict[str, dict[str, Any]] = {}
@@ -240,6 +249,10 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
     thinking: list[str] = []
     usage: dict[str, Any] | None = None
     event_items: list[dict[str, Any]] = []
+    # 正文分段（连续 message.delta 合并为一条时间线事件）
+    delta_items: list[dict[str, Any]] = []
+    # 上一个已入列事件的类型，用于判断增量是否连续
+    prev_item_type: str | None = None
 
     # Message-level question fields
     question: list[dict[str, Any]] | None = None
@@ -299,7 +312,33 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
                 thinking.append(content)
             item["content"] = content
 
-        elif evt.event_type in ("message.delta", "thinking.delta"):
+        elif evt.event_type in ("message.delta", "thinking.delta", "tool.call.delta"):
+            # 正文增量：保留在时间线上（合并同段连续增量），刷新后正文与
+            # 思考/工具调用的交替顺序才不会丢失。
+            # 「透明事件」不打断分段，与 compact_message_delta_events 的判定保持一致：
+            # - thinking.delta：内容由 thinking 事件承载（老数据残留）；
+            # - tool.call.delta：纯传输事件、已不落库，此处只为兼容历史行；
+            # - 空 delta：没有可渲染内容。
+            text = (
+                _delta_text_from_payload(payload)
+                if evt.event_type == "message.delta"
+                else ""
+            )
+            if not text:
+                continue
+            if prev_item_type == "message.delta" and delta_items:
+                # 续写当前段：末段事件对象已经在 event_items 里，只改内容、不再追加，
+                # 否则同一段会被追加两次，时间线上会多出一个空正文块。
+                tail = delta_items[-1]
+                tail["content"] = str(tail.get("content") or "") + text
+            else:
+                item["content"] = text
+                delta_items.append(item)
+                # 新段必须落进 event_items：否则这段正文会整段从时间线上消失，
+                # 前端只能回退到「整段正文挂时间线末尾」的兼容路径，
+                # 正文与思考/工具调用的交替顺序随之丢失（本函数要解决的问题）。
+                event_items.append(item)
+            prev_item_type = "message.delta"
             continue
 
         elif evt.event_type == "usage.updated":
@@ -353,6 +392,7 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
                 }
                 item["artifact"] = artifact
 
+        prev_item_type = evt.event_type
         event_items.append(item)
 
     msg_status = (
@@ -375,13 +415,33 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
                         "已停止生成" if msg_status == "interrupted" else "发生错误"
                     )
 
-    event_items.append(
-        {
-            "type": "message.delta",
-            "content": msg.content,
-            "timestamp": _format_utc_datetime(msg.created_at),
-        }
-    )
+    # 正文对账：分段增量之和应等于 message.content。
+    # - 相等：分段就是完整正文，保持分段位置，**不再追加整段正文** —— 否则末尾会
+    #   多出一个空内容的 message.delta 块，且前端会把该类型判定为「已流式渲染」；
+    # - 增量是不完整前缀（如 message.completed 携带更完整文本）：把缺失尾巴补到末段；
+    # - 完全对不上（增量被截断/丢失）：放弃分段，回退为整段正文，避免正文缺失。
+    message_content = msg.content or ""
+    if delta_items and message_content:
+        joined = "".join(str(item.get("content") or "") for item in delta_items)
+        if joined != message_content:
+            if joined and message_content.startswith(joined):
+                delta_items[-1]["content"] = joined + message_content[len(joined) :]
+            else:
+                event_items = [
+                    item for item in event_items if item.get("type") != "message.delta"
+                ]
+                delta_items = []
+
+    # 老数据兜底（正文增量曾被整段清除、或对账失败已放弃分段）：把整段正文挂到
+    # 时间线末尾。分段已能还原完整正文时不走这里。
+    if not delta_items and message_content:
+        event_items.append(
+            {
+                "type": "message.delta",
+                "content": message_content,
+                "timestamp": _format_utc_datetime(msg.created_at),
+            }
+        )
 
     result: dict[str, Any] = {
         "id": msg.id,
@@ -1028,30 +1088,118 @@ class SqliteRepository:
                 .first()
             )
 
-    def compact_message_delta_events(self, message_id: str) -> None:
-        from sqlalchemy import select
+    # 流式增量事件类型：正文 / 思考 / 工具参数
+    DELTA_EVENT_TYPES = ("message.delta", "thinking.delta", "tool.call.delta")
 
-        BATCH = 500
+    def compact_message_delta_events(self, message_id: str) -> None:
+        """把流式增量事件折叠为「按时间线定位的段落事件」。
+
+        此前直接删除全部 message.delta，刷新后只能把整段正文补在时间线末尾，
+        正文与思考/工具调用交替的顺序全部丢失（用户看到所有内容「挤」在最后）。
+        这里改为按「同类型连续增量」合并成一条事件，保留段首事件的 seq_no 与
+        时间戳，从而既大幅压缩行数，又保住正文分段位置：
+
+        - message.delta：合并为一条 payload={"delta": 合并文本}；
+        - thinking.delta：若紧随其后存在内容等价的完整 thinking 事件，整段删除
+          （避免重复展示）；否则就地改写为一条 thinking 事件，保证回放不丢思考；
+        - tool.call.delta / 空 delta：直接删除（仅历史数据，见下）。
+
+        「透明事件」：tool.call.delta 与空 delta 都**不能**成为分段边界 —— 边界只能
+        由「真正会渲染的事件」决定。否则同一条消息在压缩前（内存里刚跑完）与压缩后
+        （落库再读）的分段位置会不一致。
+
+        关于 tool.call.delta：它现在是纯传输事件，不再落库（见
+        ``agent_manager.TRANSIENT_EVENT_TYPES``），前端在流式过程中直接消费增量输出。
+        这里保留删除与「透明」判定，只为兼容此前版本已经写进库的历史行。
+        """
         with self._session_factory() as session:
-            while True:
-                subq = (
-                    select(MessageEventORM.id)
-                    .filter(
-                        MessageEventORM.message_id == message_id,
-                        MessageEventORM.event_type.in_(
-                            ["message.delta", "thinking.delta", "tool.call.delta"]
-                        ),
-                    )
-                    .limit(BATCH)
-                )
-                deleted = (
-                    session.query(MessageEventORM)
-                    .filter(MessageEventORM.id.in_(subq))
-                    .delete(synchronize_session=False)
-                )
-                if deleted == 0:
-                    break
-                session.commit()
+            rows = (
+                session.query(MessageEventORM)
+                .filter(MessageEventORM.message_id == message_id)
+                .order_by(MessageEventORM.seq_no.asc())
+                .all()
+            )
+            if not rows:
+                return
+
+            def text_of(candidate: MessageEventORM) -> str:
+                return _delta_text_from_payload(dict(candidate.payload_json or {}))
+
+            def is_transparent(candidate: MessageEventORM) -> bool:
+                """是否为「不可见、不构成分段边界」的增量行。
+
+                只有两类：tool.call.delta（历史残留行，新数据不再落库），以及对
+                delta 类型而言内容为空的条目。**不能**把普通 thinking /
+                message.completed 等事件算进来，它们是会被渲染的段边界。
+                """
+                if candidate.event_type == "tool.call.delta":
+                    return True
+                if candidate.event_type not in ("message.delta", "thinking.delta"):
+                    return False
+                return not text_of(candidate)
+
+            delete_ids: list[str] = []
+            index = 0
+            total = len(rows)
+            while index < total:
+                row = rows[index]
+                if row.event_type not in self.DELTA_EVENT_TYPES:
+                    index += 1
+                    continue
+
+                # 透明事件：自身即删，且不打断分组（让两侧内容并入同一段）
+                if is_transparent(row):
+                    delete_ids.append(row.id)
+                    index += 1
+                    continue
+
+                # 只收集「同类型」连续增量，途中跳过透明事件
+                end = index + 1
+                parts = [text_of(row)]
+                while end < total:
+                    candidate = rows[end]
+                    if is_transparent(candidate):
+                        delete_ids.append(candidate.id)
+                        end += 1
+                        continue
+                    if candidate.event_type != row.event_type:
+                        break
+                    parts.append(text_of(candidate))
+                    end += 1
+                text = "".join(parts)
+
+                if row.event_type == "message.delta":
+                    row.payload_json = {"delta": text}
+                else:  # thinking.delta
+                    following = rows[end] if end < total else None
+                    covered = False
+                    if following is not None and following.event_type == "thinking":
+                        full_text = dict(following.payload_json or {}).get("thinking")
+                        covered = (
+                            bool(text.strip())
+                            and isinstance(full_text, str)
+                            and full_text.strip() == text.strip()
+                        )
+                    if covered:
+                        delete_ids.extend(item.id for item in rows[index:end])
+                    else:
+                        row.event_type = "thinking"
+                        row.payload_json = {"thinking": text}
+
+                # 段首行保留，其余「同类型」行删除（透明事件已在上面逐个登记）
+                for item in rows[index + 1 : end]:
+                    if item.event_type == row.event_type and item.id not in delete_ids:
+                        delete_ids.append(item.id)
+
+                index = end
+
+            # 大消息的增量行数可达数千，分批删除避免单条 SQL 参数过多
+            batch_size = 500
+            for start in range(0, len(delete_ids), batch_size):
+                session.query(MessageEventORM).filter(
+                    MessageEventORM.id.in_(delete_ids[start : start + batch_size])
+                ).delete(synchronize_session=False)
+            session.commit()
 
     def _get_next_message_event_seq(self, *, session_id: str) -> int:
         with self._session_factory() as session:
