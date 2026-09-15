@@ -99,9 +99,25 @@ def _handle_legacy_db_if_needed(engine: Engine, alembic_cfg: AlembicConfig) -> N
     if "agents" not in existing_tables or "alembic_version" in existing_tables:
         return
     # 各迁移最终保留的关键对象（downgrade 才删除的列/表也属于最终 schema,必须校验）
-    required_tables = {"mcp_servers"}
+    # 20260913_01 新增的 6 张渠道表必须在此登记：缺了它们，一个存量库会在迁移
+    # 执行前被判为"结构完整"并 stamp head，渠道表永远不会被创建（实施计划 §4.1）。
+    required_tables = {
+        "mcp_servers",
+        "channel_instances",
+        "channel_provisionings",
+        "channel_routes",
+        "channel_inbound_events",
+        "channel_deliveries",
+        "channel_access_policies",
+    }
     required_columns = {
-        "sessions": {"runtime_type", "runtime_session_id", "runtime_session_key"},
+        "sessions": {
+            "runtime_type",
+            "runtime_session_id",
+            "runtime_session_key",
+            # 20260913_01 新增的会话来源列
+            "origin",
+        },
         "models": {"compatibility"},
         "agents": {"model_id", "mcp_server_list"},
         "agent_skills": {

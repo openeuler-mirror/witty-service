@@ -1,5 +1,7 @@
+import inspect
 import logging
 import threading
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from witty_service.api.agent_templates import router as agent_templates_router
 from witty_service.api.agents import router as agents_router
 from witty_service.api.backport import router as backport_router
+from witty_service.api.channels import router as channels_router
 from witty_service.api.cve import router as cve_router
 from witty_service.api.errors import register_exception_handlers
 from witty_service.api.insight import router as insight_router
@@ -20,6 +23,20 @@ from witty_service.config import get_settings
 from witty_service.logger import configure_logging
 
 logger = logging.getLogger(__name__)
+
+
+async def _call(method: object) -> Any:
+    """调用容器成员并兼容**非协程测试替身**（`MagicMock` 容器的 `start`/`stop`）。
+
+    生产路径上这些成员都是协程函数，因此这里只是让既有的 `MagicMock()` 容器测试
+    （见实施计划 §4.2）不需要为渠道能力改写替身，行为不变。
+    """
+    if not callable(method):
+        return None
+    result = method()
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
@@ -191,12 +208,40 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
         """启动定时任务调度器：agent 恢复完成后再注册任务，避免恢复窗口内的触发失败。"""
         await app.state.services.scheduled_task_service.start()
 
+    @app.on_event("startup")
+    async def start_channel_gateway() -> None:
+        """启动渠道网关（框架设计 §7.2）。
+
+        挂载点必须在 agent 恢复与定时任务之后，否则恢复期内收到的消息会打到未就绪的
+        agent。网关自身的守卫拒绝（进程数不为 1 / 密钥非法）会返回 False，**不抛异常**；
+        意外异常也只记日志——渠道是增量能力，不能让它拖垮既有接口。
+        """
+        gateway = getattr(app.state.services, "channel_gateway", None)
+        if gateway is None:
+            return
+        try:
+            started = bool(await _call(gateway.start))
+        except Exception:
+            logger.exception("Channel gateway failed to start")
+            return
+        if not started:
+            logger.warning(
+                "Channel gateway did not start; no channel connection is established "
+                "(reason=%s)",
+                getattr(gateway, "guard_reason", None),
+            )
+
     @app.on_event("shutdown")
     async def close_services() -> None:
+        # 关闭顺序（框架设计 §7.2）：网关 -> 调度器 -> services.close()
+        gateway = getattr(app.state.services, "channel_gateway", None)
+        if gateway is not None:
+            await _call(gateway.stop)
         await app.state.services.scheduled_task_service.shutdown()
         await app.state.services.close()
 
     app.include_router(agents_router)
+    app.include_router(channels_router)
     app.include_router(agent_templates_router)
     app.include_router(cve_router)
     app.include_router(models_router)

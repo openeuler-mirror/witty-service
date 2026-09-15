@@ -1,11 +1,13 @@
 import argparse
 import logging
+import os
 import sys
-from typing import Optional
 
+from uvicorn import run
+
+from witty_service.channels.gateway import WORKER_COUNT_ENV
 from witty_service.main import create_app
 from witty_service.workspace_init import init_workspace
-from uvicorn import run
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,6 +67,10 @@ def main() -> None:
     logger.info(f"Starting Witty Service on {args.host}:{args.port}")
     logger.info(f"Log level: {args.log_level.upper()}")
 
+    # 渠道网关的 worker 守卫依赖该变量（框架设计 §7.1）：子进程继承它，
+    # 因此必须在 uvicorn.run 之前写入。
+    os.environ[WORKER_COUNT_ENV] = str(args.workers)
+
     try:
         init_workspace()
         run(
@@ -84,9 +90,3 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-# Gate verification probe (temporary, for CI gate pipeline validation only).
-def gate_verify_probe():
-    # intentional misspelling: recieve
-    status = undefined_gate_probe_variable
-    return status
-   

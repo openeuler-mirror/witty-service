@@ -119,3 +119,70 @@ def test_settings_from_env_includes_insight_settings(monkeypatch) -> None:
 
     assert settings.insight.enabled is True
     assert settings.insight.base_url == "http://insight.internal:7396"
+
+
+def _clear_channel_env(monkeypatch) -> None:
+    for key in (
+        "WITTY_CHANNEL_ENABLED",
+        "WITTY_CHANNEL_CREDENTIALS_DIR",
+        "WITTY_CHANNEL_STALL_WINDOW_SECONDS",
+        "WITTY_CHANNEL_HEALTH_INTERVAL_SECONDS",
+        "WITTY_CHANNEL_QUEUE_DEPTH",
+        "WITTY_CHANNEL_EDIT_THROTTLE_MS",
+        "WITTY_CHANNEL_INBOUND_RETENTION_DAYS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_channel_settings_defaults(monkeypatch) -> None:
+    _clear_channel_env(monkeypatch)
+
+    settings = config_module.ChannelSettings.from_env()
+
+    assert settings.enabled is True
+    # 凭据目录有默认值：凭据不是"必须由部署者提供的密钥"，装好即可用
+    assert settings.credentials_dir == "~/.witty/channel-credentials"
+    assert settings.stall_window_seconds == 90.0
+    assert settings.health_interval_seconds == 15.0
+    assert settings.queue_depth == 3
+    assert settings.edit_throttle_ms == 0
+    assert settings.inbound_retention_days == 7
+
+
+def test_channel_settings_reads_env(monkeypatch) -> None:
+    monkeypatch.setenv("WITTY_CHANNEL_ENABLED", "false")
+    monkeypatch.setenv("WITTY_CHANNEL_CREDENTIALS_DIR", "/srv/witty/credentials")
+    monkeypatch.setenv("WITTY_CHANNEL_STALL_WINDOW_SECONDS", "30")
+    monkeypatch.setenv("WITTY_CHANNEL_HEALTH_INTERVAL_SECONDS", "5")
+    monkeypatch.setenv("WITTY_CHANNEL_QUEUE_DEPTH", "7")
+    monkeypatch.setenv("WITTY_CHANNEL_EDIT_THROTTLE_MS", "1500")
+    monkeypatch.setenv("WITTY_CHANNEL_INBOUND_RETENTION_DAYS", "14")
+
+    settings = config_module.ChannelSettings.from_env()
+
+    assert settings.enabled is False
+    # 配置层不做任何文件系统操作：原样保存路径，建目录与校验在 ChannelGateway.start()
+    assert settings.credentials_dir == "/srv/witty/credentials"
+    assert settings.stall_window_seconds == 30.0
+    assert settings.health_interval_seconds == 5.0
+    assert settings.queue_depth == 7
+    assert settings.edit_throttle_ms == 1500
+    assert settings.inbound_retention_days == 14
+
+
+def test_channel_settings_falls_back_on_blank_credentials_dir(monkeypatch) -> None:
+    monkeypatch.setenv("WITTY_CHANNEL_CREDENTIALS_DIR", "   ")
+
+    settings = config_module.ChannelSettings.from_env()
+
+    assert settings.credentials_dir == "~/.witty/channel-credentials"
+
+
+def test_settings_from_env_includes_channel_settings(monkeypatch) -> None:
+    _clear_channel_env(monkeypatch)
+    monkeypatch.setenv("WITTY_CHANNEL_QUEUE_DEPTH", "5")
+
+    settings = config_module.Settings.from_env()
+
+    assert settings.channel.queue_depth == 5
+    assert settings.channel.enabled is True

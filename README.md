@@ -301,6 +301,32 @@ witty-service --host 0.0.0.0 --port 8000
 | `WITTY_DOCKER_CONTAINER_WORKSPACE_PATH` | 容器内工作区路径 | `/witty-workspace` |
 | `WITTY_DOCKER_STOP_TIMEOUT` | 容器停止超时（秒） | `10` |
 
+### IM Channel 渠道配置
+
+| 环境变量 | 说明 | 默认值 |
+|----------|------|--------|
+| `WITTY_CHANNEL_ENABLED` | 渠道网关总开关 | `true` |
+| `WITTY_CHANNEL_CREDENTIALS_DIR` | 渠道凭据目录（机器人 Secret 以 0600 文件存放于此） | `~/.witty/channel-credentials` |
+| `WITTY_CHANNEL_STALL_WINDOW_SECONDS` | 停滞窗口长度（秒） | `90` |
+| `WITTY_CHANNEL_HEALTH_INTERVAL_SECONDS` | 连接健康复查间隔（秒） | `15` |
+| `WITTY_CHANNEL_QUEUE_DEPTH` | 每会话队列深度 | `3` |
+| `WITTY_CHANNEL_EDIT_THROTTLE_MS` | 占位消息节流更新间隔（毫秒） | `0` |
+| `WITTY_CHANNEL_INBOUND_RETENTION_DAYS` | 入站去重记录保留天数 | `7` |
+
+**渠道凭据放在哪里。** 机器人 Secret **不写入数据库**：主库 `channel_instances` 只保存一个不透明的
+引用，凭据本体是 `$WITTY_CHANNEL_CREDENTIALS_DIR/<引用>.json`，目录 `0700`、文件 `0600`。
+服务启动时创建该目录；若目录已存在但对 group/other 可读（或所有者不是运行用户），
+渠道网关**拒绝启动**并把实例标为 `disabled`——错误日志里会直接给出 `chmod` 命令。
+这样设计的取舍见 `docs/adr/0004-channel-credentials-outside-the-database.md`。
+
+> **运维要点**：凭据目录必须与主库一起备份（它**就是**凭据，主库无法恢复它），
+> 且备份介质本身应当加密——凭据文件是明文。
+> **边界说明**：文件权限能挡住同机其他用户，挡不住以**同一 OS 用户**运行的 agent
+> 工具进程。要让凭据远离自身 agent，需要把 agent 放到另一个 UID 下运行。
+
+> **升级说明**：早期版本用 `WITTY_CHANNEL_SECRET_KEY`（Fernet 主密钥）加密凭据后落库。
+> 该变量与那批密文都已废弃；升级后存量渠道实例会被标记为 `error`，需要重新接入。
+
 ---
 
 ## 部署流程
@@ -423,6 +449,8 @@ witty-service/
 │   │   │   ├── backport.py           # 代码回溯接口
 │   │   │   ├── auth.py               # 认证中间件
 │   │   │   ├── errors.py             # 统一错误处理
+│   │   │   ├── channels.py           # IM 渠道接口（框架设计 §9）
+│   │   │   ├── channel_schemas.py    # 渠道接口的请求/响应模型
 │   │   │   └── schemas.py            # 请求/响应模型
 │   │   ├── application/              # 业务逻辑层
 │   │   │   ├── agent_manager.py      # Agent 生命周期管理
@@ -438,8 +466,20 @@ witty-service/
 │   │   │   ├── local_process.py      # 本地进程沙箱
 │   │   │   ├── e2b.py                # E2B 云沙箱
 │   │   │   └── factory.py            # 沙箱工厂
+│   │   ├── channels/                 # IM 渠道层（企微/QQ/钉钉/飞书私聊入口）
+│   │   │   ├── contracts.py          # 渠道契约、能力声明与适配器注册表
+│   │   │   ├── router.py             # 会话路由：队列、占位消息、绑定闸门、出站唯一出口
+│   │   │   ├── access_policy.py      # 准入策略（纯函数，fail-closed）
+│   │   │   ├── delivery.py           # 呈现规划（纯函数：分段与呈现方式）
+│   │   │   ├── commands.py           # 命令解析与用户可见文案
+│   │   │   ├── dedup.py              # 入站去重与周期清理
+│   │   │   ├── turn_gateway.py       # 调用 AgentManager 的窄接口
+│   │   │   ├── crypto.py             # 凭据加密（Fernet）
+│   │   │   ├── gateway.py            # 渠道网关：worker 守卫、连接监督、入站分发
+│   │   │   ├── provisioning/         # 扫码接入与手填凭据旁路
+│   │   │   └── adapters/             # 各渠道适配器（自注册进 ADAPTER_REGISTRY）
 │   │   ├── domain/                   # 领域模型
-│   │   ├── persistence/              # 数据持久化
+│   │   ├── persistence/              # 数据持久化（含渠道仓储 channel_repository.py）
 │   │   └── storage/                  # 文件存储
 │   └── witty_agent_server/           # Agent 运行时服务
 │       ├── app.py                    # FastAPI 应用

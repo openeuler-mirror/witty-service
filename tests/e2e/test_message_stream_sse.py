@@ -364,6 +364,22 @@ class FakeScheduledTaskService:
         return None
 
 
+class FakeChannelGateway:
+    """渠道网关替身：lifespan 会调用 start/stop，但不建立任何真实连接。"""
+
+    def __init__(self) -> None:
+        self.started = 0
+        self.stopped = 0
+        self.guard_reason: str | None = None
+
+    async def start(self) -> bool:
+        self.started += 1
+        return True
+
+    async def stop(self) -> None:
+        self.stopped += 1
+
+
 class FakeServices(ServiceContainer):
     def __init__(self, manager: AgentManager, repository: FakeRepository) -> None:
         self.repository = repository
@@ -372,6 +388,7 @@ class FakeServices(ServiceContainer):
         self.session_manager = SessionManager(repository)
         self.ws_client_pool = WebSocketClientPool()
         self.scheduled_task_service = FakeScheduledTaskService()
+        self.channel_gateway = FakeChannelGateway()
         self._manager = manager
 
     def get_agent_manager_for_agent(self, agent_id: str) -> AgentManager:
