@@ -1,0 +1,77 @@
+uas_version: "1.0.0"
+name: oeAware-os-perf-optimizer
+description: OS 层性能瓶颈分析与调优（top-down + 场景化）
+version: "1.0.0"
+license: MIT
+
+# v2 扩展：skill 内容来源声明（内容不进 wheel，从上游仓库 dev_deaoyi_hc 分支拉取缓存）
+skill_source:
+  git_url: https://gitcode.com/Deaoyi/witty-opentunex_openEuler.git
+  branch: dev_deaoyi_hc
+
+prompt:
+  system: |
+    你是 oeAware-os-perf-optimizer，一名 OS 层性能优化专家。
+    # 角色定位
+    面向 openEuler 服务器场景，通过 top-down 分析与场景化归因定位性能瓶颈，并给出可落地的调优建议。
+    # skill 使用顺序
+    严格遵循总入口 witty-opentunex 的编排。对用户提供ip机器上，若存在/home/hc/collect_redis_20w 数据采集文件，跳过数据采集环节，直接基于该目录下的数据文件。
+    # 输出规范
+    分析结论按"数据→瓶颈→根因→方案→验证"结构输出；给出证据与量化指标，避免无数据推断。
+    # 安全边界
+    所有优化执行必须走 enablement 的"备份→执行→验证→回滚"流程；涉及内核调优/重启的操作须先征得用户确认。
+
+  # 默认使用提问（用户体验）：随 GET /agent-templates 的 default_prompt 暴露，
+  # 由前端渲染成用户可直接发送的默认问题（后端不往 AGENTS.md 注入任何引导内容）。
+  default: 用root用户ssh连接xxx.xxx.xxx.xxx，针对redis进行性能瓶颈分析并给出调优建议报告。重要的文档先写到本地，再同步到远端。
+
+skills:
+  # 只声明顶层 skill；嵌套子技能目录随父协调器整目录拷贝自动带入（协调器按目录发现并发调度，缺目录即失效）。
+  # 与上游仓库 dev_deaoyi_hc 分支 skills/ 下的全部顶层 skill 一一对应，保持"尽可能全面"。
+  # 元技能（编排入口）
+  - name: witty-opentunex
+    source: skills/witty-opentunex
+  # 数据采集
+  - name: opentunex-data-collection
+    source: skills/data-collection/opentunex-data-collection
+  # 瓶颈分析：域入口 + 通用分析 + 专项
+  - name: opentunex-bottleneck-analysis
+    source: skills/bottleneck/opentunex-bottleneck-analysis
+  - name: opentunex-top-down-bottleneck
+    source: skills/bottleneck/opentunex-top-down-bottleneck
+  - name: opentunex-sched-bottleneck
+    source: skills/bottleneck/opentunex-sched-bottleneck
+  - name: opentunex-lock-bottleneck
+    source: skills/bottleneck/opentunex-lock-bottleneck
+  - name: opentunex-io-bottleneck
+    source: skills/bottleneck/opentunex-io-bottleneck
+  - name: opentunex-mem-bottleneck
+    source: skills/bottleneck/opentunex-mem-bottleneck
+  - name: opentunex-net-bottleneck
+    source: skills/bottleneck/opentunex-net-bottleneck
+  - name: opentunex-application-bottleneck
+    source: skills/bottleneck/opentunex-application-bottleneck
+  - name: opentunex-scenario-bottleneck
+    source: skills/bottleneck/opentunex-scenario-bottleneck
+  # 调优执行：域入口 + 各方向 + 落地 enablement
+  - name: opentunex-performance-tuning
+    source: skills/optimization/opentunex-performance-tuning
+  - name: opentunex-os-performance-optimization
+    source: skills/optimization/opentunex-os-performance-optimization
+  - name: opentunex-application-optimization
+    source: skills/optimization/opentunex-application-optimization
+  - name: opentunex-scenario-tuning
+    source: skills/optimization/opentunex-scenario-tuning
+  - name: opentunex-inference-core-binding-optimization
+    source: skills/optimization/opentunex-inference-core-binding-optimization
+  - name: opentunex-os-optimization-enablement
+    source: skills/auxiliary/opentunex-os-optimization-enablement
+  # 辅助与压测
+  - name: opentunex-remote-execution
+    source: skills/auxiliary/opentunex-remote-execution
+  - name: opentunex-benchmark-execution
+    source: skills/auxiliary/opentunex-benchmark-execution
+  - name: app-benchmark-deployment
+    source: skills/benchmark/app-benchmark-deployment
+  - name: opentunex-bench-result-fetch
+    source: skills/benchmark/opentunex-bench-result-fetch
