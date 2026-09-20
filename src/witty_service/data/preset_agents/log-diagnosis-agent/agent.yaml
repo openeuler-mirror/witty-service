@@ -41,21 +41,21 @@ prompt:
 
 skills:
   - name: agent-tools
-    source: skills/cool-agent-tools
+    source: openeuler-ops-agent/skills/cool-agent-tools
   - name: experience-skill
-    source: skills/experience-skill
+    source: openeuler-ops-agent/skills/experience-skill
   - name: log-analyzer
-    source: skills/system-log-analyzer
+    source: openeuler-ops-agent/skills/system-log-analyzer
   # 上游已知问题（G2）：skills/buddy-log-analyzer/SKILL.md 缺 YAML frontmatter，
   # opencode 技能列表会跳过它（目录仍会被拷进 workspace）；需上游补 name/description。
   - name: buddy-log-analyzer
-    source: skills/buddy-log-analyzer
+    source: openeuler-ops-agent/skills/buddy-log-analyzer
   # 上游已知问题（G2）：skills/docker-diag/SKILL.md 的 name 为 "Docker Pro Diagnostic"
   # （含空格，且与目录名不一致），runtime 列表名会与模板声明名不同。
   - name: docker-diag
-    source: skills/docker-diag
+    source: openeuler-ops-agent/skills/docker-diag
   - name: summarize
-    source: skills/summarize
+    source: openeuler-ops-agent/skills/summarize
 
 # 模板声明式 MCP（G1）：实例化时合并写入 <workspace>/opencode/opencode.json 的 mcp 段，
 # 并 best-effort 调用 runtime 的 /agent/mcp/enable 让当前 serve 进程立即加载。
