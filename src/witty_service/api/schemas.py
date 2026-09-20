@@ -19,8 +19,8 @@ UtcDatetime = Annotated[
 
 
 class CreateAgentRequest(BaseModel):
-    name: str = Field(min_length=1)
-    description: str = ""
+    name: str = Field(min_length=1, max_length=255)
+    description: str = Field(default="", max_length=2000)
     sandbox_type: str = Field(min_length=1)
     adapter_type: str = Field(min_length=1)
     idle_timeout_seconds: int = Field(gt=0)
@@ -291,7 +291,9 @@ class ConversationDetailResponse(BaseModel):
 
 
 class UpdateConversationRequest(BaseModel):
-    title: str | None = None
+    """会话元数据部分更新：省略字段=保持原值，传 null 同样视为不改。"""
+
+    title: str | None = Field(default=None, min_length=1, max_length=255)
     pinned: bool | None = None
 
 
