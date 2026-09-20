@@ -12,6 +12,7 @@ INSIGHT_UPSTREAM_ERROR = "INSIGHT_UPSTREAM_ERROR"
 INSIGHT_BAD_RESPONSE = "INSIGHT_BAD_RESPONSE"
 INSIGHT_SESSION_MAPPING_NOT_FOUND = "INSIGHT_SESSION_MAPPING_NOT_FOUND"
 SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
+AGENT_NOT_FOUND = "AGENT_NOT_FOUND"
 
 
 class DomainError(Exception):
@@ -190,6 +191,16 @@ def insight_session_mapping_not_found(
             "runtime_type": runtime_type,
             "runtime_session_id": runtime_session_id,
         },
+    )
+
+
+def agent_not_found(*, agent_id: str) -> DomainError:
+    """Agent 不存在，统一 404。"""
+    return DomainError(
+        code=AGENT_NOT_FOUND,
+        message="Agent was not found.",
+        status_code=404,
+        details={"agent_id": agent_id},
     )
 
 

@@ -7,12 +7,11 @@ import httpx
 import pytest
 
 from witty_service.application.session_manager import (
-    AGENT_NOT_FOUND,
     SESSION_AGENT_MISMATCH,
     SESSION_NOT_FOUND,
     SessionManager,
 )
-from witty_service.domain.errors import DomainError
+from witty_service.domain.errors import AGENT_NOT_FOUND, DomainError
 
 
 class RepositoryStub:

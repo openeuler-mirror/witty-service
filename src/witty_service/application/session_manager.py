@@ -12,13 +12,13 @@ from witty_service.domain.errors import (
 )
 from witty_service.domain.errors import (
     DomainError,
+    agent_not_found,
     session_not_found,
 )
 from witty_service.persistence.repositories import AgentRecord, SessionRecord
 
 logger = logging.getLogger(__name__)
 
-AGENT_NOT_FOUND = "AGENT_NOT_FOUND"
 SESSION_AGENT_MISMATCH = "SESSION_AGENT_MISMATCH"
 
 
@@ -61,11 +61,7 @@ class SessionManager:
 
     def create_session(self, agent_id: str) -> SessionRecord:
         if self._repository.get_agent(agent_id) is None:
-            raise DomainError(
-                code=AGENT_NOT_FOUND,
-                message="Agent was not found.",
-                details={"agent_id": agent_id},
-            )
+            raise agent_not_found(agent_id=agent_id)
         return self._repository.create_session(agent_id)
 
     def get_session(self, agent_id: str, session_id: str) -> SessionRecord:
@@ -325,8 +321,4 @@ class SessionManager:
     def _require_agent(self, agent_id: str) -> None:
         if self._repository.get_agent(agent_id) is not None:
             return
-        raise DomainError(
-            code=AGENT_NOT_FOUND,
-            message="Agent was not found.",
-            details={"agent_id": agent_id},
-        )
+        raise agent_not_found(agent_id=agent_id)

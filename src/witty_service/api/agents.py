@@ -37,7 +37,6 @@ from witty_service.api.schemas import (
 )
 from witty_service.api.services import ServiceContainer
 from witty_service.application.agent_manager import (
-    AGENT_NOT_FOUND,
     SKILL_INSTALL_RECORD_FAILED,
     SKILL_NOT_FOUND,
     SKILL_SYNC_FAILED,
@@ -52,7 +51,7 @@ from witty_service.application.artifact_paths import resolve_within_workspace
 from witty_service.application.mcp_runtime_config import McpRuntimeConfigResolver
 from witty_service.application.skill_manager import SkillManager
 from witty_service.domain.enums import AgentStatus
-from witty_service.domain.errors import DomainError
+from witty_service.domain.errors import DomainError, agent_not_found
 from witty_service.persistence.repositories import AgentRecord
 
 router = APIRouter(
@@ -377,11 +376,7 @@ def get_agent(
         )
 
     if agent is None:
-        raise DomainError(
-            code=AGENT_NOT_FOUND,
-            message="Agent was not found.",
-            details={"agent_id": agent_id},
-        )
+        raise agent_not_found(agent_id=agent_id)
     sessions = services.session_manager.list_sessions(agent_id)
     default_session_id = sessions[0].id if sessions else None
 
@@ -821,11 +816,7 @@ def list_installed_agent_skills(
     """查询指定 agent 已安装的技能记录。"""
     agent = services.repository.get_agent(agent_id)
     if agent is None:
-        raise DomainError(
-            code=AGENT_NOT_FOUND,
-            message="Agent was not found.",
-            details={"agent_id": agent_id},
-        )
+        raise agent_not_found(agent_id=agent_id)
 
     records = services.repository.list_installed_agent_skills(agent_id)
     return [_to_agent_skill_response(item) for item in records]
@@ -1004,11 +995,7 @@ async def enable_mcp_server(
     """为指定 Agent 启用 MCP Server，执行 _setup_mcp 将配置应用到 runtime。"""
     agent = services.repository.get_agent(agent_id)
     if agent is None:
-        raise DomainError(
-            code=AGENT_NOT_FOUND,
-            message="Agent was not found.",
-            details={"agent_id": agent_id},
-        )
+        raise agent_not_found(agent_id=agent_id)
 
     mcp_server = services.repository.get_mcp_server(server_id)
     if mcp_server is None:
@@ -1074,11 +1061,7 @@ async def disable_mcp_server(
     """为指定 Agent 卸载 MCP Server，执行 openclaw mcp unset 从 runtime 移除配置。"""
     agent = services.repository.get_agent(agent_id)
     if agent is None:
-        raise DomainError(
-            code=AGENT_NOT_FOUND,
-            message="Agent was not found.",
-            details={"agent_id": agent_id},
-        )
+        raise agent_not_found(agent_id=agent_id)
 
     mcp_server = services.repository.get_mcp_server(server_id)
     if mcp_server is None:

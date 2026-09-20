@@ -55,7 +55,7 @@ from witty_service.adapter.websocket_client_pool import (
 )
 from witty_service.adapter.websocket_protocol import OutboundMessage
 from witty_service.domain.enums import AgentStatus, can_transition
-from witty_service.domain.errors import DomainError
+from witty_service.domain.errors import DomainError, agent_not_found
 from witty_service.persistence.orm import MessageStatus
 from witty_service.persistence.repositories import AgentRecord, SessionRecord
 from witty_service.sandbox.base import (
@@ -68,7 +68,6 @@ from .runtime_config import DshConfig, OpenclawConfig, OpencodeConfig, RuntimeCo
 from .session_manager import SessionManager
 
 INVALID_AGENT_TRANSITION = "INVALID_AGENT_TRANSITION"
-AGENT_NOT_FOUND = "AGENT_NOT_FOUND"
 SANDBOX_STATE_NOT_FOUND = "SANDBOX_STATE_NOT_FOUND"
 AGENT_NOT_RUNNING = "AGENT_NOT_RUNNING"
 AGENT_CREATE_FAILED = "AGENT_CREATE_FAILED"
@@ -2214,11 +2213,7 @@ class AgentManager:
     def _get_agent(self, agent_id: str) -> AgentRecord:
         agent = self._repository.get_agent(agent_id)
         if agent is None:
-            raise DomainError(
-                code=AGENT_NOT_FOUND,
-                message="Agent was not found.",
-                details={"agent_id": agent_id},
-            )
+            raise agent_not_found(agent_id=agent_id)
         return agent
 
     def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoint:

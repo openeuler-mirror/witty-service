@@ -68,7 +68,10 @@ def test_get_agent_manager_for_agent_requires_existing_agent() -> None:
     with pytest.raises(DomainError) as exc_info:
         container.get_agent_manager_for_agent("missing")
 
-    assert exc_info.value.code == services_module.AGENT_NOT_FOUND
+    assert exc_info.value.code == "AGENT_NOT_FOUND"
+    # 语义上"资源不存在"就是 404；此前这里是默认的 400，与 session 缺失返回
+    # 404 不一致。
+    assert exc_info.value.status_code == 404
 
 
 def test_get_agent_manager_for_agent_uses_agent_sandbox(monkeypatch) -> None:
