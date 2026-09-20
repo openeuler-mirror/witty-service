@@ -1052,3 +1052,61 @@ async def test_install_agent_skill_surfaces_runtime_reason() -> None:
         json={"skill_name": "weather", "source_path": "/tmp/weather"},
         timeout=SKILL_INSTALL_TIMEOUT_SECONDS,
     )
+
+
+def test_send_message_rejects_unknown_session() -> None:
+    """会话不存在时抛 SESSION_NOT_FOUND（404），不再落到外键 500。
+
+    未校验会话存在性时 ``create_message`` 会撞上 messages.session_id 的外键约束，
+    接口返回裸 500，uvicorn 随后直接关闭连接，客户端复用该 keep-alive 连接的
+    下一个请求拿到 ECONNRESET。
+    """
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+
+        with pytest.raises(DomainError) as exc_info:
+            await manager.send_message(agent.id, "no-such-session", "hello")
+
+        assert exc_info.value.code == "SESSION_NOT_FOUND"
+        assert exc_info.value.status_code == 404
+        assert repository.messages == []
+
+    asyncio.run(run())
+
+
+def test_send_message_stream_rejects_unknown_session() -> None:
+    """流式接口同样在起流前校验会话归属，避免 SSE 内部抛 500。"""
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+
+        stream = manager.send_message_stream(agent.id, "no-such-session", "hello")
+        with pytest.raises(DomainError) as exc_info:
+            await anext(stream)
+
+        assert exc_info.value.code == "SESSION_NOT_FOUND"
+        assert repository.messages == []
+
+    asyncio.run(run())
+
+
+def test_send_message_rejects_session_of_another_agent() -> None:
+    """会话存在但不属于该 agent 时同样拒绝，避免跨 agent 写入消息。"""
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+        other = repository.upsert_session(
+            session_id="session-2", agent_id="agent-2", status="running"
+        )
+
+        with pytest.raises(DomainError) as exc_info:
+            await manager.send_message(agent.id, other.id, "hello")
+
+        assert exc_info.value.code == "SESSION_AGENT_MISMATCH"
+        assert repository.messages == []
+
+    asyncio.run(run())

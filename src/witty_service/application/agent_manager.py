@@ -1334,6 +1334,8 @@ class AgentManager:
             f"send_message called: agent_id={agent_id}, session_id={session_id}"
         )
         agent = self._get_agent(agent_id)
+        # 同 send_message：先校验会话归属，避免 create_message 触发外键 500。
+        self._session_manager.get_session(agent_id, session_id)
 
         if adaptor_client is None:
             adaptor_client = self._get_adaptor_http_client(agent_id)
@@ -1472,6 +1474,8 @@ class AgentManager:
         content: str,
     ) -> AsyncIterator[dict[str, Any]]:
         agent = self._get_agent(agent_id)
+        # 同 send_message：先校验会话归属，避免 create_message 触发外键 500。
+        self._session_manager.get_session(agent_id, session_id)
 
         if agent.status is AgentStatus.paused:
             agent = await self.resume_agent(agent_id)
