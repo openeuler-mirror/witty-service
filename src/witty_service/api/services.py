@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,6 +32,8 @@ from witty_service.persistence.repositories import SqliteRepository
 from witty_service.sandbox.base import SandboxBackend
 from witty_service.sandbox.factory import create_sandbox_backend
 from witty_service.storage.workspace_store import LocalWorkspaceStore, WorkspaceStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -172,8 +175,30 @@ class ServiceContainer:
         return self.insight_facade
 
     async def close(self) -> None:
+        self._stop_sandbox_backends()
         if self.insight_http_client is not None:
             await self.insight_http_client.close()
+
+    def _stop_sandbox_backends(self) -> None:
+        """关停时停止本进程拉起的沙箱（目前只有 local_process 需要）。
+
+        漏掉这一步会让沙箱子进程（以及它们拉起的 opencode serve）变成孤儿：每重启
+        一次就多占一份端口和内存，后续恢复会因为端口被占而失败。docker 容器的
+        stop_all 是刻意的空实现，原因见 DockerSandboxBackend.stop_all。
+
+        同步执行：``close()`` 已经是关停路径，且在事件循环里调用阻塞式的进程收敛
+        会造成「关停时事件循环忙等」。
+        """
+        if not get_settings().workspace.stop_sandboxes_on_shutdown:
+            logger.info("Skip stopping sandboxes on shutdown (disabled by settings)")
+            return
+        for sandbox_type, backend in list(self.sandbox_backends.items()):
+            try:
+                backend.stop_all()
+            except Exception:
+                logger.exception(
+                    "Failed to stop %s sandboxes on shutdown", sandbox_type
+                )
 
 
 def _ensure_dir_exists(database_url: str) -> None:

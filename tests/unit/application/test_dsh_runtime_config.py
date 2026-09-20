@@ -1,7 +1,7 @@
 """dsh runtime 适配器（witty_service 侧）单元测试。
 
 覆盖：AgentManager._RUNTIME_CONFIGS 注册、DshConfig 的 env / start payload /
-端口 metadata key 策略，锁定 dsh 经 witty_service POST /agents 创建的能力。
+无网关端口的处理策略，锁定 dsh 经 witty_service POST /agents 创建的能力。
 """
 
 from __future__ import annotations
@@ -16,7 +16,8 @@ def test_agent_manager_registers_dsh_runtime_config() -> None:
     config = AgentManager._RUNTIME_CONFIGS["dsh"]
     assert isinstance(config, DshConfig)
     assert config.adapter_type == "dsh"
-    assert config.port_metadata_key() == "dsh_port"
+    # dsh 的控制面不是 HTTP 端口：不参与端口分配，也不写端口 metadata。
+    assert config.uses_gateway_port() is False
 
 
 def test_dsh_config_build_env_selects_dsh_runtime() -> None:
