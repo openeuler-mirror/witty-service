@@ -257,11 +257,15 @@ class WorkspaceSettings:
         WITTY_WORKSPACE_ROOT: 工作空间根目录, 默认 ~/.witty
         WITTY_AGENT_SERVER_APP_DIR: Agent 服务器应用目录, 可选
         WITTY_RECOVERY_MAX_CONCURRENT: 启动时恢复 agent 的最大并发数, 默认 5
+        WITTY_STOP_SANDBOXES_ON_SHUTDOWN: 服务关停时是否停止 local_process 沙箱,
+            默认 true。关停不停会留下孤儿进程（占端口/内存），是恢复失败的放大器;
+            开发时用 --reload 频繁重启、希望沙箱存活可置为 false
     """
 
     root: str = "~/.witty"
     agent_server_app_dir: str | None = None
     recovery_max_concurrent: int = 5
+    stop_sandboxes_on_shutdown: bool = True
 
     @classmethod
     def from_env(cls) -> "WorkspaceSettings":
@@ -271,6 +275,10 @@ class WorkspaceSettings:
             recovery_max_concurrent=int(
                 os.getenv("WITTY_RECOVERY_MAX_CONCURRENT", "5")
             ),
+            stop_sandboxes_on_shutdown=os.getenv(
+                "WITTY_STOP_SANDBOXES_ON_SHUTDOWN", "true"
+            ).lower()
+            in ("1", "true", "yes"),
         )
 
     def root_path(self) -> Path:

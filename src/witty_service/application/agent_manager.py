@@ -61,6 +61,11 @@ from witty_service.persistence.repositories import AgentRecord, SessionRecord
 from witty_service.sandbox.base import (
     SandboxHandle,
 )
+
+# 沙箱进程存活判定与 local_process backend 共用同一套 /proc 解析：两者判的是同一
+# 件事（这个 pid 是不是还活着），分成两套实现迟早会漂移。
+from witty_service.sandbox.local_process import read_proc_stat
+from witty_service.sandbox.ports import find_free_port, port_is_bindable
 from witty_service.storage.runtime_backup import RuntimeBackupStore
 
 from .artifact_paths import normalize_artifact_event
@@ -430,36 +435,43 @@ class AgentManager:
         }
 
     def _get_runtime_gateway_port(self, agent_id: str, adapter_type: str) -> int | None:
-        """从 sandbox_state 提取 runtime 对应的网关端口."""
+        """从 sandbox_state 提取 runtime 上一次用的网关端口（无网关端口的 runtime 无此概念）."""
+        config = self._get_runtime_config(adapter_type)
+        if not config.uses_gateway_port():
+            return None
         sandbox_state = self._repository.get_sandbox_state(agent_id)
         if sandbox_state is None:
             return None
-        config = self._get_runtime_config(adapter_type)
         metadata = sandbox_state.sandbox_payload_json.get("metadata", {})
         port_val = metadata.get(config.port_metadata_key())
         return int(port_val) if isinstance(port_val, int) else None
 
-    def _find_free_port(self) -> int:
-        import socket
+    def _get_sandbox_port(self, agent_id: str) -> int | None:
+        """沙箱自身（witty-agent-server）上一次的监听端口，即 metadata["port"]."""
+        sandbox_state = self._repository.get_sandbox_state(agent_id)
+        if sandbox_state is None:
+            return None
+        metadata = sandbox_state.sandbox_payload_json.get("metadata") or {}
+        port_val = metadata.get("port")
+        return int(port_val) if isinstance(port_val, int) else None
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
-            return int(sock.getsockname()[1])
+    def _select_gateway_port(
+        self, *, adapter_type: str, saved_port: int | None
+    ) -> int | None:
+        """选定 runtime 的网关端口：优先复用上一次的取值，真被占用时才换新的。
+
+        没有网关端口的 runtime（dsh）返回 None——调用方据此跳过端口分配与落库，
+        不在 metadata 里留下一个没有任何进程监听的端口号。
+        """
+        if not self._get_runtime_config(adapter_type).uses_gateway_port():
+            return None
+        if saved_port is not None and not self._is_port_in_use(saved_port):
+            return saved_port
+        return find_free_port()
 
     def _is_port_in_use(self, port: int) -> bool:
-        import socket
-
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind(("127.0.0.1", port))
-                return False
-            except OSError:
-                return True
-
-    def _get_available_gateway_port(self, preferred_port: int | None) -> int:
-        if preferred_port is not None and not self._is_port_in_use(preferred_port):
-            return preferred_port
-        return self._find_free_port()
+        """端口是否真的被占用（内核残留 socket 不算，判定见 sandbox.ports）."""
+        return not port_is_bindable(port)
 
     def _get_agent_profile(self, agent_id: str) -> str:
         return agent_id
@@ -709,7 +721,9 @@ class AgentManager:
         )
 
         profile_name = agent_id
-        gateway_port = self._find_free_port()
+        gateway_port = self._select_gateway_port(
+            adapter_type=request.adapter_type, saved_port=None
+        )
         logger.info(
             f"{prefix}Using profile: {profile_name}, gateway_port: {gateway_port}"
         )
@@ -740,9 +754,10 @@ class AgentManager:
                 f"{prefix}Adapter endpoint ready: url=%s", adapter_endpoint.base_url
             )
             sandbox_payload = self._sandbox_handle_payload(sandbox_handle)
-            sandbox_payload["metadata"]["gateway_port"] = gateway_port
-            sandbox_payload["metadata"][runtime_config.port_metadata_key()] = (
-                gateway_port
+            self._store_gateway_port(
+                sandbox_payload,
+                adapter_type=request.adapter_type,
+                gateway_port=gateway_port,
             )
             self._repository.save_sandbox_state(
                 agent_id,
@@ -815,7 +830,7 @@ class AgentManager:
                 raise DomainError(
                     code=AGENT_CREATE_FAILED,
                     message="Failed to start agent.",
-                    details={"agent_id": agent_id, "error": str(exc)},
+                    details=self._describe_http_error(agent_id=agent_id, exc=exc),
                 ) from exc
             finally:
                 client.close()
@@ -838,7 +853,7 @@ class AgentManager:
                 raise DomainError(
                     code=AGENT_CREATE_FAILED,
                     message="Failed to create session on agent.",
-                    details={"agent_id": agent_id, "error": str(exc)},
+                    details=self._describe_http_error(agent_id=agent_id, exc=exc),
                 ) from exc
             finally:
                 client.close()
@@ -890,7 +905,7 @@ class AgentManager:
         adapter_type: str,
         model_id: str | None,
         agent_key: str,
-        gateway_port: int,
+        gateway_port: int | None,
     ) -> dict[str, Any]:
         """构建 /agent/start 请求的 payload（创建 + 恢复通用）。
 
@@ -905,25 +920,48 @@ class AgentManager:
             gateway_port=gateway_port,
         )
 
+    #: pause 时等待 runtime 优雅停止的超时。
+    PAUSE_RUNTIME_TIMEOUT_SECONDS: ClassVar[float] = 30.0
+
     def pause_agent(self, agent_id: str) -> AgentRecord:
         agent = self._get_agent(agent_id)
         self._ensure_transition(agent, AgentStatus.paused)
 
-        sandbox_state = self._get_sandbox_state(agent_id)
+        self._stop_runtime_best_effort(agent_id)
+
+        return self._repository.update_agent_status(agent_id, AgentStatus.paused)
+
+    def _stop_runtime_best_effort(self, agent_id: str) -> None:
+        """尽力停掉 runtime；失败只记日志，不阻断 pause。"""
+        prefix = _log_prefix(agent_id=agent_id)
+        sandbox_state = self._repository.get_sandbox_state(agent_id)
+        if sandbox_state is None or not sandbox_state.adapter_base_url:
+            logger.info(f"{prefix}No sandbox to stop, marking paused directly")
+            return
+
         client: httpx.Client | None = None
         try:
             # 调用 witty-agent-server /agent/stop 优雅停止运行时
-            client = httpx.Client(base_url=sandbox_state.adapter_base_url, timeout=30.0)
-            try:
-                client.post("/agent/stop", json={})
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code != 400:  # 可能已经停止
-                    raise
+            client = httpx.Client(
+                base_url=sandbox_state.adapter_base_url,
+                timeout=self.PAUSE_RUNTIME_TIMEOUT_SECONDS,
+            )
+            response = client.post("/agent/stop", json={})
+            if response.status_code >= 400:
+                logger.warning(
+                    f"{prefix}Runtime /agent/stop returned %s, marking paused anyway: body=%s",
+                    response.status_code,
+                    response.text[:500],
+                )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                f"{prefix}Runtime /agent/stop failed, marking paused anyway: error=%s",
+                exc,
+                exc_info=True,
+            )
         finally:
             if client is not None:
                 client.close()
-
-        return self._repository.update_agent_status(agent_id, AgentStatus.paused)
 
     async def _resume_from_deleted(self, agent_id: str) -> AgentRecord:
         """从 deleted 状态恢复（备份功能暂禁用）"""
@@ -939,46 +977,10 @@ class AgentManager:
         #     )
         # backup_store.restore(agent_id, agent.adapter_type)
 
-        # 2. 重新启动沙箱（不依赖备份）
-        runtime_config = self._get_runtime_config(agent.adapter_type)
-        gateway_port = self._find_free_port()
-        sandbox_handle = self._sandbox_backend.start(
-            agent_id=agent_id,
-            workspace_path=agent.workspace_path,
-            env=runtime_config.build_env(),
-            image_tag=runtime_config.adapter_type,
-            memory_limit=runtime_config.memory_limit,
-        )
-        adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
+        # 2. 重建沙箱（不依赖备份），端口沿用上一次的取值
+        gateway_port = await self._restart_sandbox(agent, health_attempts=30)
 
-        # 4. 保存沙箱状态
-        sandbox_payload = self._sandbox_handle_payload(sandbox_handle)
-        sandbox_payload["metadata"]["gateway_port"] = gateway_port
-        sandbox_payload["metadata"][runtime_config.port_metadata_key()] = gateway_port
-        self._repository.save_sandbox_state(
-            agent_id,
-            sandbox_payload_json=sandbox_payload,
-            adapter_base_url=adapter_endpoint.base_url,
-            adapter_ready=True,
-        )
-
-        # 5. 等待沙箱就绪
-        adaptor_client = self._get_adaptor_http_client(agent_id)
-        try:
-            for _ in range(30):  # 30 秒超时
-                if await adaptor_client.health_check():
-                    break
-                await asyncio.sleep(1)
-            else:
-                raise DomainError(
-                    code=SANDBOX_NOT_READY,
-                    message="Sandbox health check timeout.",
-                    details={"agent_id": agent_id},
-                )
-        finally:
-            await adaptor_client.close()
-
-        # 6. 调用 /agent/start（使用完整的恢复 payload）
+        # 3. 调用 /agent/start（使用完整的恢复 payload）
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
             try:
@@ -993,13 +995,181 @@ class AgentManager:
                 raise DomainError(
                     code=RUNTIME_START_FAILED,
                     message="Failed to start runtime.",
-                    details={"agent_id": agent_id, "error": str(exc)},
+                    details=self._describe_http_error(agent_id=agent_id, exc=exc),
                 ) from exc
         finally:
             await adaptor_client.close()
 
-        # 7. 更新状态
+        # 4. 更新状态
         return self._repository.update_agent_status(agent_id, AgentStatus.running)
+
+    #: resume 前探活沙箱的超时。pause 只停 runtime、沙箱通常还活着，探活成功即可复用。
+    SANDBOX_PROBE_TIMEOUT_SECONDS: ClassVar[float] = 5.0
+
+    async def _probe_sandbox_url(self, base_url: str) -> bool:
+        client = AdaptorHttpClient(
+            base_url=base_url, timeout=self.SANDBOX_PROBE_TIMEOUT_SECONDS
+        )
+        try:
+            return await client.health_check()
+        except Exception:
+            return False
+        finally:
+            await client.close()
+
+    def _store_gateway_port(
+        self,
+        sandbox_payload: dict[str, Any],
+        *,
+        adapter_type: str,
+        gateway_port: int | None,
+    ) -> None:
+        """把网关端口写进 sandbox metadata；没有网关端口的 runtime 不写任何端口键。"""
+        if gateway_port is None:
+            return
+        config = self._get_runtime_config(adapter_type)
+        metadata = sandbox_payload.setdefault("metadata", {})
+        metadata["gateway_port"] = gateway_port
+        metadata[config.port_metadata_key()] = gateway_port
+
+    def _save_gateway_port(
+        self, *, agent_id: str, gateway_port: int | None, adapter_type: str
+    ) -> None:
+        """把网关端口写回已有的 sandbox_state（不动 base_url）。"""
+        state = self._repository.get_sandbox_state(agent_id)
+        if state is None:
+            return
+        sandbox_payload = dict(state.sandbox_payload_json)
+        self._store_gateway_port(
+            sandbox_payload,
+            adapter_type=adapter_type,
+            gateway_port=gateway_port,
+        )
+        self._repository.save_sandbox_state(
+            agent_id,
+            sandbox_payload_json=sandbox_payload,
+            adapter_base_url=state.adapter_base_url,
+            adapter_ready=True,
+        )
+
+    async def _wait_for_sandbox_health(self, agent_id: str, *, attempts: int) -> bool:
+        """轮询沙箱 /ping，返回是否在 *attempts* 秒内就绪。"""
+        prefix = _log_prefix(agent_id=agent_id)
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        try:
+            for attempt in range(attempts):
+                if await adaptor_client.health_check():
+                    logger.info(f"{prefix}Sandbox ready after %s attempts", attempt + 1)
+                    return True
+                await asyncio.sleep(1)
+        finally:
+            await adaptor_client.close()
+        return False
+
+    async def _restart_sandbox(
+        self, agent: AgentRecord, *, health_attempts: int = 60
+    ) -> int | None:
+        """重建沙箱，两个端口都优先复用 sandbox_state 里保存的上一次取值。
+
+        端口一律「先收敛旧进程树、再判是否空闲」：旧树还活着时去探测，只会把自己的
+        残留误判成「端口被占」，于是恢复一次白换一个端口。沙箱自身端口的复用交给
+        backend 在收敛之后决定（``start(port=...)``）；网关端口在本方法内、``start()``
+        返回之后再决定，顺序与前者一致。
+
+        返回 runtime 该用的 gateway_port；没有网关端口的 runtime（dsh）返回 None。
+        """
+        agent_id = agent.id
+        prefix = _log_prefix(agent_id=agent_id)
+        state = self._repository.get_sandbox_state(agent_id)
+        runtime_config = self._get_runtime_config(agent.adapter_type)
+        saved_gateway_port = self._get_runtime_gateway_port(
+            agent_id, agent.adapter_type
+        )
+
+        # 传旧句柄：backend 会先按身份自证把旧进程树/容器收敛掉，再决定端口。
+        sandbox_handle = self._sandbox_backend.start(
+            agent_id=agent_id,
+            workspace_path=agent.workspace_path,
+            env=runtime_config.build_env(),
+            image_tag=runtime_config.adapter_type,
+            memory_limit=runtime_config.memory_limit,
+            previous_handle=state.handle if state is not None else None,
+            port=self._get_sandbox_port(agent_id),
+        )
+        adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
+        gateway_port = self._select_gateway_port(
+            adapter_type=agent.adapter_type, saved_port=saved_gateway_port
+        )
+        if saved_gateway_port is not None and gateway_port != saved_gateway_port:
+            logger.warning(
+                f"{prefix}Saved gateway port {saved_gateway_port} is in use, "
+                f"using new port {gateway_port}"
+            )
+        sandbox_payload = self._sandbox_handle_payload(sandbox_handle)
+        self._store_gateway_port(
+            sandbox_payload,
+            adapter_type=agent.adapter_type,
+            gateway_port=gateway_port,
+        )
+        self._repository.save_sandbox_state(
+            agent_id,
+            sandbox_payload_json=sandbox_payload,
+            adapter_base_url=adapter_endpoint.base_url,
+            adapter_ready=True,
+        )
+        logger.info(
+            f"{prefix}Sandbox restarted: base_url=%s gateway_port=%s",
+            adapter_endpoint.base_url,
+            gateway_port,
+        )
+        if not await self._wait_for_sandbox_health(agent_id, attempts=health_attempts):
+            raise DomainError(
+                code=SANDBOX_NOT_READY,
+                message="Sandbox health check timeout.",
+                details={"agent_id": agent_id},
+            )
+        return gateway_port
+
+    async def _ensure_sandbox_ready_for_resume(self, agent: AgentRecord) -> int | None:
+        """确保 agent 有一个健康的沙箱，返回 runtime 该用的 gateway_port。
+
+        1. 先用数据库里保存的 base_url 做一次**短超时**探活：pause 的语义是只停 runtime、
+           沙箱留下，所以正常情况下探活成功，直接复用即可秒级恢复。
+        2. 探活失败说明沙箱确实没了（服务重启 / 机器重启 / 进程组被杀），重建沙箱。
+        """
+        agent_id = agent.id
+        prefix = _log_prefix(agent_id=agent_id)
+
+        state = self._repository.get_sandbox_state(agent_id)
+        base_url = state.adapter_base_url if state is not None else None
+
+        if base_url and await self._probe_sandbox_url(base_url):
+            saved_port = self._get_runtime_gateway_port(agent_id, agent.adapter_type)
+            gateway_port = self._select_gateway_port(
+                adapter_type=agent.adapter_type, saved_port=saved_port
+            )
+            if saved_port is not None and gateway_port != saved_port:
+                logger.warning(
+                    f"{prefix}Saved gateway port {saved_port} is in use, using new port {gateway_port}"
+                )
+            if gateway_port != saved_port:
+                # saved_port 为 None 时同样是新分配的端口，必须一并落库，否则每次
+                # 恢复都会再换一个端口，且 metadata 里永远没有可用的端口键。
+                self._save_gateway_port(
+                    agent_id=agent_id,
+                    gateway_port=gateway_port,
+                    adapter_type=agent.adapter_type,
+                )
+            logger.info(f"{prefix}Reusing live sandbox: base_url=%s", base_url)
+            return gateway_port
+
+        if base_url:
+            logger.warning(
+                f"{prefix}Sandbox is not reachable, restarting it: base_url=%s",
+                base_url,
+            )
+
+        return await self._restart_sandbox(agent)
 
     async def _resume_from_paused(self, agent_id: str) -> AgentRecord:
         """从 paused 状态恢复"""
@@ -1007,50 +1177,13 @@ class AgentManager:
         prefix = _log_prefix(agent_id=agent_id)
         logger.info(f"{prefix}Resuming agent from paused state")
 
-        # 1. 验证沙箱是否仍在运行
-        sandbox_state = self._get_sandbox_state(agent_id)
+        # 1. 确保沙箱在跑：活着就复用，已经没了就重建（不再空等 60 秒后必然失败）
+        gateway_port = await self._ensure_sandbox_ready_for_resume(agent)
 
-        # 2. 等待沙箱就绪（增加超时时间到60秒）
-        adaptor_client = self._get_adaptor_http_client(agent_id)
-        try:
-            for attempt in range(60):
-                if await adaptor_client.health_check():
-                    logger.info(f"{prefix}Sandbox ready after {attempt + 1} attempts")
-                    break
-                await asyncio.sleep(1)
-            else:
-                raise DomainError(
-                    code=SANDBOX_NOT_READY,
-                    message="Sandbox health check timeout during resume from paused.",
-                    details={"agent_id": agent_id},
-                )
-        finally:
-            await adaptor_client.close()
-
-        # 3. 调用 /agent/start（增加超时时间到180秒，因为可能需要加载模型）
+        # 2. 调用 /agent/start（增加超时时间到180秒，因为可能需要加载模型）
         adaptor_client = self._get_adaptor_http_client(agent_id)
         remote_runtime_agent_id: str | None = None
         try:
-            saved_port = self._get_runtime_gateway_port(agent_id, agent.adapter_type)
-            gateway_port = saved_port or self._find_free_port()
-            if saved_port is None:
-                logger.warning(
-                    f"{prefix}Saved gateway port not found, using new port {gateway_port}"
-                )
-                runtime_config = self._get_runtime_config(agent.adapter_type)
-                sandbox_payload = sandbox_state.sandbox_payload_json
-                sandbox_payload.setdefault("metadata", {})["gateway_port"] = (
-                    gateway_port
-                )
-                sandbox_payload.setdefault("metadata", {})[
-                    runtime_config.port_metadata_key()
-                ] = gateway_port
-                self._repository.save_sandbox_state(
-                    agent_id,
-                    sandbox_payload_json=sandbox_payload,
-                    adapter_base_url=sandbox_state.adapter_base_url,
-                    adapter_ready=True,
-                )
             start_payload = self._build_agent_start_payload(
                 adapter_type=agent.adapter_type,
                 model_id=agent.model_id,
@@ -1084,7 +1217,7 @@ class AgentManager:
                 raise DomainError(
                     code=RUNTIME_START_FAILED,
                     message="Failed to start runtime during resume from paused.",
-                    details={"agent_id": agent_id, "error": str(exc)},
+                    details=self._describe_http_error(agent_id=agent_id, exc=exc),
                 ) from exc
             except httpx.ReadTimeout as exc:
                 logger.error(f"{prefix}/agent/start timeout: %s", exc)
@@ -1151,6 +1284,12 @@ class AgentManager:
             return await self._resume_from_paused(agent_id)
         elif agent.status == AgentStatus.deleted:
             return await self._resume_from_deleted(agent_id)
+        elif agent.status == AgentStatus.error:
+            # 状态机本来就允许 error → running（domain/enums.py），但原实现没有这个
+            # 分支：恢复失败一次就被永久锁死——既不再被启动恢复挑中（只挑 running），
+            # 前端「启动」按钮也必然失败。error 与 running 走同一条重建路径。
+            self._ensure_transition(agent, AgentStatus.running)
+            return await self._resume_from_running(agent_id)
         elif agent.status == AgentStatus.running:
             return await self._resume_from_running(agent_id)
         else:
@@ -1168,65 +1307,11 @@ class AgentManager:
             f"{prefix}Resuming agent from running state (service restart recovery)"
         )
 
-        # 获取隔离参数
+        # 获取隔离参数，并按「端口优先复用」重建沙箱
         profile_name = agent_id
-        saved_gateway_port = self._get_runtime_gateway_port(
-            agent_id, agent.adapter_type
-        )
+        gateway_port = await self._restart_sandbox(agent)
 
-        # 检查端口是否被占用，如果被占用则分配新端口
-        gateway_port = self._get_available_gateway_port(saved_gateway_port)
-        if saved_gateway_port is not None and gateway_port != saved_gateway_port:
-            logger.warning(
-                f"{prefix}Saved gateway port {saved_gateway_port} is in use, using new port {gateway_port}"
-            )
-
-        # 1. 重新启动沙箱（传递隔离参数）
-        runtime_config = self._get_runtime_config(agent.adapter_type)
-        sandbox_handle = self._sandbox_backend.start(
-            agent_id=agent_id,
-            workspace_path=agent.workspace_path,
-            env=runtime_config.build_env(),
-            image_tag=runtime_config.adapter_type,
-            memory_limit=runtime_config.memory_limit,
-        )
-        adapter_endpoint = self._sandbox_backend.endpoint(sandbox_handle)
-        logger.info(
-            f"{prefix}Sandbox restarted: base_url=%s profile=%s gateway_port=%s",
-            adapter_endpoint.base_url,
-            profile_name,
-            gateway_port,
-        )
-
-        # 2. 保存沙箱状态（包含 gateway_port）
-        sandbox_payload = self._sandbox_handle_payload(sandbox_handle)
-        sandbox_payload["metadata"]["gateway_port"] = gateway_port
-        sandbox_payload["metadata"][runtime_config.port_metadata_key()] = gateway_port
-        self._repository.save_sandbox_state(
-            agent_id,
-            sandbox_payload_json=sandbox_payload,
-            adapter_base_url=adapter_endpoint.base_url,
-            adapter_ready=True,
-        )
-
-        # 3. 等待沙箱就绪（增加超时时间到60秒）
-        adaptor_client = self._get_adaptor_http_client(agent_id)
-        try:
-            for attempt in range(60):
-                if await adaptor_client.health_check():
-                    logger.info(f"{prefix}Sandbox ready after {attempt + 1} attempts")
-                    break
-                await asyncio.sleep(1)
-            else:
-                raise DomainError(
-                    code=SANDBOX_NOT_READY,
-                    message="Sandbox health check timeout during recovery.",
-                    details={"agent_id": agent_id},
-                )
-        finally:
-            await adaptor_client.close()
-
-        # 4. 调用 /agent/start（增加超时时间到180秒，因为可能需要加载模型）
+        # 调用 /agent/start（增加超时时间到180秒，因为可能需要加载模型）
         adaptor_client = self._get_adaptor_http_client(agent_id)
         remote_runtime_agent_id: str | None = None
         try:
@@ -1263,7 +1348,7 @@ class AgentManager:
                 raise DomainError(
                     code=RUNTIME_START_FAILED,
                     message="Failed to start runtime during recovery.",
-                    details={"agent_id": agent_id, "error": str(exc)},
+                    details=self._describe_http_error(agent_id=agent_id, exc=exc),
                 ) from exc
             except httpx.ReadTimeout as exc:
                 logger.error(f"{prefix}/agent/start timeout: %s", exc)
@@ -2460,25 +2545,24 @@ class AgentManager:
         sandbox_state = self._get_sandbox_state(agent_id)
         return AdaptorHttpClient(base_url=sandbox_state.adapter_base_url)
 
-    async def _check_sandbox_health(self, agent_id: str) -> bool:
-        """检查沙箱是否健康存活"""
-        try:
-            adaptor_client = self._get_adaptor_http_client(agent_id)
-            try:
-                return await adaptor_client.health_check()
-            finally:
-                await adaptor_client.close()
-        except Exception:
-            return False
-
     def _check_and_update_agent_status_if_needed(self, agent_id: str) -> AgentRecord:
-        """检查沙箱健康状态，如果进程停止则更新 agent 状态为 error"""
+        """沙箱进程**确定**已经退出时，才把 agent 置为 error。
+
+        旧实现用一次 HTTP 探活失败就翻状态，而那次探活是 30s 超时的默认客户端，跑在
+        同步请求路径（`GET /agents` 等 sync handler + `run_until_complete`）上：一次网络
+        抖动、一次 GC 停顿、事件循环一时繁忙，都会把健康的 agent 打成 `error`。再叠加
+        「启动恢复只挑 running」，就是一次抖动 = 永久死亡。
+
+        现在只认**确定性证据**：local_process 沙箱记录在句柄里的 pid 在 ``/proc`` 中
+        已经不存在。判断不出来（老句柄没记 pid、环境没有 /proc）就保持现状——
+        宁可漏报一个死掉的沙箱（恢复流程会处理），也不误判一个活着的。
+        """
         agent = self._get_agent(agent_id)
 
-        if agent.status not in {AgentStatus.running, AgentStatus.paused}:
+        if agent.status is not AgentStatus.running:
             return agent
 
-        # 只对 local_process 类型进行检查
+        # 只对 local_process 类型进行检查（docker 容器存活由 daemon 保证）
         if agent.sandbox_type != "local_process":
             return agent
 
@@ -2495,21 +2579,30 @@ class AgentManager:
         if sandbox_state is None:
             return agent
 
-        import asyncio
+        if not self._sandbox_process_is_gone(sandbox_state):
+            return agent
 
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        self._logger.warning(
+            "Sandbox process is gone, marking agent as error: agent_id=%s pid=%s",
+            agent_id,
+            dict(sandbox_state.handle.metadata).get("pid"),
+        )
+        return self._repository.update_agent_status(agent_id, AgentStatus.error)
 
-        is_healthy = loop.run_until_complete(self._check_sandbox_health(agent_id))
-
-        if not is_healthy and agent.status == AgentStatus.running:
-            # 沙箱进程已停止，更新状态为 error
-            return self._repository.update_agent_status(agent_id, AgentStatus.error)
-
-        return agent
+    @staticmethod
+    def _sandbox_process_is_gone(sandbox_state: SandboxState) -> bool:
+        """local_process 沙箱进程是否**确定**已经退出（僵尸也算退出）。"""
+        if not Path("/proc").is_dir():
+            # 没有 /proc（非 Linux）：判断不了，绝不能因此翻状态
+            return False
+        pid = dict(sandbox_state.handle.metadata).get("pid")
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        stat = read_proc_stat(pid)
+        if stat is None:
+            # /proc 在，但这个 pid 不在 = 确定已退出
+            return True
+        return stat[0] == "Z"
 
     def _backup_runtime(
         self, agent_id: str, runtime_type: str = "openclaw"
@@ -2604,9 +2697,21 @@ class AgentManager:
         skill_name: str,
         exc: httpx.HTTPError,
     ) -> dict[str, Any]:
+        details = AgentManager._describe_http_error(agent_id=agent_id, exc=exc)
+        details["skill_name"] = skill_name
+        return details
+
+    @staticmethod
+    def _describe_http_error(
+        *,
+        agent_id: str,
+        exc: httpx.HTTPError,
+    ) -> dict[str, Any]:
+        # str(HTTPStatusError) 只有 "Server error '500 ...'"，真正的根因（code /
+        # message / details）全在响应体里。不解析响应体就等于把根因丢掉——服务重启时
+        # "部分 agent 恢复失败" 曾因此完全不可诊断。
         details: dict[str, Any] = {
             "agent_id": agent_id,
-            "skill_name": skill_name,
             "error": str(exc),
         }
         if not isinstance(exc, httpx.HTTPStatusError):

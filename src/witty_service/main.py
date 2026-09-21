@@ -141,10 +141,12 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
                 logger.info("Successfully recovered running agent: id=%s", agent_id)
                 return {"agent_id": agent_id, "success": True, "error": None}
             except Exception as exc:
+                # DomainError.__str__ 只有 message；根因（上游 code / 响应体）在 details 里。
                 logger.error(
-                    "Failed to recover running agent: id=%s error=%s",
+                    "Failed to recover running agent: id=%s error=%s details=%s",
                     agent_id,
                     exc,
+                    getattr(exc, "details", None),
                     exc_info=True,
                 )
                 try:

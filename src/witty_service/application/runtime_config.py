@@ -43,18 +43,29 @@ class RuntimeConfig(Protocol):
         model_id: str | None,
         model_info: dict[str, Any],
         agent_key: str,
-        gateway_port: int,
+        gateway_port: int | None,
     ) -> dict[str, Any]:
         """构建 /agent/start 接口的请求体.
 
         ``agent_key`` 是外层 agent 的身份标识（witty agent uuid），各 runtime
         自行映射：opencode/openclaw 将其作为 ``profile``，dsh 将其作为
         ``workspace_key``（workspace / dsh_home 隔离的事实来源）。
+
+        ``gateway_port`` 对 ``uses_gateway_port()`` 为 False 的 runtime 是 ``None``，
+        由该 runtime 自行忽略；其余 runtime 由调用方保证非 ``None``。
         """
         ...
 
     def port_metadata_key(self) -> str:
-        """返回 sandbox metadata 中存储端口号所用的 key."""
+        """返回 sandbox metadata 中存储端口号所用的 key（仅限有网关端口的 runtime）."""
+        ...
+
+    def uses_gateway_port(self) -> bool:
+        """该 runtime 是否真的监听一个 HTTP 网关/控制端口.
+
+        返回 False 的 runtime（例如 dsh，控制面不在 HTTP 端口上）不参与端口分配，
+        metadata 里也不留端口键，避免留下一个没有任何进程监听的端口号。
+        """
         ...
 
 
@@ -72,8 +83,10 @@ class OpencodeConfig(RuntimeConfig):
         model_id: str | None,
         model_info: dict[str, Any],
         agent_key: str,
-        gateway_port: int,
+        gateway_port: int | None,
     ) -> dict[str, Any]:
+        if gateway_port is None:  # 有网关端口的 runtime，调用方保证非 None
+            raise ValueError("opencode runtime requires a gateway port")
         return {
             "model_id": model_id,
             "model": model_info,
@@ -88,6 +101,9 @@ class OpencodeConfig(RuntimeConfig):
 
     def port_metadata_key(self) -> str:
         return "serve_port"
+
+    def uses_gateway_port(self) -> bool:
+        return True
 
 
 @dataclass
@@ -104,8 +120,10 @@ class OpenclawConfig(RuntimeConfig):
         model_id: str | None,
         model_info: dict[str, Any],
         agent_key: str,
-        gateway_port: int,
+        gateway_port: int | None,
     ) -> dict[str, Any]:
+        if gateway_port is None:  # 有网关端口的 runtime，调用方保证非 None
+            raise ValueError("openclaw runtime requires a gateway port")
         return {
             "model_id": model_id,
             "model": model_info,
@@ -117,6 +135,9 @@ class OpenclawConfig(RuntimeConfig):
 
     def port_metadata_key(self) -> str:
         return "gateway_port"
+
+    def uses_gateway_port(self) -> bool:
+        return True
 
 
 @dataclass
@@ -133,7 +154,7 @@ class DshConfig(RuntimeConfig):
         model_id: str | None,
         model_info: dict[str, Any],
         agent_key: str,
-        gateway_port: int,
+        gateway_port: int | None,
     ) -> dict[str, Any]:
         del gateway_port  # dsh 无 HTTP gateway/控制端口
         provider = model_info.get("provider")
@@ -165,5 +186,5 @@ class DshConfig(RuntimeConfig):
             },
         }
 
-    def port_metadata_key(self) -> str:
-        return "dsh_port"
+    def uses_gateway_port(self) -> bool:
+        return False

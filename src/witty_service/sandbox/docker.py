@@ -339,6 +339,14 @@ class DockerSandboxBackend(SandboxBackend):
         base_url = str(sandbox_handle.metadata["base_url"])
         return AdapterEndpoint(base_url=base_url, health_url=f"{base_url}/ping")
 
+    def stop_all(self, **kwargs: Any) -> None:
+        """docker 容器由 daemon 托管，不是 witty-service 的子进程。
+
+        服务重启不会让容器变成孤儿（daemon 继续看着它们），而且容器「活着」正是
+        docker 沙箱跨重启复用的前提——``start()`` 会按容器名认领它。
+        """
+        return None
+
     def cleanup(self, handle: SandboxHandle | str, **kwargs: Any) -> None:
 
         sandbox_handle = self._resolve_handle(handle)

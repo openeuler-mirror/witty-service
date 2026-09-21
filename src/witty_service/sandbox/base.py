@@ -75,6 +75,14 @@ class SandboxBackend(ABC):
     def cleanup(self, handle: SandboxHandle | str, **kwargs: Any) -> None:
         raise NotImplementedError
 
+    def stop_all(self, **kwargs: Any) -> None:
+        """停止本 backend 记录的所有沙箱（服务关停时调用）。
+
+        默认空实现：只有「沙箱进程随 witty-service 生命周期」的 backend 才需要
+        覆盖它——漏掉这些进程会直接转化为端口占用与内存泄漏。
+        """
+        return None
+
 
 def sandbox_not_supported(*, sandbox_type: str, operation: str) -> DomainError:
     return DomainError(
