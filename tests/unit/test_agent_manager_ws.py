@@ -16,6 +16,7 @@ from witty_service.adapter.websocket_client_pool import (
 )
 from witty_service.adapter.websocket_protocol import InboundEvent, OutboundMessage
 from witty_service.application.agent_manager import (
+    AGENT_DELETE_FAILED,
     SKILL_INSTALL_TIMEOUT_SECONDS,
     AgentCreateRequest,
     AgentManager,
@@ -23,7 +24,7 @@ from witty_service.application.agent_manager import (
 from witty_service.application.session_manager import SessionManager
 from witty_service.domain.enums import AgentStatus
 from witty_service.domain.errors import DomainError
-from witty_service.sandbox.base import SandboxHandle
+from witty_service.sandbox.base import SandboxHandle, sandbox_not_found
 
 
 class FakeSandboxState:
@@ -259,6 +260,11 @@ class FakeRepository:
         return updated
 
     def get_last_assistant_status(self, session_id: str) -> str | None:
+        return None
+
+    def find_last_assistant_message_for_session(self, session_id: str) -> Any | None:
+        # abort_session 会按 session_id 找最后一条 assistant 消息改 interrupted；
+        # 这里的双胞胎没有消息可改，返回 None 即真实语义（不动任何消息）。
         return None
 
     def get_first_user_message(self, session_id: str) -> str | None:
@@ -1052,3 +1058,309 @@ async def test_install_agent_skill_surfaces_runtime_reason() -> None:
         json={"skill_name": "weather", "source_path": "/tmp/weather"},
         timeout=SKILL_INSTALL_TIMEOUT_SECONDS,
     )
+
+
+def test_send_message_rejects_unknown_session() -> None:
+    """会话不存在时抛 SESSION_NOT_FOUND（404），不再落到外键 500。
+
+    未校验会话存在性时 ``create_message`` 会撞上 messages.session_id 的外键约束，
+    接口返回裸 500，uvicorn 随后直接关闭连接，客户端复用该 keep-alive 连接的
+    下一个请求拿到 ECONNRESET。
+    """
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+
+        with pytest.raises(DomainError) as exc_info:
+            await manager.send_message(agent.id, "no-such-session", "hello")
+
+        assert exc_info.value.code == "SESSION_NOT_FOUND"
+        assert exc_info.value.status_code == 404
+        assert repository.messages == []
+
+    asyncio.run(run())
+
+
+def test_send_message_stream_rejects_unknown_session() -> None:
+    """流式接口同样在起流前校验会话归属，避免 SSE 内部抛 500。"""
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+
+        stream = manager.send_message_stream(agent.id, "no-such-session", "hello")
+        with pytest.raises(DomainError) as exc_info:
+            await anext(stream)
+
+        assert exc_info.value.code == "SESSION_NOT_FOUND"
+        assert repository.messages == []
+
+    asyncio.run(run())
+
+
+def test_send_message_rejects_session_of_another_agent() -> None:
+    """会话存在但不属于该 agent 时同样拒绝，避免跨 agent 写入消息。"""
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+        other = repository.upsert_session(
+            session_id="session-2", agent_id="agent-2", status="running"
+        )
+
+        with pytest.raises(DomainError) as exc_info:
+            await manager.send_message(agent.id, other.id, "hello")
+
+        assert exc_info.value.code == "SESSION_AGENT_MISMATCH"
+        assert repository.messages == []
+
+    asyncio.run(run())
+
+
+def test_reconnect_stream_rejects_unknown_session() -> None:
+    """续订流同样要校验会话存在，否则会读到任意 session_id 的缓冲区。"""
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+
+        stream = manager.reconnect_stream(agent.id, "no-such-session")
+        with pytest.raises(DomainError) as exc_info:
+            await anext(stream)
+
+        assert exc_info.value.code == "SESSION_NOT_FOUND"
+        assert exc_info.value.status_code == 404
+
+    asyncio.run(run())
+
+
+def test_reconnect_stream_rejects_session_of_another_agent() -> None:
+    """跨 agent 读别人的流：_stream_registry 是进程级共享的，必须按归属拦下。"""
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+        other = repository.upsert_session(
+            session_id="session-2", agent_id="agent-2", status="running"
+        )
+
+        stream = manager.reconnect_stream(agent.id, other.id)
+        with pytest.raises(DomainError) as exc_info:
+            await anext(stream)
+
+        assert exc_info.value.code == "SESSION_AGENT_MISMATCH"
+
+    asyncio.run(run())
+
+
+def test_reconnect_stream_allows_own_session_without_active_stream() -> None:
+    """自己的会话但没有活动流：正常结束（不抛错），保证上面的校验没过杀。"""
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, session = _bootstrap_running_agent_and_session(repository)
+
+        stream = manager.reconnect_stream(agent.id, session.id)
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+
+    asyncio.run(run())
+
+
+def test_delete_agent_keeps_record_when_runtime_stop_fails() -> None:
+    """停机失败时不得先删库记录：不可逆操作必须放在最后，失败后可以重试。"""
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+
+        async def _boom_stop(agent_id: str) -> None:
+            raise RuntimeError("runtime stop failed")
+
+        manager._stop_runtime = _boom_stop  # type: ignore[method-assign]
+
+        with pytest.raises(DomainError) as exc_info:
+            await manager.delete_agent(agent.id)
+
+        assert exc_info.value.code == AGENT_DELETE_FAILED
+        assert exc_info.value.details["cleanup_errors"][0]["stage"] == "runtime_stop"
+        assert repository.get_agent(agent.id) is not None
+        assert repository.deleted_agents == []
+
+    asyncio.run(run())
+
+
+def test_delete_agent_tolerates_missing_sandbox_handle() -> None:
+    """沙箱句柄已不存在属于"清理过了"，仍允许删除成功。"""
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+
+        async def _noop_stop(agent_id: str) -> None:
+            return None
+
+        def _gone(agent_id: str) -> None:
+            # 真实来源：sandbox backend 的 _resolve_handle 在句柄丢失时抛
+            # sandbox_not_found()（code=SANDBOX_NOT_FOUND）；判定按码而非文案。
+            raise sandbox_not_found(
+                sandbox_type="local_process", sandbox_id="sandbox-1"
+            )
+
+        manager._stop_runtime = _noop_stop  # type: ignore[method-assign]
+        manager._cleanup_sandbox = _gone  # type: ignore[method-assign]
+
+        await manager.delete_agent(agent.id)
+
+        assert repository.get_agent(agent.id) is None
+
+    asyncio.run(run())
+
+
+def test_abort_session_rejects_session_of_another_agent() -> None:
+    """跨 agent 中止：在产生本地副作用之前就拦下。
+
+    归属校验缺失时，abort 会走到 find_last_assistant_message_for_session，把
+    **别的 agent 的**最后一条 assistant 消息改成 interrupted。
+    """
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+        other = repository.upsert_session(
+            session_id="session-2", agent_id="agent-2", status="running"
+        )
+        remote_abort = AsyncMock()
+        manager._session_manager.abort_session_remote = remote_abort  # type: ignore[method-assign]
+
+        with pytest.raises(DomainError) as exc_info:
+            await manager.abort_session(agent.id, other.id)
+
+        assert exc_info.value.code == "SESSION_AGENT_MISMATCH"
+        # 校验在最前面：远端 abort 与本地副作用都不该被触发
+        remote_abort.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_abort_session_reads_session_row_once() -> None:
+    """一次 abort 只读一次 session 行（B）：入口读过之后沿调用链复用。
+
+    一次请求里重复点查在本仓库要付全价（每个 repository 调用新建 ORM Session，
+    实测约 0.23ms），所以 _get_active_ws_client 必须接收已有的 session。
+    """
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, ws_client_pool = (
+            _make_ws_manager()
+        )
+        agent, session = _bootstrap_running_agent_and_session(repository)
+
+        reads: list[str] = []
+        original = manager._session_manager.get_session
+
+        def _counting_get_session(agent_id: str, session_id: str):
+            reads.append(session_id)
+            return original(agent_id, session_id)
+
+        manager._session_manager.get_session = _counting_get_session  # type: ignore[method-assign]
+        manager._session_manager.abort_session_remote = AsyncMock()  # type: ignore[method-assign]
+
+        ws_client = MockWebSocketClient(base_url="ws://adapter/test")
+        ws_client.is_connected = True
+        with patch.object(ws_client_pool, "get_client", return_value=ws_client):
+            await manager.abort_session(agent.id, session.id)
+
+        assert reads == [session.id]
+
+    asyncio.run(run())
+
+
+def test_adaptor_endpoint_reuses_loaded_records() -> None:
+    """传入已加载的 agent/session 时 _get_adaptor_endpoint 不再点查（B）。"""
+
+    manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+    agent, session = _bootstrap_running_agent_and_session(repository)
+
+    session_reads: list[str] = []
+    agent_reads: list[str] = []
+    original_session = manager._session_manager.get_session
+    original_agent = manager._get_agent
+
+    def _counting_get_session(agent_id: str, session_id: str):
+        session_reads.append(session_id)
+        return original_session(agent_id, session_id)
+
+    def _counting_get_agent(agent_id: str):
+        agent_reads.append(agent_id)
+        return original_agent(agent_id)
+
+    manager._session_manager.get_session = _counting_get_session  # type: ignore[method-assign]
+    manager._get_agent = _counting_get_agent  # type: ignore[method-assign]
+
+    # 复用：不该产生任何点查
+    endpoint = manager._get_adaptor_endpoint(
+        agent.id, session.id, agent=agent, session=session
+    )
+    assert endpoint.base_url == "ws://adapter.local/agents/runtime-agent-1"
+    assert session_reads == []
+    assert agent_reads == []
+
+    # 不传实体时退化为原行为（各读一次），保证既有调用方不受影响
+    manager._get_adaptor_endpoint(agent.id, session.id)
+    assert session_reads == [session.id]
+    assert agent_reads == [agent.id]
+
+
+def test_send_message_reads_agent_and_session_once() -> None:
+    """send_message 一次请求只读 1 次 agent + 1 次 session（B）。
+
+    改造前是 7 条 agent/session 点查（_get_agent x1 + get_session x3，后者每次 2 条
+    SQL）；入口读一次、沿调用链复用之后是 2 条。本仓库每个 repository 调用都要新建
+    ORM Session（实测约 0.23ms/次），所以这个数字回涨就是性能回归。
+    """
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, ws_client_pool = (
+            _make_ws_manager()
+        )
+        agent, session = _bootstrap_running_agent_and_session(repository)
+
+        session_reads: list[str] = []
+        agent_reads: list[str] = []
+        original_session = manager._session_manager.get_session
+        original_agent = manager._get_agent
+
+        def _counting_get_session(agent_id: str, session_id: str):
+            session_reads.append(session_id)
+            return original_session(agent_id, session_id)
+
+        def _counting_get_agent(agent_id: str):
+            agent_reads.append(agent_id)
+            return original_agent(agent_id)
+
+        manager._session_manager.get_session = _counting_get_session  # type: ignore[method-assign]
+        manager._get_agent = _counting_get_agent  # type: ignore[method-assign]
+
+        mock_ws_client = MockWebSocketClient(base_url="ws://adapter/test")
+        mock_ws_client.set_events(
+            [
+                InboundEvent(
+                    type="message.completed",
+                    session_id=session.id,
+                    runtime_type="openclaw",
+                    event_id="evt-1",
+                    ts_ms=1000,
+                    payload={},
+                )
+            ]
+        )
+
+        with patch.object(ws_client_pool, "get_client", return_value=mock_ws_client):
+            await manager.send_message(agent.id, session.id, "hello from user")
+
+        assert session_reads == [session.id]
+        assert agent_reads == [agent.id]
+
+    asyncio.run(run())

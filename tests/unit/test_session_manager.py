@@ -7,12 +7,10 @@ import httpx
 import pytest
 
 from witty_service.application.session_manager import (
-    AGENT_NOT_FOUND,
     SESSION_AGENT_MISMATCH,
-    SESSION_NOT_FOUND,
     SessionManager,
 )
-from witty_service.domain.errors import DomainError
+from witty_service.domain.errors import AGENT_NOT_FOUND, SESSION_NOT_FOUND, DomainError
 
 
 class RepositoryStub:
@@ -22,6 +20,7 @@ class RepositoryStub:
         self.deleted = []
         self.upserts = []
         self.identity_updates = []
+        self.metadata_updates = []
 
     def create_session(self, agent_id: str):
         session = SimpleNamespace(id="session-new", agent_id=agent_id)
@@ -65,6 +64,20 @@ class RepositoryStub:
         )
         updated = SimpleNamespace(**payload)
         self.sessions[updated.id] = updated
+        return updated
+
+    def update_session_metadata(self, session_id: str, *, title=None, pinned=None):
+        self.metadata_updates.append(
+            {"session_id": session_id, "title": title, "pinned": pinned}
+        )
+        session = self.sessions[session_id]
+        payload = dict(session.__dict__)
+        if title is not None:
+            payload["title"] = title
+        if pinned is not None:
+            payload["pinned"] = pinned
+        updated = SimpleNamespace(**payload)
+        self.sessions[session_id] = updated
         return updated
 
     def get_agent(self, agent_id: str):
@@ -334,3 +347,106 @@ async def test_delete_session_remote_deletes_locally_when_runtime_resolution_fai
 
     assert created.id in repo.deleted
     assert repo.get_session(created.id) is None
+
+
+def test_update_session_metadata_applies_only_provided_fields() -> None:
+    repo = RepositoryStub()
+    repo.upsert_session(session_id="session-1", agent_id="agent-1", status="idle")
+    manager = SessionManager(repo)
+
+    updated = manager.update_session_metadata("agent-1", "session-1", title="新标题")
+
+    assert updated.title == "新标题"
+    assert repo.metadata_updates == [
+        {"session_id": "session-1", "title": "新标题", "pinned": None}
+    ]
+
+
+def test_update_session_metadata_keeps_values_when_fields_omitted() -> None:
+    """省略字段（含显式 None）不改任何值，与 PATCH /conversations 契约一致。"""
+    repo = RepositoryStub()
+    repo.upsert_session(session_id="session-1", agent_id="agent-1", status="idle")
+    repo.sessions["session-1"].title = "原标题"
+    manager = SessionManager(repo)
+
+    updated = manager.update_session_metadata("agent-1", "session-1")
+
+    assert updated.title == "原标题"
+    assert repo.metadata_updates == [
+        {"session_id": "session-1", "title": None, "pinned": None}
+    ]
+
+
+def test_update_session_metadata_rejects_session_of_another_agent() -> None:
+    repo = RepositoryStub()
+    repo.agents["agent-2"] = SimpleNamespace(id="agent-2")
+    repo.sessions["session-1"] = SimpleNamespace(id="session-1", agent_id="agent-2")
+    manager = SessionManager(repo)
+
+    with pytest.raises(DomainError) as exc_info:
+        manager.update_session_metadata("agent-1", "session-1", title="x")
+
+    assert exc_info.value.code == SESSION_AGENT_MISMATCH
+    assert repo.metadata_updates == []
+
+
+def test_update_session_metadata_rejects_overlong_title() -> None:
+    """长度校验收口在服务层：绕过 HTTP 层也不能写超长标题。"""
+    repo = RepositoryStub()
+    repo.upsert_session(session_id="session-1", agent_id="agent-1", status="idle")
+    manager = SessionManager(repo)
+
+    with pytest.raises(DomainError) as exc_info:
+        manager.update_session_metadata("agent-1", "session-1", title="x" * 256)
+
+    assert exc_info.value.code == "INVALID_SESSION_METADATA"
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.details == {
+        "field": "title",
+        "reason": "too long",
+        "max_length": 255,
+    }
+    assert repo.metadata_updates == []
+
+
+def test_update_session_metadata_rejects_empty_title() -> None:
+    repo = RepositoryStub()
+    repo.upsert_session(session_id="session-1", agent_id="agent-1", status="idle")
+    manager = SessionManager(repo)
+
+    with pytest.raises(DomainError) as exc_info:
+        manager.update_session_metadata("agent-1", "session-1", title="")
+
+    assert exc_info.value.details["reason"] == "must not be empty"
+    assert repo.metadata_updates == []
+
+
+def test_get_session_does_not_reread_agent_row() -> None:
+    """归属校验只读 session 一行（A）。
+
+    sessions.agent_id 是 NOT NULL 外键（ondelete=CASCADE），会话行存在就意味着
+    agent 行存在；原先顺带查的那次 agent 只是多一跳点查，而本仓库每个 repository
+    调用都要新建 ORM Session（实测约 0.23ms/次），故只保留没有前置 agent 读取的
+    入口里的 _require_agent。
+    """
+    repo = RepositoryStub()
+    repo.sessions["session-1"] = SimpleNamespace(id="session-1", agent_id="agent-1")
+
+    def _unexpected_agent_read(agent_id: str) -> object:
+        raise AssertionError(f"get_session 不应再读 agent 行: {agent_id}")
+
+    repo.get_agent = _unexpected_agent_read  # type: ignore[method-assign]
+
+    fetched = SessionManager(repo).get_session("agent-1", "session-1")
+
+    assert fetched.id == "session-1"
+
+
+def test_list_sessions_still_requires_existing_agent() -> None:
+    """没有前置 agent 读取的入口保留存在性校验：未知 agent 不得静默返回空列表。"""
+    manager = SessionManager(RepositoryStub())
+
+    with pytest.raises(DomainError) as exc_info:
+        manager.list_sessions("missing")
+
+    assert exc_info.value.code == AGENT_NOT_FOUND

@@ -43,17 +43,17 @@ prompt:
 
 skills:
   - name: agent-tools
-    source: skills/cool-agent-tools
+    source: openeuler-ops-agent/skills/cool-agent-tools
   - name: ssh-remote-skill
-    source: skills/ssh-remote-sanitized
+    source: openeuler-ops-agent/skills/ssh-remote-sanitized
   - name: experience-skill
-    source: skills/experience-skill
+    source: openeuler-ops-agent/skills/experience-skill
   - name: ops-maintenance
-    source: skills/ops-maintenance
+    source: openeuler-ops-agent/skills/ops-maintenance
   - name: self-improvement
-    source: skills/self-improving-agent
+    source: openeuler-ops-agent/skills/self-improving-agent
   - name: summarize
-    source: skills/summarize
+    source: openeuler-ops-agent/skills/summarize
 
 # 模板声明式 MCP（G1）：实例化时合并写入 <workspace>/opencode/opencode.json 的 mcp 段，
 # 并 best-effort 调用 runtime 的 /agent/mcp/enable 让当前 serve 进程立即加载。

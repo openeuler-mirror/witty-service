@@ -7,7 +7,7 @@ from typing import Any
 
 from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.adapter.websocket_client_pool import WebSocketClientPool
-from witty_service.application.agent_manager import AGENT_NOT_FOUND, AgentManager
+from witty_service.application.agent_manager import AgentManager
 from witty_service.application.scheduled_task_service import ScheduledTaskService
 from witty_service.application.session_manager import SessionManager
 from witty_service.channels.credential_store import ChannelCredentialStore
@@ -18,7 +18,7 @@ from witty_service.channels.provisioning.manual import ManualCredentialBinder
 from witty_service.channels.router import SessionRouter
 from witty_service.channels.turn_gateway import AgentTurnGateway
 from witty_service.config import get_settings
-from witty_service.domain.errors import DomainError, insight_disabled
+from witty_service.domain.errors import agent_not_found, insight_disabled
 from witty_service.persistence.channel_repository import (
     ChannelInstanceRecord,
     ChannelRepository,
@@ -155,11 +155,7 @@ class ServiceContainer:
     def get_agent_manager_for_agent(self, agent_id: str) -> AgentManager:
         agent = self.repository.get_agent(agent_id)
         if agent is None:
-            raise DomainError(
-                code=AGENT_NOT_FOUND,
-                message="Agent was not found.",
-                details={"agent_id": agent_id},
-            )
+            raise agent_not_found(agent_id=agent_id)
         return self.get_agent_manager_for_sandbox(agent.sandbox_type)
 
     def get_insight_http_client(self) -> AdaptorHttpClient:

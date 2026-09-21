@@ -5,6 +5,12 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, model_validator
 
+from witty_service.domain.field_limits import (
+    AGENT_DESCRIPTION_MAX_LENGTH,
+    AGENT_NAME_MAX_LENGTH,
+    SESSION_TITLE_MAX_LENGTH,
+)
+
 
 def _format_utc_datetime(dt: datetime) -> str:
     if dt.tzinfo is None:
@@ -19,8 +25,10 @@ UtcDatetime = Annotated[
 
 
 class CreateAgentRequest(BaseModel):
-    name: str = Field(min_length=1)
-    description: str = ""
+    # 上限来自 domain.agent_fields（与 DB 列宽同源）；服务层还有一道同样的校验，
+    # 因为模板实例化等入口不走这个 schema。
+    name: str = Field(min_length=1, max_length=AGENT_NAME_MAX_LENGTH)
+    description: str = Field(default="", max_length=AGENT_DESCRIPTION_MAX_LENGTH)
     sandbox_type: str = Field(min_length=1)
     adapter_type: str = Field(min_length=1)
     idle_timeout_seconds: int = Field(gt=0)
@@ -291,8 +299,26 @@ class ConversationDetailResponse(BaseModel):
 
 
 class UpdateConversationRequest(BaseModel):
-    title: str | None = None
-    pinned: bool | None = None
+    """会话元数据部分更新（PATCH /agents/{agent_id}/conversations/{session_id}）。
+
+    契约：
+
+    - 省略字段 = 保持原值；
+    - 显式传 null = 保持原值（与省略等价，本接口不支持清空标题）；
+    - title 传空串 = 非法请求（422），标题非空由自动生成逻辑保证；
+    - pinned 只接受布尔值。
+    """
+
+    title: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=SESSION_TITLE_MAX_LENGTH,
+        description="新标题；省略或传 null 都表示不修改，空串非法",
+    )
+    pinned: bool | None = Field(
+        default=None,
+        description="置顶状态；省略或传 null 都表示不修改",
+    )
 
 
 class SkillSourceType:

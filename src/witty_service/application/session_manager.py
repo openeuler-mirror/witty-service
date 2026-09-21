@@ -7,18 +7,12 @@ from typing import Protocol
 import httpx
 
 from witty_service.adapter.http_client import AdaptorHttpClient
-from witty_service.domain.errors import (
-    SESSION_NOT_FOUND as SESSION_NOT_FOUND,
-)
-from witty_service.domain.errors import (
-    DomainError,
-    session_not_found,
-)
+from witty_service.domain.errors import DomainError, agent_not_found, session_not_found
+from witty_service.domain.field_limits import validate_session_title
 from witty_service.persistence.repositories import AgentRecord, SessionRecord
 
 logger = logging.getLogger(__name__)
 
-AGENT_NOT_FOUND = "AGENT_NOT_FOUND"
 SESSION_AGENT_MISMATCH = "SESSION_AGENT_MISMATCH"
 
 
@@ -52,6 +46,14 @@ class SessionRepository(Protocol):
         runtime_session_key: str,
     ) -> SessionRecord: ...
 
+    def update_session_metadata(
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        pinned: bool | None = None,
+    ) -> SessionRecord: ...
+
     def get_agent(self, agent_id: str) -> AgentRecord | None: ...
 
 
@@ -61,15 +63,18 @@ class SessionManager:
 
     def create_session(self, agent_id: str) -> SessionRecord:
         if self._repository.get_agent(agent_id) is None:
-            raise DomainError(
-                code=AGENT_NOT_FOUND,
-                message="Agent was not found.",
-                details={"agent_id": agent_id},
-            )
+            raise agent_not_found(agent_id=agent_id)
         return self._repository.create_session(agent_id)
 
     def get_session(self, agent_id: str, session_id: str) -> SessionRecord:
-        self._require_agent(agent_id)
+        """按归属读取会话：不存在 → SESSION_NOT_FOUND，不属于该 agent → SESSION_AGENT_MISMATCH。
+
+        这里刻意**不**顺带查一次 agent：sessions.agent_id 是 NOT NULL 外键
+        （ondelete=CASCADE），会话行存在就意味着 agent 行存在；而请求入口基本都已经
+        取过 agent（AgentManager._get_agent）。本仓库每个 repository 调用都要新建
+        ORM Session，多一跳就多约 0.23ms（实测），所以只在没有前置 agent 读取的入口
+        （list_sessions / create_session）保留 _require_agent。
+        """
         session = self._repository.get_session(session_id)
         if session is None:
             raise session_not_found(session_id=session_id, agent_id=agent_id)
@@ -88,6 +93,28 @@ class SessionManager:
     def delete_session(self, agent_id: str, session_id: str) -> None:
         self.get_session(agent_id, session_id)
         self._repository.delete_session(session_id)
+
+    def update_session_metadata(
+        self,
+        agent_id: str,
+        session_id: str,
+        *,
+        title: str | None = None,
+        pinned: bool | None = None,
+    ) -> SessionRecord:
+        """更新会话元数据：省略字段=不改，传 None 同样视为不改。
+
+        契约与 PATCH /agents/{agent_id}/conversations/{session_id} 一致。归属校验
+        与标题长度校验都收口在这里，避免绕过 HTTP 层写超长标题或改别人的会话。
+        """
+        self.get_session(agent_id, session_id)
+        if title is not None:
+            validate_session_title(title)
+        return self._repository.update_session_metadata(
+            session_id,
+            title=title,
+            pinned=pinned,
+        )
 
     def upsert_session(
         self,
@@ -259,11 +286,13 @@ class SessionManager:
         adaptor_client: AdaptorHttpClient,
         runtime_agent_id: str | None = None,
     ) -> None:
-        """透传到 witty-agent-server 中断 session"""
-        local_session = self._repository.get_session(session_id)
-        resolved_runtime_agent_id = (
-            local_session.remote_runtime_agent_id if local_session is not None else None
-        )
+        """透传到 witty-agent-server 中断 session。
+
+        与 delete_session_remote 一致：先按 (agent_id, session_id) 校验归属，
+        否则可以用 A 的 agent_id 去中断 B 的会话。
+        """
+        local_session = self.get_session(agent_id, session_id)
+        resolved_runtime_agent_id = local_session.remote_runtime_agent_id
         if resolved_runtime_agent_id is None:
             resolved_runtime_agent_id = await self.resolve_runtime_agent_id(
                 adaptor_client=adaptor_client,
@@ -325,8 +354,4 @@ class SessionManager:
     def _require_agent(self, agent_id: str) -> None:
         if self._repository.get_agent(agent_id) is not None:
             return
-        raise DomainError(
-            code=AGENT_NOT_FOUND,
-            message="Agent was not found.",
-            details={"agent_id": agent_id},
-        )
+        raise agent_not_found(agent_id=agent_id)
