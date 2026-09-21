@@ -56,9 +56,14 @@ from witty_service.adapter.websocket_client_pool import (
 from witty_service.adapter.websocket_protocol import OutboundMessage
 from witty_service.domain.enums import AgentStatus, can_transition
 from witty_service.domain.errors import DomainError, agent_not_found
+from witty_service.domain.field_limits import (
+    validate_agent_description,
+    validate_agent_name,
+)
 from witty_service.persistence.orm import MessageStatus
 from witty_service.persistence.repositories import AgentRecord, SessionRecord
 from witty_service.sandbox.base import (
+    SANDBOX_NOT_FOUND,
     SandboxHandle,
 )
 from witty_service.storage.runtime_backup import RuntimeBackupStore
@@ -699,6 +704,9 @@ class AgentManager:
         return payload
 
     def create_agent(self, request: AgentCreateRequest) -> AgentCreateResult:
+        validate_agent_name(request.name)
+        validate_agent_description(request.description)
+
         agent_id = str(uuid4())
         prefix = _log_prefix(agent_id=agent_id)
         logger.info(
@@ -1333,8 +1341,9 @@ class AgentManager:
             f"send_message called: agent_id={agent_id}, session_id={session_id}"
         )
         agent = self._get_agent(agent_id)
-        # 同 send_message：先校验会话归属，避免 create_message 触发外键 500。
-        self._session_manager.get_session(agent_id, session_id)
+        # 归属校验只做一次，读到的 session 沿调用链传下去
+        # （_prepare_ws_message_client / _auto_generate_session_title 都要用）。
+        session = self._session_manager.get_session(agent_id, session_id)
 
         if adaptor_client is None:
             adaptor_client = self._get_adaptor_http_client(agent_id)
@@ -1363,11 +1372,11 @@ class AgentManager:
             role="user",
             content=content,
         )
-        self._auto_generate_session_title(agent_id, session_id)
+        self._auto_generate_session_title(agent_id, session_id, session=session)
 
         ws_content = self._maybe_prepend_interruption_prefix(session_id, content)
         ws_client = await self._prepare_ws_message_client(
-            agent_id, session_id, ws_content
+            agent_id, session_id, ws_content, agent=agent, session=session
         )
 
         self._logger.info(
@@ -1473,8 +1482,8 @@ class AgentManager:
         content: str,
     ) -> AsyncIterator[dict[str, Any]]:
         agent = self._get_agent(agent_id)
-        # 同 send_message：先校验会话归属，避免 create_message 触发外键 500。
-        self._session_manager.get_session(agent_id, session_id)
+        # 同 send_message：只查一次，读完沿调用链传下去。
+        session = self._session_manager.get_session(agent_id, session_id)
 
         if agent.status is AgentStatus.paused:
             agent = await self.resume_agent(agent_id)
@@ -1491,11 +1500,11 @@ class AgentManager:
             role="user",
             content=content,
         )
-        self._auto_generate_session_title(agent_id, session_id)
+        self._auto_generate_session_title(agent_id, session_id, session=session)
 
         ws_content = self._maybe_prepend_interruption_prefix(session_id, content)
         ws_client = await self._prepare_ws_message_client(
-            agent_id, session_id, ws_content
+            agent_id, session_id, ws_content, agent=agent, session=session
         )
 
         # Start a new stream generation
@@ -1573,7 +1582,10 @@ class AgentManager:
                     session_record = self._session_manager.get_session(
                         agent_id, session_id
                     )
-                    if session_record is not None and session_record.status == "running":
+                    if (
+                        session_record is not None
+                        and session_record.status == "running"
+                    ):
                         self._session_manager.upsert_session(
                             session_id=session_id,
                             agent_id=agent_id,
@@ -1820,6 +1832,9 @@ class AgentManager:
         session_id: str,
     ) -> AsyncIterator[dict[str, Any]]:
         agent = self._get_agent(agent_id)
+        # _stream_registry 是进程级共享的，按 session_id 取缓冲/订阅：
+        # 不校验归属就等于允许用 A 的 agent_id 读 B 会话的增量内容。
+        self._session_manager.get_session(agent_id, session_id)
         sandbox_type = agent.sandbox_type
 
         if not _stream_registry.is_active(session_id):
@@ -1926,9 +1941,18 @@ class AgentManager:
             request_id,
         )
 
-    def _get_active_ws_client(self, agent_id: str, session_id: str) -> WebSocketClient:
+    def _get_active_ws_client(
+        self,
+        agent_id: str,
+        session_id: str,
+        *,
+        agent: AgentRecord | None = None,
+        session: SessionRecord | None = None,
+    ) -> WebSocketClient:
         """获取当前 session 的活动 WS 客户端。"""
-        endpoint = self._get_adaptor_endpoint(agent_id, session_id)
+        endpoint = self._get_adaptor_endpoint(
+            agent_id, session_id, agent=agent, session=session
+        )
         ws_client = self._ws_client_pool.get_client(
             agent_id=agent_id,
             endpoint=endpoint,
@@ -2048,6 +2072,12 @@ class AgentManager:
         session_id: str,
         runtime_agent_id: str | None = None,
     ) -> dict[str, object]:
+        # 与 send_message 一致：先校验会话归属，再做本地副作用。下面的
+        # find_last_assistant_message_for_session 与关 WS 都按 session_id 操作，
+        # 不校验就等于允许用 A 的 agent_id 把 B 会话的消息改成 interrupted。
+        # 读到的 session 传给 _get_active_ws_client，避免再查一次。
+        session = self._session_manager.get_session(agent_id, session_id)
+
         adaptor_client = self._get_adaptor_http_client(agent_id)
         remote_error: Exception | None = None
         try:
@@ -2087,7 +2117,9 @@ class AgentManager:
         # manager.send_message_stream，若不主动断开，它会继续等待 WS 事件，
         # 永远感知不到用户已经 abort。关闭后流会立即结束并在调度服务中落终态。
         try:
-            ws_client = self._get_active_ws_client(agent_id, session_id)
+            ws_client = self._get_active_ws_client(
+                agent_id, session_id, session=session
+            )
         except DomainError:
             ws_client = None
         if ws_client is not None:
@@ -2123,62 +2155,65 @@ class AgentManager:
             try:
                 await self._stop_runtime(agent_id)
             except Exception as exc:
-                cleanup_errors.append(
-                    {"stage": "runtime_stop", "error": self._error_message(exc)}
-                )
+                cleanup_errors.append(self._cleanup_error("runtime_stop", exc))
 
         # 3. 清理沙箱
         if sandbox_state is not None:
             try:
                 self._cleanup_sandbox(agent_id)
             except Exception as exc:
-                cleanup_errors.append(
-                    {"stage": "sandbox_cleanup", "error": self._error_message(exc)}
-                )
+                cleanup_errors.append(self._cleanup_error("sandbox_cleanup", exc))
 
-        # 4. 保留 workspace 目录（不清除）
-
-        # 5. 更新 agent 状态
-        agent_delete_error = None
-        try:
-            self._repository.update_agent_status(agent_id, AgentStatus.deleted)
-            logger.info("[AgentManager] Agent status updated to deleted in database")
-            # 彻底删除 agent 记录（包括关联的 session、message、skill 等），放在最后执行，确保前面步骤都完成了才删除记录
-            self._repository.delete_agent(agent_id)
-        except Exception as exc:
-            agent_delete_error = exc
-            cleanup_errors.append(
-                {"stage": "agent_status", "error": self._error_message(exc)}
-            )
-            logger.error(f"[AgentManager] Failed to update agent status: {exc}")
-
-        # 对于删除操作，如果沙箱进程已不存在（"Sandbox handle was not found"），
-        # 即使沙箱清理失败也应该允许删除成功
-        if agent_delete_error is None and len(cleanup_errors) > 0:
-            # 检查是否只有 sandbox_cleanup 错误且错误信息包含 "Sandbox handle was not found"
-            non_sandbox_handle_errors = [
-                err
-                for err in cleanup_errors
-                if not (
-                    err["stage"] == "sandbox_cleanup"
-                    and "Sandbox handle was not found" in err["error"]
-                )
-            ]
-            if len(non_sandbox_handle_errors) == 0:
-                # 只有 "Sandbox handle was not found" 错误，允许删除成功
-                logger.warning(
-                    f"[AgentManager] Agent {agent_id} deleted, but sandbox was already gone: {cleanup_errors}"
-                )
-                return
-
-        if cleanup_errors:
+        # 4. 前置阶段失败即中止
+        blocking_errors = [
+            error
+            for error in cleanup_errors
+            if not self._is_tolerable_cleanup_error(error)
+        ]
+        if blocking_errors:
             self._raise_operation_failed(
                 code=AGENT_DELETE_FAILED,
                 message="Agent delete failed.",
                 agent_id=agent_id,
-                cause=RuntimeError(cleanup_errors[0]["error"]),
+                cause=RuntimeError(blocking_errors[0]["error"]),
                 cleanup_errors=cleanup_errors,
             )
+        if cleanup_errors:
+            logger.warning(
+                "[AgentManager] Ignoring tolerable cleanup errors: agent_id=%s errors=%s",
+                agent_id,
+                cleanup_errors,
+            )
+
+        # 5. 不可逆阶段（放在最后）：更新状态并删除 agent 记录。
+        try:
+            self._repository.update_agent_status(agent_id, AgentStatus.deleted)
+            logger.info("[AgentManager] Agent status updated to deleted in database")
+            # 彻底删除 agent 记录（包括关联的 session、message、skill 等）
+            self._repository.delete_agent(agent_id)
+        except Exception as exc:
+            cleanup_errors.append(self._cleanup_error("agent_delete", exc))
+            logger.error("[AgentManager] Failed to delete agent record: %s", exc)
+            self._raise_operation_failed(
+                code=AGENT_DELETE_FAILED,
+                message="Agent delete failed.",
+                agent_id=agent_id,
+                cause=exc,
+                cleanup_errors=cleanup_errors,
+            )
+
+    @staticmethod
+    def _is_tolerable_cleanup_error(error: dict[str, str]) -> bool:
+        """沙箱句柄已不存在属于"已经清理过"，不算删除失败。
+
+        按错误码判定：沙箱 backend 在句柄丢失时抛 SANDBOX_NOT_FOUND
+        （sandbox/base.py 的 sandbox_not_found）。匹配 message 文案会在上游改一句话
+        之后静默失效，也会放过恰好带上同一句话的无关错误。
+        """
+        return (
+            error.get("stage") == "sandbox_cleanup"
+            and error.get("code") == SANDBOX_NOT_FOUND
+        )
 
     def _create_agent_record(
         self,
@@ -2216,10 +2251,24 @@ class AgentManager:
             raise agent_not_found(agent_id=agent_id)
         return agent
 
-    def _get_adaptor_endpoint(self, agent_id: str, session_id: str) -> AdaptorEndpoint:
+    def _get_adaptor_endpoint(
+        self,
+        agent_id: str,
+        session_id: str,
+        *,
+        agent: AgentRecord | None = None,
+        session: SessionRecord | None = None,
+    ) -> AdaptorEndpoint:
+        """组装 adaptor WS endpoint。
+
+        agent / session 由调用方传入时跳过重复点查：一次请求里这两行通常已经被入口
+        读过，而本仓库每次 repository 调用都要新建 ORM Session（实测约 0.23ms）。
+        """
         sandbox_state = self._get_sandbox_state(agent_id)
-        session = self._session_manager.get_session(agent_id, session_id)
-        if session.remote_runtime_agent_id is None:
+        session_record = session or self._session_manager.get_session(
+            agent_id, session_id
+        )
+        if session_record.remote_runtime_agent_id is None:
             raise DomainError(
                 code="RUNTIME_AGENT_ID_MISSING",
                 message="Remote runtime agent id was not found for session.",
@@ -2233,11 +2282,13 @@ class AgentManager:
         else:
             scheme = "ws"
         host = base_url.split("://")[-1]
-        ws_base_url = f"{scheme}://{host}/agents/{session.remote_runtime_agent_id}"
+        ws_base_url = (
+            f"{scheme}://{host}/agents/{session_record.remote_runtime_agent_id}"
+        )
         return AdaptorEndpoint(
             base_url=ws_base_url,
             session_id=session_id,
-            sandbox_type=self._get_agent(agent_id).sandbox_type,
+            sandbox_type=(agent or self._get_agent(agent_id)).sandbox_type,
         )
 
     async def _prepare_ws_message_client(
@@ -2245,8 +2296,13 @@ class AgentManager:
         agent_id: str,
         session_id: str,
         content: str,
+        *,
+        agent: AgentRecord | None = None,
+        session: SessionRecord | None = None,
     ) -> WebSocketClient:
-        endpoint = self._get_adaptor_endpoint(agent_id, session_id)
+        endpoint = self._get_adaptor_endpoint(
+            agent_id, session_id, agent=agent, session=session
+        )
         self._logger.info(
             f"_prepare_ws: agent_id={agent_id}, session_id={session_id}, endpoint={endpoint}"
         )
@@ -2357,11 +2413,19 @@ class AgentManager:
                 status="error",
             )
 
-    def _auto_generate_session_title(self, agent_id: str, session_id: str) -> None:
-        """自动生成会话标题"""
+    def _auto_generate_session_title(
+        self,
+        agent_id: str,
+        session_id: str,
+        *,
+        session: SessionRecord | None = None,
+    ) -> None:
+        """自动生成会话标题；调用方已读过 session 时直接传入，省一次点查。"""
         try:
-            session = self._session_manager.get_session(agent_id, session_id)
-            if session.title:
+            session_record = session or self._session_manager.get_session(
+                agent_id, session_id
+            )
+            if session_record.title:
                 return
             first_msg = self._repository.get_first_user_message(session_id)
             if first_msg:
@@ -2590,7 +2654,19 @@ class AgentManager:
         try:
             action()
         except Exception as exc:
-            errors.append({"stage": stage, "error": AgentManager._error_message(exc)})
+            errors.append(AgentManager._cleanup_error(stage, exc))
+
+    @staticmethod
+    def _cleanup_error(stage: str, exc: Exception) -> dict[str, str]:
+        """构造 cleanup 错误条目：DomainError 额外带上 code。
+
+        code 是"哪些清理失败可以容忍"的判定依据（见 _is_tolerable_cleanup_error）；
+        只留 message 文本会迫使上层去匹配错误文案。
+        """
+        entry = {"stage": stage, "error": AgentManager._error_message(exc)}
+        if isinstance(exc, DomainError):
+            entry["code"] = exc.code
+        return entry
 
     @staticmethod
     def _error_message(exc: Exception) -> str:

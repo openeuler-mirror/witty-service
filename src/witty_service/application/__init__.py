@@ -8,10 +8,9 @@ from witty_service.application.agent_manager import (
 )
 from witty_service.application.session_manager import (
     SESSION_AGENT_MISMATCH,
-    SESSION_NOT_FOUND,
     SessionManager,
 )
-from witty_service.domain.errors import AGENT_NOT_FOUND
+from witty_service.domain.errors import AGENT_NOT_FOUND, SESSION_NOT_FOUND
 
 __all__ = [
     "AGENT_NOT_FOUND",

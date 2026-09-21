@@ -6,11 +6,15 @@ from witty_service.domain.errors import (
     AgentContextMismatchError,
     AgentDefaultNotConfiguredError,
     AgentIdNotConfiguredError,
+    AgentNotFoundError,
     AgentServiceError,
     DomainError,
+    FieldValidationError,
     InvalidAgentConfigError,
     InvalidAgentTransitionError,
+    InvalidSessionMetadataError,
     OpenClawAgentNotFoundError,
+    SessionNotFoundError,
 )
 from witty_service.domain.models import ErrorPayload
 
@@ -19,12 +23,16 @@ __all__ = [
     "AgentContextMismatchError",
     "AgentDefaultNotConfiguredError",
     "AgentIdNotConfiguredError",
+    "AgentNotFoundError",
     "AgentServiceError",
     "AgentStatus",
     "DomainError",
     "ErrorPayload",
+    "FieldValidationError",
     "InvalidAgentConfigError",
     "InvalidAgentTransitionError",
+    "InvalidSessionMetadataError",
     "OpenClawAgentNotFoundError",
+    "SessionNotFoundError",
     "can_transition",
 ]

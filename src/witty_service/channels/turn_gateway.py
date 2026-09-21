@@ -8,10 +8,8 @@
 1. `paused` 时自动恢复；
 2. 非 `running` 时映射为域错误（`CHANNEL_AGENT_NOT_RUNNABLE` / `CHANNEL_AGENT_NOT_BOUND`）；
 3. 事件流的终态判定；
-4. **提交前的自愈**（实施计划 §4.4）：`resolve_session` 在返回会话前检查"会话行是否
-   存在"与"`remote_runtime_agent_id` 是否非空"，任一不满足即重建会话。这样既消除了
-   框架文档 §3.6 想表达的两种失效，又**避免了在提交后重试导致的用户消息重复落库**
-   （`send_message_stream` 在提交前就已把用户消息写库）。
+4. **提交前的自愈**：`resolve_session` 在返回会话前检查"会话行是否
+   存在"与"`remote_runtime_agent_id` 是否非空"，任一不满足即重建会话。
 """
 
 from __future__ import annotations
@@ -20,6 +18,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Protocol
 
+from witty_service.application.agent_manager import AGENT_NOT_RUNNING
 from witty_service.channels import errors as err
 from witty_service.channels.contracts import (
     ERROR_EVENT_TYPES,
@@ -27,7 +26,7 @@ from witty_service.channels.contracts import (
     TurnEvent,
 )
 from witty_service.domain.enums import AgentStatus
-from witty_service.domain.errors import DomainError
+from witty_service.domain.errors import AgentNotFoundError, DomainError
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +66,9 @@ class TurnGatewayRepository(Protocol):
 
     def get_session(self, session_id: str) -> Any | None: ...
 
-    def find_last_assistant_message_for_session(self, session_id: str) -> Any | None: ...
+    def find_last_assistant_message_for_session(
+        self, session_id: str
+    ) -> Any | None: ...
 
     def mark_session_origin(self, session_id: str, origin: str) -> Any: ...
 
@@ -292,12 +293,16 @@ class AgentTurnGateway:
     def _map_agent_error(
         self, exc: DomainError, *, agent_id: str, agent: Any
     ) -> DomainError:
-        """把既有 `AgentManager` 的错误码映射为渠道层错误码。"""
-        if exc.code in {"AGENT_NOT_FOUND", "AGENT_NOT_RUNNING"}:
-            if exc.code == "AGENT_NOT_FOUND":
-                return err.channel_agent_not_bound(
-                    instance_id=self._instance_id, agent_id=agent_id
-                )
+        """把既有 `AgentManager` 的错误码映射为渠道层错误码。
+
+        agent 不存在用类型判定（domain.errors.AgentNotFoundError），不再匹配错误码
+        字符串；AGENT_NOT_RUNNING 尚未类型化，暂按码判定。
+        """
+        if isinstance(exc, AgentNotFoundError):
+            return err.channel_agent_not_bound(
+                instance_id=self._instance_id, agent_id=agent_id
+            )
+        if exc.code == AGENT_NOT_RUNNING:
             return err.channel_agent_not_runnable(
                 agent_id=agent_id,
                 status=self._status_value(agent),

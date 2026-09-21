@@ -457,8 +457,9 @@ def update_conversation(
     payload: UpdateConversationRequest,
     services: ServiceContainer = Depends(get_services),
 ) -> SessionResponse:
-    services.session_manager.get_session(agent_id, session_id)
-    updated = services.repository.update_session_metadata(
+    # 归属校验 + 标题长度校验都在 SessionManager.update_session_metadata 里收口
+    updated = services.session_manager.update_session_metadata(
+        agent_id,
         session_id,
         title=payload.title,
         pinned=payload.pinned,
