@@ -111,6 +111,8 @@ package-data = {"witty_service.data" = ["*.tar.gz", "preset_agents/**/*"]}
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# 未注册的 marker 直接报错：少了 pytest-asyncio 时，283 条异步用例会「跳过即绿」
+addopts = ["--strict-markers"]
 
 [tool.mypy]
 python_version = "3.11"
