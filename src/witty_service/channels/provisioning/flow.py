@@ -259,8 +259,9 @@ class ProvisioningFlow:
             )
             self._clear_state(attempt)
             self._forget(attempt)
-            assert expired is not None
-            return ProvisioningResult(attempt=self._view(expired), instance=None)
+            return ProvisioningResult(
+                attempt=self._view(_require(expired, attempt.id)), instance=None
+            )
 
         if not force and self._throttled(attempt, now):
             return ProvisioningResult(attempt=self._view(attempt), instance=None)
@@ -289,13 +290,16 @@ class ProvisioningFlow:
         self, attempt: ChannelProvisioningRecord, outcome: ProvisioningOutcome
     ) -> ProvisioningResult:
         if outcome.status == STATUS_WAITING:
+            if not self._rotate_state(attempt, outcome):
+                return self._fail(attempt, err.CHANNEL_PROVISIONING_FAILED)
             updated = self._repository.update_provisioning(
                 attempt.id,
                 qr_content=outcome.qr_content or attempt.qr_content,
                 expires_at=outcome.expires_at or attempt.expires_at,
             )
-            assert updated is not None
-            return ProvisioningResult(attempt=self._view(updated), instance=None)
+            return ProvisioningResult(
+                attempt=self._view(_require(updated, attempt.id)), instance=None
+            )
 
         if outcome.status == STATUS_EXPIRED:
             expired = self._repository.update_provisioning(
@@ -306,22 +310,60 @@ class ProvisioningFlow:
             )
             self._clear_state(attempt)
             self._forget(attempt)
-            assert expired is not None
-            return ProvisioningResult(attempt=self._view(expired), instance=None)
+            return ProvisioningResult(
+                attempt=self._view(_require(expired, attempt.id)), instance=None
+            )
 
         if outcome.status == STATUS_SUCCEEDED and outcome.credentials:
             return self._finish_succeeded(attempt, outcome)
 
+        return self._fail(
+            attempt, outcome.error_code or err.CHANNEL_PROVISIONING_FAILED
+        )
+
+    def _fail(
+        self, attempt: ChannelProvisioningRecord, error_code: str
+    ) -> ProvisioningResult:
+        """把尝试写成失败终态，并清掉平台临时凭据。"""
         failed = self._repository.update_provisioning(
             attempt.id,
             status=ProvisioningStatus.failed.value,
             state_ref=None,
-            error_code=outcome.error_code or err.CHANNEL_PROVISIONING_FAILED,
+            error_code=error_code,
         )
         self._clear_state(attempt)
         self._forget(attempt)
-        assert failed is not None
-        return ProvisioningResult(attempt=self._view(failed), instance=None)
+        return ProvisioningResult(
+            attempt=self._view(_require(failed, attempt.id)), instance=None
+        )
+
+    def _rotate_state(
+        self, attempt: ChannelProvisioningRecord, outcome: ProvisioningOutcome
+    ) -> bool:
+        """平台换了会话：把新的临时凭据写回同一个状态文件。
+
+        顺序有讲究——先落状态、再回二维码：反过来客户端可能拿着刚拿到的新二维码来轮询，
+        而驱动手里还是那个已经作废的旧会话，新二维码永远扫不出结果。写状态失败（磁盘满、
+        权限被改）时返回 False——平台会话已不可用，只能让这次接入失败。
+        """
+        if outcome.state is None or attempt.state_ref is None:
+            return True
+        try:
+            self._store.write(
+                attempt.state_ref,
+                {STATE_FIELD: base64.b64encode(outcome.state).decode("ascii")},
+                expires_at=outcome.expires_at or attempt.expires_at,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist the rotated platform session: attempt_id=%s "
+                "channel=%s",
+                attempt.id,
+                attempt.channel,
+                exc_info=True,
+            )
+            return False
+        return True
 
     def _finish_succeeded(
         self, attempt: ChannelProvisioningRecord, outcome: ProvisioningOutcome
@@ -350,8 +392,9 @@ class ProvisioningFlow:
             )
             self._clear_state(attempt)
             self._forget(attempt)
-            assert failed is not None
-            return ProvisioningResult(attempt=self._view(failed), instance=None)
+            return ProvisioningResult(
+                attempt=self._view(_require(failed, attempt.id)), instance=None
+            )
 
         # 只有落库完全成功之后才把终态写回，并清除平台临时凭据
         settled = self._repository.update_provisioning(
@@ -372,9 +415,9 @@ class ProvisioningFlow:
                     instance.id,
                     exc_info=True,
                 )
-        assert settled is not None
         return ProvisioningResult(
-            attempt=self._view(settled, instance_id=instance.id), instance=instance
+            attempt=self._view(_require(settled, attempt.id), instance_id=instance.id),
+            instance=instance,
         )
 
     # ==========================================================================
@@ -392,8 +435,7 @@ class ProvisioningFlow:
         )
         self._clear_state(attempt)
         self._forget(attempt)
-        assert cancelled is not None
-        return self._view(cancelled)
+        return self._view(_require(cancelled, attempt.id))
 
     # ==========================================================================
     # 内部
@@ -418,7 +460,10 @@ class ProvisioningFlow:
         attempt_id = self._inflight.get(key)
         if attempt_id is not None:
             attempt = self._repository.get_provisioning(attempt_id)
-            if attempt is not None and attempt.status == ProvisioningStatus.waiting.value:
+            if (
+                attempt is not None
+                and attempt.status == ProvisioningStatus.waiting.value
+            ):
                 return attempt
             self._inflight.pop(key, None)
         # 数据库侧检查：进程重启后内存登记会丢，双保险
@@ -499,6 +544,19 @@ class ProvisioningFlow:
             error_code=attempt.error_code,
             instance_id=instance_id,
         )
+
+
+def _require(
+    record: ChannelProvisioningRecord | None, attempt_id: str
+) -> ChannelProvisioningRecord:
+    """把"更新后拿不到记录"变成域错误。
+
+    原先的 `assert ... is not None` 在 `python -O` 下会被整条剥掉（bandit B101），届时
+    同一路径退化成一个 `None` 往下传，在别处炸成 `AttributeError`。
+    """
+    if record is None:
+        raise err.channel_provisioning_not_found(attempt_id)
+    return record
 
 
 def _as_utc(value: datetime) -> datetime:
