@@ -50,7 +50,9 @@ class Env:
     agent_id: str
     counter: int = 0
 
-    def route(self, user: str = "u1", conversation_type: str = CONVERSATION_TYPE_DIRECT) -> Route:
+    def route(
+        self, user: str = "u1", conversation_type: str = CONVERSATION_TYPE_DIRECT
+    ) -> Route:
         return Route(
             instance_id=self.instance_id,
             conversation_type=conversation_type,
@@ -471,6 +473,43 @@ async def test_stop_without_active_turn_replies_idle(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_silences_the_adaptor_error_the_abort_produces(tmp_path) -> None:
+    """`/stop` 之后 adaptor 报回的 stream.error 不得再变成一条用户可见文案。"""
+    # 停滞窗口放大到 5s：本用例要盯的是"停止之后的收尾"，不是停滞提示
+    env = _build_env(tmp_path, stall_window=5.0)
+    env.gateway.push_script(
+        FakeTurnScript(terminal_delay=0.2, emit_error_event=True, emit_terminal=False)
+    )
+
+    await env.send("第一条")
+    await asyncio.sleep(0.02)
+    await env.send("/stop")
+
+    assert cmd.STOP_ACK_TEXT in env.adapter.texts
+    assert await env.idle()
+
+    assert cmd.TURN_FAILED_TEXT not in env.adapter.texts
+    assert env.adapter.texts == [cmd.PLACEHOLDER_TEXT, cmd.STOP_ACK_TEXT]
+
+
+@pytest.mark.asyncio
+async def test_stop_discards_a_result_that_lands_after_the_stop(tmp_path) -> None:
+    """停止之后才产出的结果不再投递：被停止的回合无论最终成败都不再产生用户可见文案，
+    否则会出现"已经回复了『已停止当前回合』，结果又冒出来"的矛盾呈现。
+    """
+    env = _build_env(tmp_path, stall_window=5.0)
+    env.gateway.push_script(FakeTurnScript(terminal_delay=0.2, final_text="迟到的结果"))
+
+    await env.send("第一条")
+    await asyncio.sleep(0.02)
+    await env.send("/stop")
+    assert await env.idle()
+
+    assert "迟到的结果" not in env.adapter.texts
+    assert env.adapter.texts == [cmd.PLACEHOLDER_TEXT, cmd.STOP_ACK_TEXT]
+
+
+@pytest.mark.asyncio
 async def test_commands_are_not_queued(tmp_path) -> None:
     """命令就地处理：队列被回合占用时也**立刻**得到答复（§4.3）。"""
     env = _build_env(tmp_path)
@@ -592,7 +631,11 @@ async def test_stall_window_edits_placeholder_when_capable(tmp_path) -> None:
 async def test_progress_events_renew_stall_window(tmp_path) -> None:
     """停滞窗口随真实进展续期：持续有事件时不进入延迟补发。"""
     env = _build_env(tmp_path, stall_window=0.15)
-    steps = [(0.05, delta_event("a")), (0.05, delta_event("b")), (0.05, delta_event("c"))]
+    steps = [
+        (0.05, delta_event("a")),
+        (0.05, delta_event("b")),
+        (0.05, delta_event("c")),
+    ]
     env.gateway.push_script(FakeTurnScript(events=steps, final_text="及时结果"))
 
     await env.send("长任务")

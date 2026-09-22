@@ -1,4 +1,4 @@
-"""呈现规划：纯函数模块，不做任何 IO（框架设计 §3.8）。
+"""呈现规划：纯函数模块，不做任何 IO。
 
 输入"一段最终文本 + 能力声明"，输出"**呈现方式**（原地更新 / 补发新消息）与
 **若干次发送动作**"。
@@ -9,7 +9,7 @@
 - **结构感知**：代码围栏与表格都是不可在中间切断的结构块；超长的围栏按行重新
   成块（每块补齐围栏标记），超长的表格按行拆并重复表头，因此不会出现"半截围栏"
   或"半截表格"；
-- 超过 `max_reply_segments` 时，**保留最后一条**用于告知"完整结果请在控制台查看"；
+- 超过 `max_reply_segments`（扣除 `reserved` 之后）时，保留最后一条用于告知"完整结果请在控制台查看"；
 - 呈现方式由 `can_edit_message` 决定：可原地编辑的渠道更新占位消息，其余补发新消息。
 """
 
@@ -67,8 +67,17 @@ class _Block:
     text: str
 
 
-def plan(text: str | None, capabilities: ChannelCapabilities) -> DeliveryPlan:
-    """把最终文本换算成呈现方式与发送动作。"""
+def plan(
+    text: str | None, capabilities: ChannelCapabilities, *, reserved: int = 0
+) -> DeliveryPlan:
+    """把最终文本换算成呈现方式与发送动作。
+
+    `reserved` 是本回合已经（或即将）出站的非终稿消息条数（占位消息、停滞提示）：它们和
+    分段共用同一条平台额度（QQ 单聊 4 条 / 群聊 5 条），不扣掉的话"上限 4 条"实际会发出
+    5 条，最后一条被迫降级成主动消息（用户没授权就发不出去，表现为答案缺一半）。真实值
+    只有路由器知道（`_deliver_final` / `_deliver_error` 是仅有的两个业务入口），默认 0
+    服务没有这类出站的调用方与单测；调用方要保证 reserved < 上限，这里最多把额度压到 1。
+    """
     max_length = (
         capabilities.max_text_length
         if capabilities.max_text_length > 0
@@ -87,7 +96,8 @@ def plan(text: str | None, capabilities: ChannelCapabilities) -> DeliveryPlan:
     truncated = False
     limit = capabilities.max_reply_segments
     if limit is not None:
-        normalized_limit = max(1, limit)
+        # 至少留一条：全被 reserved 占满时也要给出"结果请在控制台查看"的提示条
+        normalized_limit = max(1, limit - max(0, reserved))
         if len(segments) > normalized_limit:
             truncated = True
             if normalized_limit == 1:
@@ -104,9 +114,7 @@ def plan(text: str | None, capabilities: ChannelCapabilities) -> DeliveryPlan:
         )
         for index, segment in enumerate(segments)
     )
-    return DeliveryPlan(
-        presentation=presentation, actions=actions, truncated=truncated
-    )
+    return DeliveryPlan(presentation=presentation, actions=actions, truncated=truncated)
 
 
 def split_text(text: str, *, max_length: int) -> list[str]:
@@ -201,9 +209,7 @@ def _split_code(text: str, max_length: int) -> list[str]:
     if body and body[-1].strip().startswith(FENCE):
         body = body[:-1]
     budget = max(1, max_length - len(opening) - len(closing) - 2)
-    return [
-        f"{opening}\n{group}\n{closing}" for group in _group_lines(body, budget)
-    ]
+    return [f"{opening}\n{group}\n{closing}" for group in _group_lines(body, budget)]
 
 
 def _split_table(text: str, max_length: int) -> list[str]:

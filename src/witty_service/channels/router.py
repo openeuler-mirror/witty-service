@@ -127,6 +127,10 @@ class TurnContext:
     turn_id: str
     session_id: str
     binding_version: int
+    #: 本回合**非终稿**出站的累计条数（占位消息、停滞提示）：终稿分段的额度要扣掉它
+    non_final_sent: int = 0
+    #: 本回合是否已经发过非终稿提示（停滞提示与交互提示共用）：每回合至多一条
+    notice_sent: bool = False
 
 
 @dataclass(slots=True)
@@ -153,6 +157,8 @@ class RouteState:
     #: 绑定世代：`/new` 轮转会话时递增，用于让在飞回合的投递被拦下
     binding_version: int = 0
     current: TurnContext | None = None
+    #: 已请求停止的回合：`/stop` 在**下发中止之前**登记，由执行体在拿到结局时消费。
+    stopped_turn_id: str | None = None
     #: 当前占位消息引用（同一次处理内复用内存值，只有经历后台补发才回库读取）
     placeholder_ref: str | None = None
 
@@ -445,9 +451,7 @@ class SessionRouter:
             )
         )
 
-    async def _handle_stop(
-        self, runtime: ChannelInstanceRuntime, route: Route
-    ) -> None:
+    async def _handle_stop(self, runtime: ChannelInstanceRuntime, route: Route) -> None:
         """停止：清空队列 -> 逐条告知 -> 中止当前回合 -> 回执（框架设计 §4.4）。"""
         state = self._states.get(route.key)
         if state is None:
@@ -460,6 +464,9 @@ class SessionRouter:
         if current is None or runtime.agent_id is None:
             await self._send_text(runtime, route, cmd.STOP_IDLE_ACK_TEXT)
             return
+        # 先登记再中止：这行是同步的，执行体读到结局时必然看得到；反过来等 adaptor 报错
+        # 再判断"是不是被中止的"会输给竞态（真机上 stream.error 到达时 abort 的落库还没完成）。
+        state.stopped_turn_id = current.turn_id
         try:
             await self._gateway.abort(runtime.agent_id, current.session_id)
         except Exception:
@@ -549,9 +556,7 @@ class SessionRouter:
             state.worker.cancel()
         state.worker = None
 
-    async def _worker(
-        self, state: RouteState, runtime: ChannelInstanceRuntime
-    ) -> None:
+    async def _worker(self, state: RouteState, runtime: ChannelInstanceRuntime) -> None:
         """每条路由的串行执行体：整个回合期间（含转入后台监视）保持占用。"""
         try:
             while True:
@@ -612,7 +617,11 @@ class SessionRouter:
         finally:
             state.current = None
 
-        if outcome.aborted:
+        # `/stop` 中止的回合在 adaptor 侧表现为 stream.error，单看结局会多回一条失败文案
+        stopped_by_user = state.stopped_turn_id == turn.turn_id
+        if stopped_by_user:
+            state.stopped_turn_id = None
+        if outcome.aborted or stopped_by_user:
             logger.info(
                 "Channel turn aborted by user: instance_id=%s session_id=%s",
                 route.instance_id,
@@ -665,9 +674,7 @@ class SessionRouter:
         """
         agent_id = runtime.agent_id
         if agent_id is None:  # 调用方（_process）已保证 agent 存在
-            return TurnOutcome(
-                failed=True, error_code=err.CHANNEL_AGENT_NOT_BOUND
-            )
+            return TurnOutcome(failed=True, error_code=err.CHANNEL_AGENT_NOT_BOUND)
         queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
         pump = asyncio.create_task(
             self._pump_turn(agent_id, turn.session_id, text, queue)
@@ -681,7 +688,7 @@ class SessionRouter:
                     )
                 except TimeoutError:
                     outcome.deferred = True
-                    await self._mark_deferred(runtime, state)
+                    await self._mark_deferred(runtime, state, turn)
                     continue
                 if kind == _END:
                     break
@@ -739,9 +746,7 @@ class SessionRouter:
             await queue.put(
                 (
                     _ERROR,
-                    err.channel_turn_failed(
-                        session_id=session_id, message=str(exc)
-                    ),
+                    err.channel_turn_failed(session_id=session_id, message=str(exc)),
                 )
             )
         finally:
@@ -764,7 +769,16 @@ class SessionRouter:
             turn.session_id,
             request_id,
         )
-        await self._send_text(runtime, state.route, cmd.INTERACTION_NOTICE_TEXT)
+        if turn.notice_sent:
+            # 与停滞提示共用"每回合一条"的额度：多次请求只提示一次，请求本身照常拒绝
+            logger.info(
+                "Channel interaction notice already sent this turn: instance_id=%s",
+                state.route.instance_id,
+            )
+        else:
+            turn.notice_sent = True
+            turn.non_final_sent += 1
+            await self._send_text(runtime, state.route, cmd.INTERACTION_NOTICE_TEXT)
         if isinstance(request_id, str) and runtime.agent_id:
             try:
                 await self._gateway.reject_interaction(
@@ -795,6 +809,8 @@ class SessionRouter:
         让用户看到两条占位消息。
         """
         result = await runtime.adapter.send_text(state.route, cmd.PLACEHOLDER_TEXT)
+        # 失败这次同样计进额度：平台可能已经受理（uncertain），宁可提前少发一条
+        turn.non_final_sent += 1
         self._record_delivery(
             runtime, state, turn, result=result, segment_index=0, phase="placeholder"
         )
@@ -816,9 +832,23 @@ class SessionRouter:
         )
 
     async def _mark_deferred(
-        self, runtime: ChannelInstanceRuntime, state: RouteState
+        self,
+        runtime: ChannelInstanceRuntime,
+        state: RouteState,
+        turn: TurnContext,
     ) -> None:
-        """静默超过停滞窗口：告知用户"稍后补发"，回合转入后台监视。"""
+        """静默超过停滞窗口：告知用户"稍后补发"，回合转入后台监视。
+
+        **每回合至多提示一条**：停滞窗口会反复触发（默认 90s 一次），每条提示都占用平台
+        给这条入站消息的回复额度；不限次的话长回合能把额度吃光，终稿只能走主动消息。
+        """
+        if turn.notice_sent:
+            logger.info(
+                "Channel turn is still deferred; notice already sent: instance_id=%s",
+                state.route.instance_id,
+            )
+            return
+        turn.notice_sent = True
         capabilities = runtime.adapter.capabilities()
         if capabilities.can_edit_message and state.placeholder_ref is not None:
             result = await runtime.adapter.edit_text(
@@ -829,6 +859,7 @@ class SessionRouter:
             result = await runtime.adapter.send_text(
                 state.route, cmd.DEFERRED_NOTICE_TEXT
             )
+            turn.non_final_sent += 1
         self._record_delivery(
             runtime, state, None, result=result, segment_index=0, phase="deferred"
         )
@@ -847,7 +878,11 @@ class SessionRouter:
         text: str,
         deferred: bool,
     ) -> None:
-        delivery_plan = plan(text, runtime.adapter.capabilities())
+        delivery_plan = plan(
+            text,
+            runtime.adapter.capabilities(),
+            reserved=turn.non_final_sent,
+        )
         placeholder_ref = state.placeholder_ref
         if placeholder_ref is None:
             record = self._repository.get_route(state.route_record_id)
@@ -908,13 +943,19 @@ class SessionRouter:
         turn: TurnContext,
         outcome: TurnOutcome,
     ) -> None:
-        text = cmd.render_error(code=outcome.error_code or err.CHANNEL_TURN_FAILED,
-                                agent_name=self._gateway.agent_name(runtime.agent_id),
-                                status=self._gateway.agent_state(runtime.agent_id))
+        text = cmd.render_error(
+            code=outcome.error_code or err.CHANNEL_TURN_FAILED,
+            agent_name=self._gateway.agent_name(runtime.agent_id),
+            status=self._gateway.agent_state(runtime.agent_id),
+        )
         if not self._turn_delivery_allowed(state, turn):
             await self._clear_placeholder(state)
             return
-        delivery_plan = plan(text, runtime.adapter.capabilities())
+        delivery_plan = plan(
+            text,
+            runtime.adapter.capabilities(),
+            reserved=turn.non_final_sent,
+        )
         placeholder_ref = state.placeholder_ref
         for action in delivery_plan.actions:
             result = await self._send_action(
