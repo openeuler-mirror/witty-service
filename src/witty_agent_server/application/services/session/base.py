@@ -62,7 +62,27 @@ class SessionServiceBase:
         self._events: dict[str, list[SessionEvent]] = {}
 
     def validate_create_session(self, config: dict[str, Any]) -> ValidationResult:
-        del config
+        """创建会话前的校验：`restore` 与 `session_id` 必须成对出现。
+
+        `restore=True` 是唯一接受外部 session_id 的路径：缺 id 会另生成一个、留下永不被
+        使用的会话行；多给 id 则等于让调用方自选主键——仓储的 `create` 是按 id upsert。
+        """
+        restore = bool(config.get("restore"))
+        session_id = config.get("session_id")
+        if restore:
+            if not isinstance(session_id, str) or not session_id.strip():
+                return ValidationResult(
+                    ok=False,
+                    error_code="INVALID_SESSION_CONFIG",
+                    message="session_id is required when restore is true",
+                )
+            return ValidationResult(ok=True)
+        if session_id is not None:
+            return ValidationResult(
+                ok=False,
+                error_code="INVALID_SESSION_CONFIG",
+                message="session_id is only accepted when restore is true",
+            )
         return ValidationResult(ok=True)
 
     def register_runtime(self, runtime: RuntimeBase) -> None:
@@ -102,15 +122,28 @@ class SessionServiceBase:
                 status_code=500,
             )
 
-        session_id = self._generate_session_id()
+        # 恢复历史 session 时传入的 id 指向的运行时会话仍然存在，重填映射即可，**不能**
+        # 再创建一次：否则会生成一个与原 id 无关的新会话，提交只会得到 SESSION_NOT_FOUND
+        restore = bool(config.get("restore"))
+        session_id = config.get("session_id") if restore else None
+        if not isinstance(session_id, str) or not session_id.strip():
+            session_id = self._generate_session_id()
+        if restore:
+            # 库里有这个 id 时必须属于 agent_id：`create` 是 upsert，不校验归属就会把
+            # 别人的会话连 `agent_id` 一起改写掉。答 SESSION_NOT_FOUND 而非 403，与
+            # `get_session` 一致，不泄露该 id 是否存在。
+            existing = self.repository.get(session_id)
+            if existing is not None:
+                self._ensure_session_owner(agent_id=agent_id, session=existing)
         runtime_session_key = self._build_runtime_session_key(
             agent_id=agent_id,
             session_id=session_id,
         )
-        self._ensure_runtime_session_created(
-            runtime_type=snapshot.runtime_type,
-            session_key=runtime_session_key,
-        )
+        if not restore:
+            self._ensure_runtime_session_created(
+                runtime_type=snapshot.runtime_type,
+                session_key=runtime_session_key,
+            )
 
         session = {
             "id": session_id,
