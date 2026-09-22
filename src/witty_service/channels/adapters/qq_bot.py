@@ -53,16 +53,22 @@ ID。**不**用它自动收紧准入策略——准入默认"放开"是产品决
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
-from collections.abc import Callable, Mapping
+import secrets
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from witty_service.channels import errors as err
 from witty_service.channels.adapters.base import BaseChannelAdapter, CredentialField
 from witty_service.channels.adapters.qq_transport import (
+    MSG_TYPE_MARKDOWN,
+    MSG_TYPE_TEXT,
     QqGatewayTransport,
     QqTransportError,
 )
@@ -78,6 +84,15 @@ from witty_service.channels.contracts import (
     InboundMessage,
     Route,
     register_adapter,
+)
+from witty_service.channels.provisioning.drivers import (
+    STATUS_EXPIRED,
+    STATUS_FAILED,
+    STATUS_SUCCEEDED,
+    STATUS_WAITING,
+    ProvisioningOutcome,
+    ProvisioningSession,
+    register_driver,
 )
 
 logger = logging.getLogger(__name__)
@@ -651,24 +666,361 @@ def _config_bool(value: object) -> bool:
     return False
 
 
+# ==============================================================================
+# 扫码接入驱动（官方 q.qq.com「lite 绑定任务」）
+# ==============================================================================
+
+#: 扫码服务（绑定任务）的地址。官方连接器分 production/test 两台主机，本项目只用
+#: production：二维码页面永远在 production 域渲染，暴露成开关只会多一个配错点。
+QR_SERVICE_BASE = "https://q.qq.com"
+#: 申请绑定任务 / 轮询绑定结果
+QR_CREATE_TASK_PATH = "/lite/create_bind_task"
+QR_POLL_TASK_PATH = "/lite/poll_bind_result"
+#: 二维码页面的路径（连接器构造：`?task_id=..&source=..&_wv=2`）
+QR_CONNECT_PATH = "/qqbot/openclaw/connect.html"
+#: 轮询间隔（官方连接器固定 2s；平台侧没有给建议值）
+QR_POLL_INTERVAL_MS = 2000
+#: 本地二维码有效期：界面倒计时与本次尝试的本地上限；平台何时作废由 `poll` 的 status
+#: 决定，本值必须**不小于**平台真实时效（官方连接器取 5 分钟，此处同款）。
+QR_TTL_SECONDS = 5 * 60
+#: 一次接入尝试内最多换几次二维码（12 次 ≈ 1 小时），避免被遗弃的对话框无限申请任务
+MAX_QR_REFRESHES = 12
+#: 上报给平台的调用方标识（会出现在二维码页面上，留空则显示为"第三方机器人"）
+DEFAULT_QR_SOURCE = "witty-service"
+
+#: 绑定任务状态（官方连接器的 `BindStatus` 枚举）
+BIND_STATUS_NONE = 0
+BIND_STATUS_PENDING = 1
+BIND_STATUS_COMPLETED = 2
+BIND_STATUS_EXPIRED = 3
+
+#: AES-256-GCM：key 32 字节；密文布局是 IV(12) || ciphertext || tag(16)
+AES_GCM_KEY_BYTES = 32
+AES_GCM_IV_BYTES = 12
+AES_GCM_TAG_BYTES = 16
+
+#: 注入式 POST 实现。约定：**可重试**的失败（超时、连接被重置）抛 `QqTransientError`，
+#: 平台已表态的失败抛 `QqProvisioningError`；`_default_http_post` 已按此分类。
+HttpPost = Callable[[str, Mapping[str, Any]], Awaitable[Mapping[str, Any]]]
+
+
+class QqProvisioningError(Exception):
+    """扫码服务返回的**确定性**错误：平台已明确表态，重试也不会变。
+
+    典型：retcode 非 0、返回体缺少必需字段、状态文件损坏——一律让本次接入尝试失败。
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class QqTransientError(QqProvisioningError):
+    """扫码服务的**瞬时**错误：请求可能压根没到平台（超时、连接被重置）。
+
+    继承 `QqProvisioningError` 是让"忘了分类"的调用点仍走失败路径；但 `poll` /
+    `_refreshed` **必须**在捕获基类之前先捕获它，把这次轮询当成"还没有结论"继续等——
+    否则一次网络抖动就会把尝试写成 `failed`，而平台上的二维码其实还有效。
+    """
+
+
+def generate_bind_key() -> str:
+    """绑定任务的 `key`：32 字节随机数的 base64，也是解密 AppSecret 的 AES-256 密钥，
+    **只随 state 落在服务端**，不进任何响应。
+    """
+    return base64.b64encode(secrets.token_bytes(AES_GCM_KEY_BYTES)).decode("ascii")
+
+
+def build_connect_url(task_id: str, source: str = DEFAULT_QR_SOURCE) -> str:
+    """二维码内容：用户可以扫的授权页面地址（前端把它渲染成二维码图片）。"""
+    query = urlencode({"task_id": task_id, "source": source, "_wv": "2"})
+    return f"{QR_SERVICE_BASE}{QR_CONNECT_PATH}?{query}"
+
+
+def decrypt_bind_secret(encrypted: str, key: str) -> str:
+    """用绑定任务的 `key` 解出 AppSecret（AES-256-GCM）。
+
+    官方连接器 `decryptSecret`：`key = base64decode(key)`（32 字节 -> AES-256），
+    `blob = base64decode(bot_encrypt_secret)`，`iv = blob[:12]`、`tag = blob[-16:]`、
+    `ct = blob[12:-16]`。明文布局因此是 **IV(12) || 密文 || tag(16)**（不是 Node 默认的
+    iv||tag||ct）；`AESGCM.decrypt` 要"密文||tag"，故这里把 tag 挪到末尾。
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    key_bytes = base64.b64decode(key, validate=True)
+    blob = base64.b64decode(encrypted, validate=True)
+    if len(key_bytes) != AES_GCM_KEY_BYTES:
+        raise ValueError("the bind key is not 32 bytes")
+    if len(blob) <= AES_GCM_IV_BYTES + AES_GCM_TAG_BYTES:
+        raise ValueError("the encrypted secret is too short")
+    iv = blob[:AES_GCM_IV_BYTES]
+    tag = blob[-AES_GCM_TAG_BYTES:]
+    ciphertext = blob[AES_GCM_IV_BYTES:-AES_GCM_TAG_BYTES]
+    return AESGCM(key_bytes).decrypt(iv, ciphertext + tag, None).decode("utf-8")
+
+
+async def _default_http_post(url: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    """默认的 POST 实现（`httpx` 已在主依赖中）。"""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+            response = await client.post(
+                url, json=dict(payload), headers={"accept": "application/json"}
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as exc:
+        # 服务端明确回了状态码：平台已表态，重试没有意义
+        raise QqProvisioningError(
+            "HTTP_STATUS", f"qr service returned {exc.response.status_code}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        # 其余 httpx 异常都是"没能拿到答复"，请求可能未到平台，属于可重试
+        raise QqTransientError("HTTP_ERROR", f"qr request failed: {exc}") from exc
+    except ValueError as exc:
+        raise QqProvisioningError(
+            "BAD_RESPONSE", "qr response is not valid JSON"
+        ) from exc
+    if not isinstance(data, Mapping):
+        raise QqProvisioningError("BAD_RESPONSE", "qr response is not an object")
+    return data
+
+
+class QqProvisioningDriver:
+    """QQ 扫码接入驱动：官方「lite 绑定任务」流程。
+
+        POST {base}/lite/create_bind_task   {"key": "<32 随机字节的 base64>"} -> data.task_id
+        二维码内容 = {base}/qqbot/openclaw/connect.html?task_id=..&source=..&_wv=2
+        POST {base}/lite/poll_bind_result   {"task_id": ..} -> data.status（0 无 / 1 待扫 /
+            2 完成 / 3 过期）+ bot_appid + bot_encrypt_secret + user_openid
+
+    两个必须自己补上的点：平台判过期后旧 `task_id` 作废，`poll` 会立刻换新任务并把新二维码
+    + 新 state 交回编排层（用户侧表现为"二维码自动刷新"）；平台只回 `bot_encrypt_secret`，
+    必须用本次任务的 `key` 做 AES-256-GCM 解密（见 `decrypt_bind_secret`）。
+
+    `state` 形如 `{"task_id": .., "key": .., "refreshes": n}`：平台侧临时凭据，由编排层
+    加密落在 0600 文件里，**不出现在任何响应里**；`http_post` 可注入，测试无需联网。
+    """
+
+    channel: ClassVar[str] = "qq_bot"
+
+    def __init__(
+        self,
+        *,
+        api_base: str = QR_SERVICE_BASE,
+        http_post: HttpPost | None = None,
+        clock: Callable[[], datetime] | None = None,
+        source: str = DEFAULT_QR_SOURCE,
+        task_ttl_seconds: float = QR_TTL_SECONDS,
+        max_refreshes: int = MAX_QR_REFRESHES,
+        poll_interval_ms: int = QR_POLL_INTERVAL_MS,
+    ) -> None:
+        self._api_base = api_base.rstrip("/")
+        self._http_post = http_post or _default_http_post
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._source = source
+        self._task_ttl_seconds = task_ttl_seconds
+        self._max_refreshes = max(0, max_refreshes)
+        self._poll_interval_ms = poll_interval_ms
+
+    async def begin(self) -> ProvisioningSession:
+        key = generate_bind_key()
+        task_id = await self._create_task(key)
+        return ProvisioningSession(
+            qr_content=build_connect_url(task_id, self._source),
+            expires_at=self._clock() + timedelta(seconds=self._task_ttl_seconds),
+            poll_interval_ms=self._poll_interval_ms,
+            state=_encode_state(task_id=task_id, key=key, refreshes=0),
+        )
+
+    async def poll(self, state: bytes) -> ProvisioningOutcome:
+        parsed = _decode_state(state)
+        if parsed is None:
+            return ProvisioningOutcome(status=STATUS_FAILED, error_code="QQ_BAD_STATE")
+        task_id, key, refreshes = parsed
+        try:
+            payload = await self._post(QR_POLL_TASK_PATH, {"task_id": task_id})
+        except QqTransientError:
+            # 网络抖动只是**这次轮询**没有结论：保持 waiting，客户端按 poll_interval 再来。
+            logger.warning(
+                "QQ bind poll failed transiently; staying in waiting: task_id=%s",
+                task_id,
+                exc_info=True,
+            )
+            return ProvisioningOutcome(status=STATUS_WAITING)
+        except QqProvisioningError as exc:
+            return ProvisioningOutcome(status=STATUS_FAILED, error_code=exc.code)
+        retcode = payload.get("retcode")
+        if retcode not in (None, 0, "0"):
+            return ProvisioningOutcome(
+                status=STATUS_FAILED,
+                error_code=f"QQ_{retcode}",
+            )
+        data = _mapping_of(payload.get("data"))
+        status = _bind_status(data.get("status"))
+        if status == BIND_STATUS_COMPLETED:
+            return self._completed(data, key)
+        if status == BIND_STATUS_EXPIRED:
+            return await self._refreshed(refreshes)
+        if status in (BIND_STATUS_NONE, BIND_STATUS_PENDING):
+            return ProvisioningOutcome(status=STATUS_WAITING)
+        return ProvisioningOutcome(status=STATUS_FAILED, error_code="QQ_BAD_STATUS")
+
+    # ------------------------------------------------------------------ 内部
+
+    def _completed(self, data: Mapping[str, Any], key: str) -> ProvisioningOutcome:
+        """扫码完成：解出 AppSecret（并顺手记下扫码人）。"""
+        app_id = _first_str(data, ("bot_appid", "bot_app_id", "app_id"))
+        encrypted = _first_str(data, ("bot_encrypt_secret", "encrypt_secret"))
+        if not app_id or not encrypted:
+            return ProvisioningOutcome(
+                status=STATUS_FAILED, error_code="QQ_MISSING_CREDENTIALS"
+            )
+        try:
+            secret = decrypt_bind_secret(encrypted, key)
+        except Exception:
+            # 解不开就如实上报"凭据拿不到"，不落一个空密码进库
+            logger.warning(
+                "QQ bind result could not be decrypted: app_id=%s",
+                BaseChannelAdapter.mask_credential(app_id),
+                exc_info=True,
+            )
+            return ProvisioningOutcome(status=STATUS_FAILED, error_code="QQ_BAD_SECRET")
+        credentials = {"app_id": app_id, "secret": secret}
+        owner = _first_str(data, ("user_openid", "user_open_id"))
+        if owner:
+            # 扫码人 openid：四渠道中唯一能拿到的"所有者身份"，落成非密配置
+            credentials["owner_user_openid"] = owner
+        return ProvisioningOutcome(status=STATUS_SUCCEEDED, credentials=credentials)
+
+    async def _refreshed(self, refreshes: int) -> ProvisioningOutcome:
+        """二维码过期：换一个新任务，让同一个接入尝试继续下去。"""
+        if refreshes >= self._max_refreshes:
+            # 刷新次数用尽：如实报"过期"，让用户重新点接入，而不是无限申请任务
+            return ProvisioningOutcome(status=STATUS_EXPIRED)
+        key = generate_bind_key()
+        try:
+            task_id = await self._create_task(key)
+        except QqTransientError:
+            # 换任务时网络抖动：旧任务已被平台作废，但这次尝试仍是 waiting——下次轮询
+            # 会再判一次过期、再换一次，等于自动重试。
+            logger.warning(
+                "QQ bind refresh failed transiently; retrying on the next poll",
+                exc_info=True,
+            )
+            return ProvisioningOutcome(status=STATUS_WAITING)
+        except QqProvisioningError as exc:
+            return ProvisioningOutcome(status=STATUS_FAILED, error_code=exc.code)
+        return ProvisioningOutcome(
+            status=STATUS_WAITING,
+            qr_content=build_connect_url(task_id, self._source),
+            expires_at=self._clock() + timedelta(seconds=self._task_ttl_seconds),
+            state=_encode_state(task_id=task_id, key=key, refreshes=refreshes + 1),
+        )
+
+    async def _create_task(self, key: str) -> str:
+        payload = await self._post(QR_CREATE_TASK_PATH, {"key": key})
+        retcode = payload.get("retcode")
+        if retcode not in (None, 0, "0"):
+            raise QqProvisioningError(
+                f"QQ_{retcode}", str(payload.get("msg") or "create_bind_task failed")
+            )
+        task_id = _first_str(_mapping_of(payload.get("data")), ("task_id",))
+        if not task_id:
+            raise QqProvisioningError(
+                "QQ_NO_TASK", "create_bind_task did not return a task_id"
+            )
+        return task_id
+
+    async def _post(self, path: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        return await self._http_post(f"{self._api_base}{path}", payload)
+
+
+def _encode_state(*, task_id: str, key: str, refreshes: int) -> bytes:
+    return json.dumps({"task_id": task_id, "key": key, "refreshes": refreshes}).encode(
+        "utf-8"
+    )
+
+
+def _decode_state(state: bytes) -> tuple[str, str, int] | None:
+    """解出 `(task_id, key, refreshes)`；状态损坏返回 None（当次轮询按失败处理）。"""
+    try:
+        parsed = json.loads(state.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(parsed, Mapping):
+        return None
+    task_id = _first_str(parsed, ("task_id",))
+    key = _first_str(parsed, ("key",))
+    if not task_id or not key:
+        return None
+    refreshes = parsed.get("refreshes")
+    return task_id, key, refreshes if isinstance(refreshes, int) else 0
+
+
+def _mapping_of(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _bind_status(value: object) -> int | None:
+    """绑定任务状态：平台给的是数字，这里也接受数字字符串。
+
+    官方连接器只认数字（`=== 2`）。此处宽松是有意的：把 `"2"`（已扫上）当成未知状态
+    会让一次本该成功的接入失败，而多认一种写法不会带来错误结果。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return None
+
+
 register_adapter(QqBotAdapter)
+register_driver(QqProvisioningDriver)
 
 __all__ = [
     "ADAPTER_VERSION",
+    "AES_GCM_IV_BYTES",
+    "AES_GCM_KEY_BYTES",
+    "AES_GCM_TAG_BYTES",
+    "BIND_STATUS_COMPLETED",
+    "BIND_STATUS_EXPIRED",
+    "BIND_STATUS_NONE",
+    "BIND_STATUS_PENDING",
     "CONTEXT_RETENTION_SECONDS",
     "DEFAULT_CONNECT_TIMEOUT_SECONDS",
+    "DEFAULT_QR_SOURCE",
     "EVENT_C2C_MESSAGE_CREATE",
     "EVENT_GROUP_AT_MESSAGE_CREATE",
+    "MAX_QR_REFRESHES",
     "MAX_REPLY_SEGMENTS",
     "MAX_TEXT_LENGTH",
     "MAX_TRACKED_CONTEXTS",
+    "MSG_TYPE_MARKDOWN",
+    "MSG_TYPE_TEXT",
     "PASSIVE_REPLY_FALLBACK_RULE",
     "PASSIVE_REPLY_RULES",
+    "QR_CONNECT_PATH",
+    "QR_CREATE_TASK_PATH",
+    "QR_POLL_INTERVAL_MS",
+    "QR_POLL_TASK_PATH",
+    "QR_SERVICE_BASE",
+    "QR_TTL_SECONDS",
     "QqBotAdapter",
+    "QqProvisioningDriver",
+    "QqProvisioningError",
+    "QqTransientError",
     "QqTransport",
     "QqTransportError",
     "ReplyContext",
+    "build_connect_url",
     "build_native_transport",
+    "decrypt_bind_secret",
+    "generate_bind_key",
     "normalize_event",
     "outbound_target",
     "passive_reply_rule",

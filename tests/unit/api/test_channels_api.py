@@ -125,7 +125,9 @@ class Env:
         assert response.status_code == 201, response.text
         return response.json()
 
-    def register_router_instance(self, instance_id: str, *, agent_id: str | None) -> None:
+    def register_router_instance(
+        self, instance_id: str, *, agent_id: str | None
+    ) -> None:
         record = self.services.channel_repository.get_instance(instance_id)
         assert record is not None
         self.services.channel_router.register_instance(
@@ -196,8 +198,9 @@ def test_endpoints_require_bearer_auth(tmp_path, monkeypatch) -> None:
     assert env.client.get("/channels/instances").status_code == 401
     assert env.client.get("/channels/catalog").status_code == 401
     assert (
-        env.client.get("/channels/instances", headers={"Authorization": "Bearer nope"})
-        .status_code
+        env.client.get(
+            "/channels/instances", headers={"Authorization": "Bearer nope"}
+        ).status_code
         == 401
     )
 
@@ -223,6 +226,25 @@ def test_catalog_is_driven_by_the_adapter_declaration(tmp_path, monkeypatch) -> 
         False,
     ]
     assert items["wecom_bot"]["capabilities"]["max_text_length"] > 0
+
+    # QQ 同样支持扫码（官方 q.qq.com「lite 绑定任务」）；手填表单与能力都来自适配器声明
+    qq = items["qq_bot"]
+    assert qq["supports_provisioning"] is True
+    assert qq["config_fields"] == [
+        "app_id",
+        "sandbox",
+        "use_markdown",
+        "owner_user_openid",
+    ]
+    assert [field["name"] for field in qq["credential_fields"]] == [
+        "app_id",
+        "secret",
+        "use_markdown",
+        "sandbox",
+    ]
+    # 目录给的是**保守**能力（start() 之前的口径）：4 条上限要连上之后才由
+    # `_probe_capabilities` 声明，因此这里只断言"不能原地编辑"这一条声明
+    assert qq["capabilities"]["can_edit_message"] is False
 
 
 # ==============================================================================
@@ -274,9 +296,12 @@ def test_list_get_patch_delete_instance(tmp_path, monkeypatch) -> None:
 
     listed = env.client.get("/channels/instances", headers=AUTH).json()
     assert [item["id"] for item in listed] == [instance_id]
-    assert env.client.get(
-        "/channels/instances", params={"owner_ref": "nobody"}, headers=AUTH
-    ).json() == []
+    assert (
+        env.client.get(
+            "/channels/instances", params={"owner_ref": "nobody"}, headers=AUTH
+        ).json()
+        == []
+    )
 
     assert (
         env.client.get(f"/channels/instances/{instance_id}", headers=AUTH).status_code
@@ -303,7 +328,9 @@ def test_list_get_patch_delete_instance(tmp_path, monkeypatch) -> None:
     assert unbound["display_name"] == "研发助手"  # 未提供的字段保持不变
 
     assert (
-        env.client.delete(f"/channels/instances/{instance_id}", headers=AUTH).status_code
+        env.client.delete(
+            f"/channels/instances/{instance_id}", headers=AUTH
+        ).status_code
         == 204
     )
     assert (
@@ -357,7 +384,9 @@ def test_provision_begin_is_idempotent_for_same_owner(tmp_path, monkeypatch) -> 
     env = _build(tmp_path, monkeypatch)
     body = {"channel": "wecom_bot", "owner_ref": "team-a"}
     first = env.client.post("/channels/provision/begin", json=body, headers=AUTH).json()
-    second = env.client.post("/channels/provision/begin", json=body, headers=AUTH).json()
+    second = env.client.post(
+        "/channels/provision/begin", json=body, headers=AUTH
+    ).json()
     # 重复发起返回既有尝试，而不是报错（同一实例只允许一个进行中尝试）
     assert first["attempt_id"] == second["attempt_id"]
     assert first["qr_content"] == second["qr_content"]
@@ -395,7 +424,9 @@ def test_provision_failure_reports_error_code(tmp_path, monkeypatch) -> None:
     env = _build(
         tmp_path,
         monkeypatch,
-        outcome=ProvisioningOutcome(status="failed", error_code="CHANNEL_PROVISIONING_FAILED"),
+        outcome=ProvisioningOutcome(
+            status="failed", error_code="CHANNEL_PROVISIONING_FAILED"
+        ),
     )
     started = env.client.post(
         "/channels/provision/begin", json={"channel": "wecom_bot"}, headers=AUTH
@@ -470,7 +501,9 @@ def test_connectivity_test_sends_fixed_copy(tmp_path, monkeypatch) -> None:
     assert env.gateway.tests == [(instance["id"], "u1", cmd.CONNECTIVITY_TEST_TEXT)]
 
 
-def test_connectivity_test_surfaces_rejected_and_uncertain(tmp_path, monkeypatch) -> None:
+def test_connectivity_test_surfaces_rejected_and_uncertain(
+    tmp_path, monkeypatch
+) -> None:
     from witty_service.channels.contracts import DeliveryResult
 
     env = _build(tmp_path, monkeypatch)
@@ -602,14 +635,19 @@ async def test_access_policy_takes_effect_immediately(tmp_path, monkeypatch) -> 
         Route(instance_id, "direct", "u-denied"), timeout=2.0
     )
     assert env.adapter.texts == [cmd.ACCESS_DENIED_TEXT]
-    assert env.services.channel_router.queue_depth(
-        Route(instance_id, "direct", "u-denied")
-    ) == 0
+    assert (
+        env.services.channel_router.queue_depth(
+            Route(instance_id, "direct", "u-denied")
+        )
+        == 0
+    )
 
 
 def test_access_policy_missing_instance_is_404(tmp_path, monkeypatch) -> None:
     env = _build(tmp_path, monkeypatch)
     assert (
-        env.client.get("/channels/instances/nope/access-policy", headers=AUTH).status_code
+        env.client.get(
+            "/channels/instances/nope/access-policy", headers=AUTH
+        ).status_code
         == 404
     )
