@@ -40,6 +40,9 @@ class ProvisioningOutcome:
     #: 平台可能延长有效期或更换二维码
     qr_content: str | None = None
     expires_at: datetime | None = None
+    #: 平台换了会话时的新临时凭据（二维码过期后平台签发新任务，旧任务号随之作废）：
+    #: 驱动无状态，必须经这里交回编排层重写状态文件，否则新二维码扫出的结果会落在旧任务号上。
+    state: bytes | None = None
 
 
 @runtime_checkable

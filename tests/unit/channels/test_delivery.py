@@ -146,7 +146,11 @@ def test_oversized_code_fence_is_reopened_not_cut() -> None:
 
 
 def test_fences_stay_balanced_in_every_segment() -> None:
-    text = "前言。\n\n" + "\n".join([FENCE, *[f"code{i}" for i in range(30)], FENCE]) + "\n\n后记。"
+    text = (
+        "前言。\n\n"
+        + "\n".join([FENCE, *[f"code{i}" for i in range(30)], FENCE])
+        + "\n\n后记。"
+    )
     segments = split_text(text, max_length=80)
 
     for segment in segments:
@@ -194,6 +198,37 @@ def test_qq_caps_at_four_segments() -> None:
     assert result.actions[-1].is_console_notice is True
     assert all(not action.is_console_notice for action in result.actions[:-1])
     _assert_within_limit([action.text for action in result.actions], 4500)
+
+
+@pytest.mark.parametrize("reserved", [1, 2])
+def test_reserved_outbound_shrinks_the_segment_budget(reserved: int) -> None:
+    """占位消息、停滞提示要和分段共用同一条平台额度，因此必须先扣掉再分段。
+
+    不扣的话 4 段 + 1 条占位就是 5 条，第 5 条会被降级成需要用户授权的主动消息。
+    """
+    text = "\n\n".join(f"段落{i}。" + "内容" * 1500 for i in range(12))
+
+    result = plan(text, QQ, reserved=reserved)
+
+    assert len(result.actions) == 4 - reserved
+    assert result.truncated is True
+    assert result.actions[-1].text == CONSOLE_NOTICE_TEXT
+
+
+def test_reserved_at_the_limit_still_leaves_the_notice() -> None:
+    """预留把额度吃光时也要留一条提示，而不是发一堆没有下文的正文。"""
+    text = "\n\n".join(f"段落{i}。" + "内容" * 1500 for i in range(12))
+
+    result = plan(text, QQ, reserved=4)
+
+    assert [action.text for action in result.actions] == [CONSOLE_NOTICE_TEXT]
+
+
+def test_reserved_zero_keeps_the_previous_behaviour() -> None:
+    """默认值不改变既有行为：没有非终稿出站的调用方（含其余渠道）不受影响。"""
+    text = "\n\n".join(f"段落{i}。" + "内容" * 1500 for i in range(12))
+
+    assert plan(text, QQ).actions == plan(text, QQ, reserved=0).actions
 
 
 def test_unlimited_segments_are_not_truncated() -> None:
