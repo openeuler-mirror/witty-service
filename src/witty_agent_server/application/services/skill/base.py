@@ -9,12 +9,20 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from witty_agent_server.application.services.skill.errors import (
+    WITTYHUB_ERROR_BY_CODE,
     AgentSkillServiceError,
 )
 from witty_agent_server.application.services.skill.skill_client_port import (
     SkillClientPort,
 )
+from witty_agent_server.application.services.skill.wittyhub_errors import (
+    classify_wittyhub_failure,
+)
 from witty_service.config import get_settings
+
+# wittyhub add 涉及多次网络往返 + 下载 + 安装，冷启动/大仓库容易超 30s；
+# 上层 witty-service 的 HTTP 超时为 180s，此处取 120s 留有余量。
+WITTYHUB_COMMAND_TIMEOUT_SECONDS = 120
 
 
 class AgentSkillServiceBase(ABC):
@@ -148,6 +156,7 @@ class AgentSkillServiceBase(ABC):
         *,
         skill_name: str,
         error_cls: type[AgentSkillServiceError],
+        skill_source: str | None = None,
         timeout: int | None = None,
         raise_on_error: bool = True,
     ) -> subprocess.CompletedProcess | None:
@@ -155,6 +164,10 @@ class AgentSkillServiceBase(ABC):
 
         子类通过此方法调用 wittyhub，避免重复的 try/except 样板代码。
         ``raise_on_error=False`` 时，CalledProcessError 仅记录警告而不抛出。
+
+        CalledProcessError 时先尝试将 CLI 输出分类为结构化
+        ``WittyHub*Error``（可读 reason + raw_output）；未命中分类时沿用
+        调用方传入的 ``error_cls`` 兜底，reason 为清洗后的核心文案。
         """
         try:
             result = subprocess.run(
@@ -167,7 +180,11 @@ class AgentSkillServiceBase(ABC):
             )
             return result
         except subprocess.TimeoutExpired as exc:
-            reason = f"wittyhub command timed out: {exc}"
+            reason = (
+                f"wittyhub command timed out after {exc.timeout or timeout}s; "
+                "the skill source may be too large or the skill hub "
+                "service is slow."
+            )
             if not raise_on_error:
                 self._logger.warning(
                     "wittyhub command timed out, runtime_type=%s skill_name=%s",
@@ -189,17 +206,35 @@ class AgentSkillServiceBase(ABC):
         except subprocess.CalledProcessError as exc:
             stderr = (exc.stderr or "").strip()
             stdout = (exc.stdout or "").strip()
-            reason = stderr or stdout or f"wittyhub exited with code {exc.returncode}"
+            code, friendly_message, raw_output = classify_wittyhub_failure(
+                stdout=stdout,
+                stderr=stderr,
+                returncode=exc.returncode,
+                skill_name=skill_name,
+                skill_source=skill_source,
+            )
             if not raise_on_error:
                 self._logger.warning(
-                    "wittyhub command failed, runtime_type=%s skill_name=%s reason=%s",
+                    "wittyhub command failed, runtime_type=%s skill_name=%s "
+                    "reason=%s raw_output=%s",
                     self.runtime_type,
                     skill_name,
-                    reason,
+                    friendly_message,
+                    raw_output,
                 )
                 return None
+            # 分类码未注册映射时兜底 error_cls，避免错误处理路径抛 KeyError
+            error = WITTYHUB_ERROR_BY_CODE.get(code) if code else None
+            if error is not None:
+                raise error(
+                    runtime_type=self.runtime_type,
+                    skill_name=skill_name,
+                    skill_source=skill_source,
+                    reason=friendly_message,
+                    raw_output=raw_output or None,
+                ) from exc
             raise error_cls(
                 runtime_type=self.runtime_type,
                 skill_name=skill_name,
-                reason=reason,
+                reason=friendly_message,
             ) from exc

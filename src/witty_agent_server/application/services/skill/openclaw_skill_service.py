@@ -7,8 +7,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from witty_agent_server.application.services.skill.base import AgentSkillServiceBase
+from witty_agent_server.application.services.skill.base import (
+    WITTYHUB_COMMAND_TIMEOUT_SECONDS,
+    AgentSkillServiceBase,
+)
 from witty_agent_server.application.services.skill.errors import (
+    AgentSkillServiceError,
     OpenClawSkillNotRemovableError,
     OpenClawSkillsInstallError,
     OpenClawSkillsQueryError,
@@ -90,7 +94,9 @@ class OpenClawSkillService(AgentSkillServiceBase):
         runtime_source: str | None = None,
     ) -> Path:
         resolved = cls._normalize_delete_target(target)
-        allowed_bases = cls._build_allowed_delete_bases(agent_id, runtime_source=runtime_source)
+        allowed_bases = cls._build_allowed_delete_bases(
+            agent_id, runtime_source=runtime_source
+        )
         for base in allowed_bases:
             base_resolved = cls._normalize_delete_target(base)
             try:
@@ -122,7 +128,9 @@ class OpenClawSkillService(AgentSkillServiceBase):
             agent_id,
         )
         try:
-            skills_payload = self._require_skill_client().get_skills_status(agent_id=agent_id)
+            skills_payload = self._require_skill_client().get_skills_status(
+                agent_id=agent_id
+            )
         except OpenClawGatewayClientError as exc:
             logger.exception(
                 "list_skills openclaw rpc failed, runtime_type=%s agent_id=%s code=%s",
@@ -207,9 +215,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
         if agent_id:
             env = {
                 **os.environ,
-                "OPENCLAW_WORKSPACE_DIR": str(
-                    self._get_workspace_root(agent_id)
-                ),
+                "OPENCLAW_WORKSPACE_DIR": str(self._get_workspace_root(agent_id)),
             }
 
         try:
@@ -355,7 +361,8 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 cwd=workspace_root,
                 skill_name=normalized_name,
                 error_cls=OpenClawSkillsInstallError,
-                timeout=30,
+                skill_source=normalized_skill_source,
+                timeout=WITTYHUB_COMMAND_TIMEOUT_SECONDS,
             )
             logger.info(
                 (
@@ -380,7 +387,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
                     skill_name=normalized_name,
                 ),
             }
-        except OpenClawSkillsInstallError:
+        except AgentSkillServiceError:
             raise
         except Exception as exc:
             raise OpenClawSkillsInstallError(
@@ -403,7 +410,11 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 if item.get("name") != normalized_name:
                     continue
                 file_path = item.get("filePath")
-                return file_path.strip() if isinstance(file_path, str) and file_path.strip() else None
+                return (
+                    file_path.strip()
+                    if isinstance(file_path, str) and file_path.strip()
+                    else None
+                )
         except Exception:
             logger.warning(
                 "Failed to resolve installed skill path: runtime_type=%s agent_id=%s skill_name=%s",
@@ -412,7 +423,9 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 skill_name,
                 exc_info=True,
             )
-        expected_file = self._get_workspace_skills_dir(agent_id) / skill_name.strip() / "SKILL.md"
+        expected_file = (
+            self._get_workspace_skills_dir(agent_id) / skill_name.strip() / "SKILL.md"
+        )
         if expected_file.is_file():
             return str(expected_file)
         return None
@@ -530,6 +543,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 cwd=workspace_root,
                 skill_name=skill_name,
                 error_cls=OpenClawSkillsUninstallError,
+                timeout=WITTYHUB_COMMAND_TIMEOUT_SECONDS,
             )
             logger.info(
                 (
@@ -549,7 +563,7 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 "uninstalled": True,
                 "uninstall_channel": "wittyhub",
             }
-        except OpenClawSkillsUninstallError:
+        except AgentSkillServiceError:
             raise
         except Exception as exc:
             raise OpenClawSkillsUninstallError(
@@ -564,7 +578,10 @@ class OpenClawSkillService(AgentSkillServiceBase):
             result = subprocess.run(command, check=True, capture_output=True, text=True)
             logger.info(
                 "clawhub uninstall success, skill_name=%s command=%s stdout=%s stderr=%s",
-                skill_name, command, result.stdout.strip(), result.stderr.strip(),
+                skill_name,
+                command,
+                result.stdout.strip(),
+                result.stderr.strip(),
             )
         except FileNotFoundError as exc:
             raise OpenClawSkillsUninstallError(
@@ -588,7 +605,9 @@ class OpenClawSkillService(AgentSkillServiceBase):
                 reason=str(exc),
             ) from exc
 
-    def _uninstall_local_skill(self, skill_name: str, agent_id: str | None = None) -> dict[str, Any]:
+    def _uninstall_local_skill(
+        self, skill_name: str, agent_id: str | None = None
+    ) -> dict[str, Any]:
         skills_dir = self._get_workspace_skills_dir(agent_id)
         dst = skills_dir / skill_name
 
@@ -630,9 +649,18 @@ class OpenClawSkillService(AgentSkillServiceBase):
 
         resolved = cls._normalize_delete_target(source_path)
         candidates: tuple[tuple[str, list[Path]], ...] = (
-            ("openclaw-workspace", cls._build_allowed_delete_bases(agent_id, "openclaw-workspace")),
-            ("openclaw-extra", cls._build_allowed_delete_bases(agent_id, "openclaw-extra")),
-            ("agents-skills-personal", cls._build_allowed_delete_bases(agent_id, "agents-skills-personal")),
+            (
+                "openclaw-workspace",
+                cls._build_allowed_delete_bases(agent_id, "openclaw-workspace"),
+            ),
+            (
+                "openclaw-extra",
+                cls._build_allowed_delete_bases(agent_id, "openclaw-extra"),
+            ),
+            (
+                "agents-skills-personal",
+                cls._build_allowed_delete_bases(agent_id, "agents-skills-personal"),
+            ),
         )
         for source_name, bases in candidates:
             for base in bases:
