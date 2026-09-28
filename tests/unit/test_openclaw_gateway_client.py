@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-import logging
 from typing import Any
 
 import pytest
@@ -142,6 +141,30 @@ def test_collect_stream_events_skips_sessions_changed_without_runtime_session_id
     )
 
     assert events == []
+
+
+def test_get_skills_status_does_not_send_witty_agent_id_as_gateway_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """witty agent uuid 不是 gateway agent id，传下去会 INVALID_REQUEST（502）。"""
+    client = OpenClawGatewayClient(token="token")
+    captured: dict[str, Any] = {}
+
+    def fake_open_connection() -> DummyConnection:
+        return DummyConnection()
+
+    def fake_rpc(ws: Any, *, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        del ws
+        captured["method"] = method
+        captured["params"] = params
+        return {"skills": []}
+
+    monkeypatch.setattr(client, "_open_connection", fake_open_connection)
+    monkeypatch.setattr(client, "_rpc", fake_rpc)
+
+    client.get_skills_status(agent_id="f06bbc4e-aaa6-4bbe-95c7-8074539619a0")
+
+    assert captured == {"method": "skills.status", "params": {}}
 
 
 def test_stream_turn_subscribes_session_change_events(
