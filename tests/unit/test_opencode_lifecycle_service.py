@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 from pathlib import Path
 from typing import Any, ClassVar
@@ -20,6 +21,7 @@ from witty_agent_server.application.services.agent.opencode_lifecycle_service im
     OpenCodeLifecycleError,
     OpenCodeLifecycleService,
     OpenCodeServeStartError,
+    _build_opencode_model_config,
 )
 from witty_agent_server.infra.clients.opencode_client import OpenCodeClient
 
@@ -715,5 +717,401 @@ def test_setup_xdg_env_creates_directories(
     inst_root = tmp_path / "opencode-instances" / "agent-002"
     assert (inst_root / "data").is_dir()
     assert (inst_root / "state").is_dir()
-    assert (tmp_path / "agent-workspaces" / "agent-002" / "workspace").resolve().is_dir()
+    assert (
+        (tmp_path / "agent-workspaces" / "agent-002" / "workspace").resolve().is_dir()
+    )
     assert (inst_root / "cache").is_dir()
+
+
+# ---------------------------------------------------------------------------
+# 回归防护：控制面声明的模型必须抵抗上游 models.dev 目录翻转
+#
+# 2026-09-28 事故:上游把 deepseek-v4-flash 标为 deprecated,opencode 启动时
+# 把 config.provider.<id>.models 深合并进目录后 delete 该条目,使
+# "deepseek/deepseek-v4-flash" 无法解析(ProviderModelNotFoundError,对外
+# 表现为 HTTP 500 UnknownError),而 /global/health 依然 healthy,agent 状态
+# 一直是 RUNNING -- 即"进程健康但每次调用都失败"。
+# ---------------------------------------------------------------------------
+
+_FLIP_MODEL = "deepseek-v4-flash"
+
+
+def test_build_model_config_declares_status_active_for_custom_endpoint() -> None:
+    cfg = _build_opencode_model_config(
+        model_provider="deepseek",
+        model_name=_FLIP_MODEL,
+        api_key="sk-test",
+        api_base_url="https://api.deepseek.com",
+        compatibility="openai",
+    )
+
+    assert cfg is not None
+    assert cfg["model"] == f"deepseek/{_FLIP_MODEL}"
+    provider = cfg["provider"]["deepseek"]
+    assert provider["models"][_FLIP_MODEL] == {
+        "name": _FLIP_MODEL,
+        "status": "active",
+    }
+    assert provider["npm"] == "@ai-sdk/openai-compatible"
+    assert provider["options"]["baseURL"] == "https://api.deepseek.com"
+
+
+def test_build_model_config_declares_status_active_for_builtin_provider() -> None:
+    """无 api_base_url 的内置 provider 也必须声明 models 条目。
+
+    这是 2026-09-24 那版补丁漏掉的分支:它把 models 写在 if api_base_url 里,
+    内置 provider 完全不写,于是 100% 继承上游的 deprecated 状态。
+    """
+    cfg = _build_opencode_model_config(
+        model_provider="anthropic",
+        model_name="claude-sonnet-4",
+        api_key="sk-test",
+        api_base_url=None,
+    )
+
+    assert cfg is not None
+    provider = cfg["provider"]["anthropic"]
+    assert provider["models"]["claude-sonnet-4"] == {
+        "name": "claude-sonnet-4",
+        "status": "active",
+    }
+    # 内置 provider 不应被塞入 npm / baseURL(定义仍由 opencode 自带目录提供)
+    assert "npm" not in provider
+    assert "baseURL" not in provider.get("options", {})
+
+
+def _disk_config_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[OpenCodeLifecycleService, Path]:
+    """构造一个把 XDG 配置写到 tmp_path 的 lifecycle。"""
+    cfg_path = tmp_path / "opencode.json"
+    svc = OpenCodeLifecycleService(client=OpenCodeClient(), profile="agent-merge")
+    monkeypatch.setattr(svc, "_opencode_config_path", lambda: cfg_path)
+    return svc, cfg_path
+
+
+def test_merge_model_into_disk_config_preserves_other_providers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """整体替换 current["provider"] 会清掉文件里其它 provider 的声明。"""
+    svc, cfg_path = _disk_config_lifecycle(tmp_path, monkeypatch)
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "model": "kimi/kimi-k2.7-code",
+                "provider": {
+                    "kimi": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "models": {"kimi-k2.7-code": {"name": "kimi-k2.7-code"}},
+                    }
+                },
+                "mcp": {"foo": {"type": "local", "enabled": True}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    svc.configure_model(
+        model_provider="deepseek",
+        model_name=_FLIP_MODEL,
+        api_key="sk-test",
+        api_base_url="https://api.deepseek.com",
+    )
+
+    svc._merge_model_into_disk_config()
+
+    written = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert written["model"] == f"deepseek/{_FLIP_MODEL}"
+    assert set(written["provider"]) == {"kimi", "deepseek"}
+    assert written["provider"]["kimi"]["models"]["kimi-k2.7-code"] == {
+        "name": "kimi-k2.7-code"
+    }
+    assert written["mcp"] == {"foo": {"type": "local", "enabled": True}}
+
+
+def test_merge_model_into_disk_config_preserves_sibling_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同一 provider 下其它已声明的模型也必须保留。"""
+    svc, cfg_path = _disk_config_lifecycle(tmp_path, monkeypatch)
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "model": "deepseek/deepseek-v4-pro",
+                "provider": {
+                    "deepseek": {
+                        "models": {
+                            "deepseek-v4-pro": {
+                                "name": "deepseek-v4-pro",
+                                "status": "active",
+                            }
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    svc.configure_model(
+        model_provider="deepseek",
+        model_name=_FLIP_MODEL,
+        api_key="sk-test",
+        api_base_url="https://api.deepseek.com",
+    )
+
+    svc._merge_model_into_disk_config()
+
+    written = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert set(written["provider"]["deepseek"]["models"]) == {
+        "deepseek-v4-pro",
+        _FLIP_MODEL,
+    }
+    assert written["provider"]["deepseek"]["models"][_FLIP_MODEL]["status"] == "active"
+
+
+def test_merge_model_into_disk_config_preserves_sibling_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同一 provider 下 options 里的兄弟键不能被整体覆盖掉。"""
+    svc, cfg_path = _disk_config_lifecycle(tmp_path, monkeypatch)
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "model": "deepseek/deepseek-v4-pro",
+                "provider": {
+                    "deepseek": {
+                        "options": {
+                            "baseURL": "https://old.example.com",
+                            "timeout": 30000,
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    svc.configure_model(
+        model_provider="deepseek",
+        model_name=_FLIP_MODEL,
+        api_key="sk-test",
+        api_base_url="https://api.deepseek.com",
+    )
+
+    svc._merge_model_into_disk_config()
+
+    written = json.loads(cfg_path.read_text(encoding="utf-8"))
+    options = written["provider"]["deepseek"]["options"]
+    # 新值覆盖同名键
+    assert options["baseURL"] == "https://api.deepseek.com"
+    assert options["apiKey"] == "sk-test"
+    # 兄弟键必须保留
+    assert options["timeout"] == 30000
+
+
+# ---------------------------------------------------------------------------
+# 启动后 preflight：确定的目录不可解析必须变成启动失败,而不是假 RUNNING;
+# 探测接口本身不可用(无法得出结论)则告警放行。
+# ---------------------------------------------------------------------------
+
+
+def _catalog_handler(
+    models: dict[str, Any] | None,
+    *,
+    provider_id: str = "deepseek",
+    providers: list[Any] | None = None,
+):
+    """构造 /global/health + /provider 的 MockTransport handler。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/global/health":
+            return httpx.Response(200, json={"healthy": True})
+        if request.url.path == "/provider":
+            all_providers = (
+                providers
+                if providers is not None
+                else [{"id": provider_id, "models": models or {}}]
+            )
+            return httpx.Response(200, json={"all": all_providers})
+        return httpx.Response(404)
+
+    return handler
+
+
+def _startable_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Any,
+    *,
+    model_name: str | None = _FLIP_MODEL,
+    profile: str = "agent-preflight",
+) -> OpenCodeLifecycleService:
+    """构造一个 start_server 能跑到 preflight 的 lifecycle(进程/端口全假)。"""
+    mock_settings = MagicMock()
+    mock_settings.workspace.root_path.return_value = tmp_path
+    monkeypatch.setattr(
+        "witty_agent_server.application.services.agent."
+        "opencode_lifecycle_service.get_settings",
+        lambda: mock_settings,
+    )
+    # instance_config_home 走 workspace_paths.agent_workspace_path,同样要隔离
+    monkeypatch.setattr(
+        "witty_service.workspace_paths.get_settings", lambda: mock_settings
+    )
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: _StubProcess())
+    monkeypatch.setattr(
+        "witty_agent_server.application.services.agent."
+        "opencode_lifecycle_service.port_is_listening",
+        lambda p: True,
+    )
+
+    svc = _lifecycle_with_http_handler(handler, profile=profile)
+    if model_name is not None:
+        svc.configure_model(
+            model_provider="deepseek",
+            model_name=model_name,
+            api_key="sk-test",
+            api_base_url="https://api.deepseek.com",
+        )
+    return svc
+
+
+def test_start_server_raises_when_catalog_dropped_declared_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """复刻事故现场:目录里只剩 deepseek-flash / deepseek-v4-pro。"""
+    svc = _startable_lifecycle(
+        tmp_path,
+        monkeypatch,
+        _catalog_handler(
+            {
+                "deepseek-flash": {"id": "deepseek-flash", "status": "active"},
+                "deepseek-v4-pro": {"id": "deepseek-v4-pro", "status": "active"},
+            }
+        ),
+    )
+    stop_calls: list[bool] = []
+    monkeypatch.setattr(svc, "_stop_serve_process", lambda: stop_calls.append(True))
+
+    with pytest.raises(OpenCodeServeStartError) as exc:
+        svc.start_server()
+
+    assert f"deepseek/{_FLIP_MODEL}" in exc.value.message
+    # 报错必须可执行:给出目录里现存的候选模型
+    assert "deepseek-v4-pro" in exc.value.message
+    # 顶部 pre-cleanup + 失败 cleanup:坏进程必须被停掉,不能留成假 RUNNING
+    assert len(stop_calls) == 2
+
+
+def test_start_server_raises_when_declared_model_deprecated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    svc = _startable_lifecycle(
+        tmp_path,
+        monkeypatch,
+        _catalog_handler({_FLIP_MODEL: {"id": _FLIP_MODEL, "status": "deprecated"}}),
+    )
+
+    with pytest.raises(OpenCodeServeStartError) as exc:
+        svc.start_server()
+
+    assert "deprecated" in exc.value.message
+    assert f"deepseek/{_FLIP_MODEL}" in exc.value.message
+
+
+def test_start_server_raises_when_provider_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    svc = _startable_lifecycle(
+        tmp_path, monkeypatch, _catalog_handler({}, providers=[])
+    )
+
+    with pytest.raises(OpenCodeServeStartError) as exc:
+        svc.start_server()
+
+    assert "deepseek" in exc.value.message
+
+
+def test_start_server_retries_inconclusive_provider_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/provider 短暂 5xx 时应重试,不能把抖动当成模型缺失。"""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/global/health":
+            return httpx.Response(200, json={"healthy": True})
+        if calls.count("/provider") < 2:
+            return httpx.Response(500, text="catalog still building")
+        return httpx.Response(
+            200,
+            json={
+                "all": [
+                    {"id": "deepseek", "models": {_FLIP_MODEL: {"status": "active"}}}
+                ]
+            },
+        )
+
+    svc = _startable_lifecycle(tmp_path, monkeypatch, handler)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    svc.start_server()  # 不应抛
+
+    assert calls.count("/provider") == 2
+
+
+def test_start_server_proceeds_when_preflight_inconclusive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """/provider 持续不可用只是"无法得出结论",不能否掉已 healthy 的 serve。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/global/health":
+            return httpx.Response(200, json={"healthy": True})
+        return httpx.Response(500, text="boom")
+
+    svc = _startable_lifecycle(tmp_path, monkeypatch, handler)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    with caplog.at_level(logging.WARNING):
+        svc.start_server()  # 不应抛:不确定 ≠ 不可用
+
+    assert any("inconclusive" in record.message for record in caplog.records)
+    # 放行而非 cleanup:进程句柄仍在,说明没有被 _stop_serve_process 掐掉
+    assert svc._serve_process is not None
+
+
+def test_start_server_succeeds_when_declared_model_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    svc = _startable_lifecycle(
+        tmp_path,
+        monkeypatch,
+        _catalog_handler(
+            {
+                _FLIP_MODEL: {"id": _FLIP_MODEL, "status": "active"},
+                "deepseek-v4-pro": {"id": "deepseek-v4-pro", "status": "active"},
+            }
+        ),
+    )
+
+    svc.start_server()  # 不应抛:模型可解析时预检放行
+
+
+def test_start_server_skips_preflight_without_model_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/global/health":
+            return httpx.Response(200, json={"healthy": True})
+        return httpx.Response(500, text="must not be reached")
+
+    svc = _startable_lifecycle(tmp_path, monkeypatch, handler, model_name=None)
+
+    svc.start_server()  # 不应抛
+
+    assert "/provider" not in calls
