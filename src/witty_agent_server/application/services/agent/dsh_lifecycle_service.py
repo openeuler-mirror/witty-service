@@ -7,7 +7,11 @@ from pathlib import Path
 
 from deepseek_harness.errors import HarnessError
 
-from witty_agent_server.infra.clients.dsh_client import DshClient
+from witty_agent_server.infra.clients.dsh_client import (
+    DshClient,
+    DshClientError,
+    DshModelConfig,
+)
 from witty_service.config import get_settings
 from witty_service.workspace_paths import agent_workspace_path, validate_agent_id
 
@@ -44,16 +48,14 @@ class DshLifecycleService:
         self,
         *,
         agent_id: str | None = None,
-        provider: str | None = None,
-        model: str | None = None,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        max_tokens: int | None = None,
+        model_config: DshModelConfig | None = None,
     ) -> None:
-        """记录新配置；任一字段真实变更时由 client detach 旧 harness。
+        """记录新配置；任一配置真实变更时由 client detach 旧 harness。
 
         ``initialize`` 是实例级一次性握手，配置变更即需重建 harness——
         detach 语义即「若在运行则 stop，下次 start 用新配置」。
+        ``model_config`` 为 None 表示本次调用不触碰模型配置（仅同步
+        agent 身份/路径）；整组替换语义见 ``DshClient.apply_model_config``。
         """
         if agent_id:
             try:
@@ -70,15 +72,12 @@ class DshLifecycleService:
         paths = self._derive_instance_paths()
         workspace_dir = str(paths[0]) if paths else None
         dsh_home = str(paths[1]) if paths else None
-        self._client.update_config(
+        self._client.update_paths(
             workspace_dir=workspace_dir,
             dsh_home=dsh_home,
-            provider=provider,
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            max_tokens=max_tokens,
         )
+        if model_config is not None:
+            self._client.apply_model_config(model_config)
 
     def start_server(self) -> None:
         """启动 dsh harness：准备实例目录 → 清理僵尸 harness → ensure → start。"""
@@ -96,8 +95,8 @@ class DshLifecycleService:
                         f"agent={self._agent_id}: {exc}"
                     ),
                 ) from exc
-            # 幂等下推（值未变时 client 不 detach）
-            self._client.update_config(
+            # 幂等下推（值未变时 client 不 detach）；不触碰模型配置
+            self._client.update_paths(
                 workspace_dir=str(workspace_dir),
                 dsh_home=str(dsh_home),
             )
@@ -115,8 +114,10 @@ class DshLifecycleService:
         try:
             harness = self._client.ensure_harness()
             harness.start()
-        except (HarnessError, TimeoutError, OSError) as exc:
+        except (HarnessError, TimeoutError, OSError, DshClientError) as exc:
             # start 失败后 harness 状态未知，关闭丢弃，避免 probe 误判存活。
+            # DshClientError：settings 物化失败 / 路由缺 dsh_home 等配置错误，
+            # 一并转 DshLifecycleError，保证 agent 状态置 FAILED 且错误可映射。
             self._client.close_harness()
             raise DshLifecycleError(
                 action="start",

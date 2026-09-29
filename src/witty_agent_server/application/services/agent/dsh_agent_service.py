@@ -13,7 +13,7 @@ from witty_agent_server.application.services.agent.dsh_lifecycle_service import 
     DshLifecycleService,
 )
 from witty_agent_server.application.services.agent.errors import AgentServiceError
-from witty_agent_server.infra.clients.dsh_client import DshClient
+from witty_agent_server.infra.clients.dsh_client import DshClient, DshModelConfig
 from witty_agent_server.runtimes.runtime_base import RuntimeType
 
 logger = logging.getLogger(__name__)
@@ -133,21 +133,30 @@ class DshAgentService(AgentServiceBase):
         return self.agent
 
     def _apply_config(self, config: dict[str, Any] | None, *, agent_id: str) -> None:
-        """从 ``config["dsh"]`` 提取模型配置下推 lifecycle。
+        """从 ``config["dsh"]`` 整组提取模型配置下推 lifecycle。
 
         workspace 路径由 lifecycle 按 agent_id 推导，故 agent_id 始终下推
         （即 workspace_key，dsh 下恒等于外层 agent uuid；无 dsh 配置时也
         保证实例目录隔离）；agent_id 校验失败即抛错不落库。
+
+        模型配置成组构造（None 一并下发，整组替换）：杜绝「仅转发非 None
+        值」导致的半更新——上一模型的残留凭据/路由不会被沿用。
         """
         dsh_cfg = config.get("dsh") if isinstance(config, dict) else None
-        kwargs: dict[str, Any] = {"agent_id": agent_id}
+        model_config: DshModelConfig | None = None
         if isinstance(dsh_cfg, dict):
-            for key in ("provider", "model", "api_key", "base_url", "max_tokens"):
-                val = dsh_cfg.get(key)
-                if val is not None:
-                    kwargs[key] = val
+            model_config = DshModelConfig(
+                provider=dsh_cfg.get("provider"),
+                model=dsh_cfg.get("model"),
+                api_key=dsh_cfg.get("api_key"),
+                base_url=dsh_cfg.get("base_url"),
+                max_tokens=dsh_cfg.get("max_tokens"),
+                provider_route=dsh_cfg.get("provider_route"),
+            )
         try:
-            self._lifecycle_service.update_config(**kwargs)
+            self._lifecycle_service.update_config(
+                agent_id=agent_id, model_config=model_config
+            )
         except DshLifecycleError as exc:
             raise AgentServiceError(
                 code="DSH_AGENT_CONFIG_INVALID",

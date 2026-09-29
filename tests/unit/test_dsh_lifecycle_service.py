@@ -21,7 +21,7 @@ from witty_agent_server.application.services.agent.dsh_lifecycle_service import 
 )
 from witty_agent_server.application.services.agent.errors import AgentServiceError
 from witty_agent_server.infra.clients import dsh_client as dsh_client_module
-from witty_agent_server.infra.clients.dsh_client import DshClient
+from witty_agent_server.infra.clients.dsh_client import DshClient, DshModelConfig
 
 # ---------------------------------------------------------------------------
 # fake harness（配合真实 DshClient：monkeypatch DeepSeekHarness 构造函数）
@@ -114,14 +114,16 @@ def test_update_config_derives_instance_paths_and_pushes_to_client(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     svc, client = _make_lifecycle(monkeypatch, tmp_path, agent_id=None)
-    svc.update_config(agent_id="a1", model="deepseek-x", max_tokens=4096)
+    svc.update_config(
+        agent_id="a1", model_config=DshModelConfig(model="deepseek-x", max_tokens=4096)
+    )
 
     assert client._workspace_dir == str(
         (tmp_path / "agent-workspaces" / "a1" / "workspace").resolve()
     )
     assert client._dsh_home == str(tmp_path / "dsh-instances" / "a1")
-    assert client._model == "deepseek-x"
-    assert client._max_tokens == 4096
+    assert client._model_config.model == "deepseek-x"
+    assert client._model_config.max_tokens == 4096
 
 
 @pytest.mark.parametrize(
@@ -168,13 +170,16 @@ def test_update_config_switch_agent_resets_model_credentials(
 ) -> None:
     """切换 agent 时复位模型配置：上一 agent 的 api_key/model 不得沿用。"""
     svc, client = _make_lifecycle(monkeypatch, tmp_path, harness=None)
-    svc.update_config(agent_id="a1", model="deepseek-x", api_key="sk-1")
-    assert client._api_key == "sk-1"
+    svc.update_config(
+        agent_id="a1",
+        model_config=DshModelConfig(model="deepseek-x", api_key="sk-1"),
+    )
+    assert client._model_config.api_key == "sk-1"
 
     svc.update_config(agent_id="a2")
 
-    assert client._api_key is None
-    assert client._model == "deepseek-v4-flash"
+    assert client._model_config.api_key is None
+    assert client._model_config.model == "deepseek-v4-flash"
     assert client._workspace_dir == str(
         (tmp_path / "agent-workspaces" / "a2" / "workspace").resolve()
     )
@@ -184,15 +189,72 @@ def test_update_config_with_unchanged_values_keeps_harness(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     svc, client = _make_lifecycle(monkeypatch, tmp_path)
-    svc.update_config(agent_id="a1", model="m")
+    svc.update_config(agent_id="a1", model_config=DshModelConfig(model="m"))
     harness = client.ensure_harness()
     harness.start()
 
-    svc.update_config(agent_id="a1", model="m")  # 幂等重放
+    svc.update_config(agent_id="a1", model_config=DshModelConfig(model="m"))  # 幂等重放
 
     assert harness.close_calls == 0
     assert client.harness is harness
     assert svc.probe_running() is True
+
+
+def test_update_config_passes_provider_route_to_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """provider_route 经 lifecycle 透传到 client（pi-ai 物化参数）。"""
+    svc, client = _make_lifecycle(monkeypatch, tmp_path, harness=None)
+    route = {
+        "api_key_env": "WITTY_DSH_PROVIDER_API_KEY",
+        "api": "openai-completions",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    }
+
+    svc.update_config(
+        agent_id="a1",
+        model_config=DshModelConfig(
+            provider="glm",
+            model="glm-5.2",
+            api_key="sk-1",
+            provider_route=route,
+        ),
+    )
+
+    assert client._model_config.provider_route == route
+    assert client._model_config.provider == "glm"
+
+
+def test_update_config_without_model_config_keeps_current_route(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """lifecycle 未传 model_config 时不得触碰模型配置（start_server 幂等路径）。"""
+    svc, client = _make_lifecycle(monkeypatch, tmp_path, harness=None)
+    route = {"api_key_env": "WITTY_DSH_PROVIDER_API_KEY"}
+    svc.update_config(
+        agent_id="a1", model_config=DshModelConfig(provider="glm", provider_route=route)
+    )
+
+    svc.update_config(agent_id="a1")  # 仅同步路径/身份，不带模型配置
+
+    assert client._model_config.provider_route == route
+
+
+def test_update_config_model_config_none_route_clears(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """model_config 整组替换：provider_route=None 即清除（切回 deepseek 原生路径）。"""
+    svc, client = _make_lifecycle(monkeypatch, tmp_path, harness=None)
+    svc.update_config(
+        agent_id="a1",
+        model_config=DshModelConfig(provider="glm", provider_route={"api_key_env": "E"}),
+    )
+
+    svc.update_config(
+        agent_id="a1", model_config=DshModelConfig(provider="deepseek-official")
+    )
+
+    assert client._model_config.provider_route is None
 
 
 def test_start_server_creates_dirs_and_starts_harness(
@@ -237,6 +299,36 @@ def test_start_server_dir_creation_failure_raises(
     assert exc.value.action == "start"
     assert "failed to create dsh instance dirs" in exc.value.message
     assert client.harness is None
+
+
+def test_start_server_dsh_client_error_converts_to_lifecycle_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """settings 物化失败（DshClientError）转 DshLifecycleError：
+    agent 状态可置 FAILED、错误可映射，不直冒 HTTP 层。"""
+    svc, client = _make_lifecycle(monkeypatch, tmp_path, harness=None)
+    svc.update_config(
+        agent_id="a1",
+        model_config=DshModelConfig(
+            provider="openai",
+            model="gpt-4o-mini",
+            provider_route={"api_key_env": "WITTY_DSH_PROVIDER_API_KEY"},
+        ),
+    )
+    # settings.yaml 位置被目录占位 → 物化写失败 → DshClientError
+    settings_path = (
+        tmp_path / "dsh-instances" / "a1" / "settings.yaml"
+    )
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.mkdir()
+
+    with pytest.raises(DshLifecycleError) as exc:
+        svc.start_server()
+
+    assert exc.value.action == "start"
+    assert "dsh harness start failed" in exc.value.message
+    assert client.harness is None
+    assert svc.probe_running() is False
 
 
 def test_start_server_without_agent_id_starts_harness(
@@ -423,9 +515,9 @@ def test_agent_service_start_applies_dsh_config_to_lifecycle() -> None:
     assert svc.update_calls == [
         {
             "agent_id": "agent-cfg",
-            "model": "deepseek-x",
-            "api_key": "sk-1",
-            "max_tokens": 8192,
+            "model_config": DshModelConfig(
+                model="deepseek-x", api_key="sk-1", max_tokens=8192
+            ),
         }
     ]
 
@@ -443,7 +535,10 @@ def test_agent_service_start_sanitizes_api_key_from_config() -> None:
 
     assert service.agent.config == {"dsh": {"model": "deepseek-x"}}
     assert svc.update_calls == [
-        {"agent_id": "agent-sec", "model": "deepseek-x", "api_key": "sk-secret"}
+        {
+            "agent_id": "agent-sec",
+            "model_config": DshModelConfig(model="deepseek-x", api_key="sk-secret"),
+        }
     ]
 
 
@@ -473,7 +568,7 @@ def test_agent_service_start_without_config_still_pushes_agent_id() -> None:
 
     service.start(reload=False)  # agent_id 缺省 → "main"
 
-    assert svc.update_calls == [{"agent_id": "main"}]
+    assert svc.update_calls == [{"agent_id": "main", "model_config": None}]
 
 
 def test_agent_service_start_warns_when_missing_workspace_key_without_agent_id(
@@ -487,7 +582,12 @@ def test_agent_service_start_warns_when_missing_workspace_key_without_agent_id(
     with caplog.at_level(logging.WARNING, logger=dsh_agent_service_module.__name__):
         service.start(config={"dsh": {"model": "deepseek-x"}}, reload=False)
 
-    assert svc.update_calls == [{"agent_id": "main", "model": "deepseek-x"}]
+    assert svc.update_calls == [
+        {
+            "agent_id": "main",
+            "model_config": DshModelConfig(model="deepseek-x"),
+        }
+    ]
     assert any(
         "without explicit agent_id or config['dsh']['workspace_key']" in rec.message
         for rec in caplog.records
@@ -515,7 +615,10 @@ def test_agent_service_start_uses_config_workspace_key_for_lifecycle_workspace()
     )
 
     assert svc.update_calls == [
-        {"agent_id": "agent-uuid", "model": "deepseek-x", "api_key": "sk-1"}
+        {
+            "agent_id": "agent-uuid",
+            "model_config": DshModelConfig(model="deepseek-x", api_key="sk-1"),
+        }
     ]
     # 会话侧身份保持 main，list_agents / ws 路径不被破坏。
     assert service.agent.id == "main"
@@ -539,7 +642,9 @@ def test_agent_service_start_explicit_agent_id_keeps_workspace_from_config_key()
         reload=False,
     )
 
-    assert svc.update_calls == [{"agent_id": "agent-uuid"}]
+    assert svc.update_calls == [
+        {"agent_id": "agent-uuid", "model_config": DshModelConfig()}
+    ]
     assert service.agent.id == "agent-explicit"
 
 

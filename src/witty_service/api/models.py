@@ -10,6 +10,7 @@ from witty_service.api.schemas import (
 )
 from witty_service.api.services import ServiceContainer
 from witty_service.application.backport_service import BackportService
+from witty_service.application.runtime_config import DEFAULT_API_BASE_URLS
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import ModelRecord
 
@@ -22,20 +23,6 @@ MODEL_NOT_FOUND = "MODEL_NOT_FOUND"
 
 def get_services(request: Request) -> ServiceContainer:
     return request.app.state.services
-
-
-DEFAULT_API_BASE_URLS = {
-    "openai": "https://api.openai.com/v1",
-    "anthropic": "https://api.anthropic.com/v1",
-    "google": "https://generativelanguage.googleapis.com/v1beta",
-    "ollama": "http://localhost:11434/v1",
-    "azure": "https://{resource}.openai.azure.com",
-    "deepseek": "https://api.deepseek.com/v1",
-    "glm": "https://open.bigmodel.cn/api/paas/v4",
-    "minimax": "https://api.minimax.com/v1",
-    "kimi": "https://api.moonshot.cn/v1",
-    "custom": "",  # 用户自定义，需通过 api_base_url 指定
-}
 
 
 @router.post("", response_model=ModelResponse, status_code=status.HTTP_201_CREATED)
