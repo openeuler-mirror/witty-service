@@ -654,6 +654,7 @@ class AgentManager:
                 raise DomainError(
                     code=AGENT_SKILL_INSTALL_FAILED,
                     message="Failed to install skill on runtime.",
+                    status_code=self._runtime_skill_error_status_code(exc),
                     details=details,
                 ) from exc
         finally:
@@ -706,6 +707,7 @@ class AgentManager:
                 raise DomainError(
                     code=AGENT_SKILL_UNINSTALL_FAILED,
                     message="Failed to uninstall skill on runtime.",
+                    status_code=self._runtime_skill_error_status_code(exc),
                     details=details,
                 ) from exc
         finally:
@@ -2764,6 +2766,27 @@ class AgentManager:
     @staticmethod
     def _error_message(exc: Exception) -> str:
         return exc.message if isinstance(exc, DomainError) else str(exc)
+
+    @staticmethod
+    def _runtime_skill_error_status_code(exc: httpx.HTTPError) -> int:
+        """把 runtime 侧的失败映射为网关对外的状态码。
+
+        技能安装/卸载失败此前统一落到 DomainError 的默认 400，把上游
+        agent-server 已经分好类的语义（技能不存在 404 / source 非法 400 /
+        hub 故障 502）全部抹平成"调用方请求有误"。这里按上游语义还原：
+
+        * 上游 4xx 原样透传 —— 这些分类对调用方有意义（如 SKILL_NOT_FOUND 404）；
+        * 上游 5xx 与连接层失败统一 502（坏上游，而非坏请求）；
+        * 超时单独给 504，便于前端与告警区分"慢"和"错"。
+        """
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code
+            if 400 <= status_code < 500:
+                return status_code
+            return 502
+        if isinstance(exc, httpx.TimeoutException):
+            return 504
+        return 502
 
     @staticmethod
     def _build_runtime_skill_error_details(
