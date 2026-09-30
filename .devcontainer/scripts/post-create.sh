@@ -72,7 +72,9 @@ fi
 
 # 6. Install Python dependencies via uv.
 #    uv.lock bakes Aliyun mirror URLs, so no additional registry config is needed.
-#    Run directly as root (lifecycle commands default) — faster and avoids /root traversal issues.
+#    The venv lives at $UV_PROJECT_ENVIRONMENT (/home/vscode/.venv, inside the witty-home
+#    volume) and is pre-created by the image with vscode ownership — so uv sync needs no
+#    privileged ownership fix here.
 #    NOTE: uv.lock is a git-tracked, bind-mounted file — never delete or regenerate it here,
 #    otherwise transient failures would silently leak unrelated dependency upgrades into commits.
 echo "[...] Installing Python dependencies with uv..."
@@ -83,20 +85,17 @@ if ! uv sync --extra dev 2>/dev/null; then
     echo "  Run manually: uv sync --extra dev"
   }
 fi
-# Ensure vscode user owns .venv for subsequent operations from the terminal
-chown -R vscode:vscode .venv 2>/dev/null || true
 echo "[ok] Python dependencies installed"
 
 # 7. Ensure runtime directories exist (used by witty-service for DB, logs, etc.).
-#    The witty-home volume is at /home/vscode — create dirs and fix ownership.
+#    /home/vscode is owned by the dev user, so mkdir alone yields correct ownership.
 echo "[...] Creating runtime directories..."
 mkdir -p /home/vscode/.witty/db /home/vscode/.witty/logs
-chown -R vscode:vscode /home/vscode/.witty
 echo "[ok] Runtime directories ready"
 
 # 8. Initialize the database with Alembic migrations.
-#    Use absolute DATABASE_URL (sqlite://// = 4 slashes = absolute path) to avoid
-#    ~ expansion ambiguity since this script runs as root.
+#    Use an absolute DATABASE_URL (sqlite://// = 4 slashes = absolute path) so the DB always
+#    lands in the witty-home volume, independent of the shell's working directory.
 echo "[...] Running Alembic migrations..."
 WITTY_DATABASE_URL="sqlite:////home/vscode/.witty/db/witty_service.sqlite3" \
     uv run alembic upgrade head 2>/dev/null || {
@@ -104,19 +103,32 @@ WITTY_DATABASE_URL="sqlite:////home/vscode/.witty/db/witty_service.sqlite3" \
 }
 echo "[ok] Database initialized"
 
-# 9. Git safe.directory for the workspace (both root and vscode).
-git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
-runuser -u vscode -- git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+# 9. Mark the bind-mounted workspace as a safe.directory for the current dev user.
+git config --global --add safe.directory "$(pwd)"
 
-# 10. Print toolchain versions for parity check with CI/Dockerfile.
+# 10. Enable the repo's tracked Git hooks.
+#     This script runs as the dev user (remoteUser), so --global targets ~/.gitconfig directly.
+echo "[...] Enabling repo-tracked Git hooks..."
+if ! command -v pre-commit >/dev/null 2>&1; then
+  echo "[warn] pre-commit missing (unreachable PyPI mirror during image build?) — installing..."
+  sudo pip install --no-cache-dir pre-commit 2>/dev/null || \
+    echo "[ERROR] pre-commit install failed — commits in this container will skip checks"
+fi
+if command -v pre-commit >/dev/null 2>&1; then
+  git config --global core.hooksPath .githooks
+  echo "[ok] core.hooksPath=.githooks ($(pre-commit --version) at $(command -v pre-commit))"
+fi
+
+# 11. Print toolchain versions for parity check with CI/Dockerfile.
 echo "--- Toolchain versions ---"
 echo "Python:  $(python --version)"
 echo "Node:    $(node --version)"
 echo "npm:     $(npm --version)"
 echo "uv:      $(uv --version)"
 echo "openclaw: $(openclaw --version 2>&1 | head -1 || echo 'not found')"
+echo "pre-commit: $(pre-commit --version 2>/dev/null || echo 'not found')"
 
-# 11. Docker availability check.
+# 12. Docker availability check.
 if docker info &>/dev/null; then
   echo "Docker:  available ($(docker info --format '{{.ServerVersion}}' 2>/dev/null || echo 'unknown'))"
 else
@@ -124,7 +136,7 @@ else
   echo "  Make sure the Docker daemon is running on the host."
 fi
 
-# 12. Agent image status (do not auto-build — it takes too long).
+# 13. Agent image status (do not auto-build — it takes too long).
 echo ""
 echo "--- Agent image status ---"
 for tag in openclaw opencode; do

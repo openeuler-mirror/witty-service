@@ -39,10 +39,12 @@ else
   echo ".env: MISSING — copy .env.example to .env"
 fi
 
-if [ -d .venv ]; then
-  echo ".venv: present"
+# The venv lives in the witty-home volume (image-level UV_PROJECT_ENVIRONMENT), not in the workspace.
+VENV_DIR="${UV_PROJECT_ENVIRONMENT:-/home/vscode/.venv}"
+if [ -d "$VENV_DIR" ]; then
+  echo "venv:    present ($VENV_DIR)"
 else
-  echo ".venv: missing — run post-create setup or 'uv sync --extra dev'"
+  echo "venv:    missing ($VENV_DIR) — run post-create setup or 'uv sync --extra dev'"
 fi
 
 if [ -d agent-workspaces ]; then

@@ -21,14 +21,15 @@ code .
 # 3. 点击右下角提示或按 F1 → "Dev Containers: Reopen in Container"
 ```
 
-容器首次构建约需 2-3 分钟（后续启动使用缓存，秒级完成）。`onCreateCommand` 自动完成：
+容器首次构建约需 2-3 分钟（后续启动使用缓存，秒级完成；首次构建耗时主要取决于能否拉取到基础镜像和镜像源的连通性）。`postCreateCommand` 自动完成：
 
 - 修复工作区文件权限（Linux 宿主机 bind-mount 场景）
 - 创建 `agent-workspaces/` 并设置权限（对齐 agent 容器的 `witty` 用户 uid 1000）
 - 基于 `.env.example` 模板创建 `.env` 配置文件
 - 执行 `uv sync --extra dev` 安装 Python 依赖
 - 执行 `alembic upgrade head` 初始化 SQLite 数据库
-- 显示 Python/Node/uv/Docker 版本信息
+- 启用仓库自带的 Git 提交钩子（容器内 `core.hooksPath=.githooks`，见下节）
+- 显示 Python/Node/uv/pre-commit/Docker 版本信息
 
 启动开发服务器：
 
@@ -43,12 +44,25 @@ uv run uvicorn witty_service.main:create_app --factory --host 0.0.0.0 --port 800
 | 工具 | 版本 | 说明 |
 |------|------|------|
 | Python | 3.11 | 对齐 mypy/Dockerfile/CI 目标版本 |
-| Node.js | 24 | npm + npx，对齐生产 Dockerfile |
+| Node.js | 22 | npm + npx，对齐生产 Dockerfile 基础镜像（`node:22.23.3-slim`） |
 | uv | 0.8.8 | Python 包管理器 |
-| openclaw | 2026.7.1-2 | Agent 运行时 CLI |
+| openclaw | 2026.6.5 | Agent 运行时 CLI（对齐生产 Dockerfile `OPENCLAW_VERSION`） |
 | opencode-ai | 1.17.20 | OpenCode 运行时 CLI |
 | wittyhub | latest | Skill 管理工具 |
 | Docker CLI | - | 用于构建 agent 镜像和调试容器 |
+| pre-commit | 4.x | 构建期预装，驱动仓库自带的 `.githooks/` 提交钩子 |
+
+## Git 提交钩子（pre-commit）
+
+容器内**不执行** `pre-commit install`：那会把 hook 写进 bind-mount 进容器的宿主机 `.git/hooks`，并把容器内的解释器路径写进宿主机仓库。改用以下机制：
+
+- **构建期**由 [Dockerfile](Dockerfile) 预装 `pre-commit` 到系统路径
+- **post-create** 在容器内设置全局 `core.hooksPath=.githooks`（落在 `witty-home` 卷的 `~/.gitconfig`，不写宿主机工作区）
+- **钩子脚本**用仓库 tracked 的 [.githooks/pre-commit](../.githooks/pre-commit) 与 [.githooks/commit-msg](../.githooks/commit-msg)，分别执行 `pre-commit run` 和 `pre-commit run --hook-stage commit-msg`（gitlint 校验提交信息）
+
+效果：容器内 `git commit` 自动检查暂存文件，检查项与宿主机同源（同一份 [.pre-commit-config.yaml](../.pre-commit-config.yaml)）；宿主机 `.git/hooks` 不会被容器改写——`core.hooksPath` 设置后 pre-commit 会主动拒绝 `install`，容器内误执行也改不动 `.git`。
+
+宿主机侧的钩子安装方式不变，见 [主 README](../README.md)。
 
 ## 端口说明
 
@@ -61,6 +75,19 @@ uv run uvicorn witty_service.main:create_app --factory --host 0.0.0.0 --port 800
 
 > **注意**：容器使用 `--network host`，所有端口直接出现在宿主机上，无需端口转发。
 
+## 与前端（PolyMind）联调
+
+本 devcontainer 只跑后端。前端 PolyMind 在 `/root/polymind` 有独立的 devcontainer，两者都使用 `--network host`，因此**各开各的容器**即可通过 `127.0.0.1` 直接联调，无需端口转发或额外网络配置：
+
+| 侧 | 目录 | 启动命令 | 端口 |
+|------|------|----------|------|
+| 后端 | `/root/witty-service` | `uv run uvicorn witty_service.main:create_app --factory --host 0.0.0.0 --port 8000 --reload` | 8000 |
+| 前端 | `/root/polymind` | `pnpm dev` | 3000 |
+
+前端 `polymind/.env` 默认指向本服务：`NEXT_PUBLIC_AGENTD_API_URL=http://127.0.0.1:8000`。本服务已放开 CORS（`allow_origins=["*"]`），浏览器从 `localhost:3000` 跨域访问 `127.0.0.1:8000` 可直接连通。
+
+> 后端务必以 `--host 0.0.0.0` 监听，否则仅绑定回环地址，前端容器将无法访问。
+
 ## 环境变量
 
 容器通过两层机制提供环境变量：
@@ -72,14 +99,19 @@ uv run uvicorn witty_service.main:create_app --factory --host 0.0.0.0 --port 800
 
 ## 缓存策略
 
-项目使用两个命名卷加速重建：
+项目使用一个命名卷加速重建：
 
 | 卷 | 挂载点 | 内容 |
 |------|------|------|
-| `witty-venv` | `.venv/` | Python 虚拟环境和所有依赖 |
-| `witty-home` | `/home/vscode/` | uv 缓存、npm 缓存、`.witty/`（SQLite DB + logs）、`.openclaw/`、`.opencode/` |
+| `witty-home` | `/home/vscode/` | Python venv（`.venv/`）、uv 缓存、npm 缓存、`.witty/`（SQLite DB + logs）、`.openclaw/`、`.opencode/` |
 
-这两个卷在容器重建后仍然保留，使 `uv sync` 几乎瞬时完成。
+该卷在容器重建后仍然保留，使 `uv sync` 几乎瞬时完成。
+
+venv 刻意放在 `/home/vscode/.venv`（由镜像通过 `UV_PROJECT_ENVIRONMENT` 指定），**不放在工作区**：
+命名卷首次挂载时属主继承自"挂载目标在工作镜像中的内容"，`/home/vscode` 属于 vscode 用户，
+而工作区路径只由 bind mount / 宿主机决定。若把 venv 卷挂到 `<工作区>/.venv`，新建卷会变成 `root:root`，
+非 root 的 lifecycle 脚本无法写入（`uv` 会报 `.venv/CACHEDIR.TAG: Permission denied`），
+只能靠 `sudo chown` 补救。
 
 ## Agent 镜像构建
 
@@ -150,24 +182,64 @@ ls -la /var/run/docker-host/docker.sock
 ### uv sync 失败
 
 ```bash
-# 清理 venv 卷后重建
-docker volume rm witty-venv witty-home
-# 然后在 VS Code 中 Rebuild Container
+echo "$UV_PROJECT_ENVIRONMENT"   # 期望：/home/vscode/.venv（witty-home 卷内）
+uv sync --extra dev              # 手动重跑，查看完整报错（post-create 会静默失败的细节）
 ```
+
+若报 `Permission denied`，说明该卷被外部因素改成了 root 所有（正常流程不会发生），
+按缓存策略一节取回属主即可。
+
+### 容器内提交未触发检查
+
+```bash
+# 确认 pre-commit 可用、hooksPath 指向仓库自带的 .githooks
+command -v pre-commit && pre-commit --version
+git config --show-origin core.hooksPath   # 期望：file:/home/vscode/.gitconfig  .githooks
+ls -l .githooks/                          # 需有可执行的 pre-commit 与 commit-msg
+
+# 配置被覆盖（如手动替换了 ~/.gitconfig）时重设
+git config --global core.hooksPath .githooks
+# 或重跑初始化脚本
+bash .devcontainer/scripts/post-create.sh
+```
+
+> 若 `pre-commit` 缺失（镜像构建时 PyPI 源不可达），post-create 会以 `sudo pip install` 补装（与镜像内的
+> 安装方式一致）；仍失败可手动执行 `sudo pip install --no-cache-dir pre-commit` 后重设 `core.hooksPath`。
 
 ### 国内网络加速
 
-此 devcontainer 默认使用国内镜像源：
+此 devcontainer 默认使用国内镜像源，并针对国内网络常见的**下载慢、连接中断**做了重试/超时配置：
 
-- **npm**：`https://registry.npmmirror.com`
-- **PyPI**：`https://mirrors.aliyun.com/pypi/simple/`（uv.lock 已内置）
+| 层 | 镜像源 | 说明 |
+|------|--------|------|
+| **apt** | `http://mirrors.aliyun.com` | 替代默认 `deb.debian.org`（默认源在国内慢且易断流）。用 http 是因为 slim 基础镜像没有 CA 证书，https 会在安装 `ca-certificates` 前握手失败；apt 包有 GPG 签名校验，http 不降低完整性 |
+| **PyPI** | `https://mirrors.aliyun.com/pypi/simple/` | 已写入 `uv.lock` 与 `pyproject.toml [tool.uv]`，`pip` 侧由 `PIP_INDEX_URL` 覆盖 |
+| **npm** | `https://registry.npmmirror.com` | 写入全局 npmrc，容器内所有用户、后续 `npm install` 均生效 |
 
-如需切换，修改 `devcontainer.json` 中的 `NPM_REGISTRY` build arg。
+断连相关的韧性配置：
+
+- **apt**：`apt-get` 默认自带重试
+- **pip**：`PIP_DEFAULT_TIMEOUT=120`、`PIP_RETRIES=5`
+- **npm**：`fetch-retries=5`、`fetch-retry-maxtimeout=120000`、`fetch-timeout=300000`（写入全局 npmrc）
+- **uv**：`UV_HTTP_TIMEOUT=120`、`UV_CONCURRENT_DOWNLOADS=16`（降低并发，减少断流）
+
+如需切换镜像源，修改 `devcontainer.json` 中对应的 build args（`APT_MIRROR` / `NPM_REGISTRY`）。
+
+### 基础镜像拉取慢或被墙
+
+首次构建会从 Docker Hub 拉取 `python:3.11-slim` 和 `node:22.23.3-slim`，这是**最慢、最容易断连**的一步。给 Docker daemon 配置 registry mirror 即可（一次配置对所有镜像生效）：
+
+```jsonc
+// /etc/docker/daemon.json
+{ "registry-mirrors": ["https://<your-mirror>"] }
+```
+
+改完执行 `sudo systemctl restart docker`。
 
 ## 配置说明
 
 - **Python 3.11**：与 mypy `python_version`、生产 Dockerfile、CI 保持一致
-- **Node.js 24**：与生产 Dockerfile 基础镜像版本一致
+- **Node.js 22**：与生产 Dockerfile 基础镜像（`node:22.23.3-slim`）版本一致
 - **black line-length=88**：对齐 `pyproject.toml` 的 `[tool.black]` 配置
 - **flake8**：扩展参数显式设置（flake8 不读取 `pyproject.toml`）
 - **mypy strict**：对齐 `pyproject.toml` 的 `[tool.mypy]` 配置

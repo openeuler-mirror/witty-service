@@ -1,5 +1,5 @@
 # -------------------- Stage 0: Node.js 依赖层 --------------------
-FROM node:22.22.2-slim AS node
+FROM node:22.23.3-slim AS node
 
 # -------------------- Stage 1: 基础层（apt 依赖，不含 runtime CLI）--------------------
 FROM python:3.11-slim AS base

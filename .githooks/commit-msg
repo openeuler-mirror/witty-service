@@ -1,0 +1,11 @@
+#!/bin/bash
+set -e
+
+if ! command -v pre-commit >/dev/null 2>&1; then
+    echo "pre-commit not found. Install it first: uv tool install pre-commit" >&2
+    exit 1
+fi
+
+# 提交信息检查（gitlint，stages: [commit-msg]）；$1 为 git 传入的提交信息文件路径
+cd "$(git rev-parse --show-toplevel)"
+exec pre-commit run --hook-stage commit-msg --commit-msg-filename "$1"
