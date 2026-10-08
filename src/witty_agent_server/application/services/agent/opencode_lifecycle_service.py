@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 _HEALTH_TIMEOUT = 3.0
 _STARTUP_DEADLINE_SECONDS = 30.0
 _STARTUP_POLL_INTERVAL = 1.0
+# 启动后模型可解析性校验(GET /provider)。仅对"无法得出结论"的响应重试;
+# 一旦读到确定的目录就立即判定,重试耗尽仍无结论则告警放行(纵深防御,不阻断启动)。
+_MODEL_PREFLIGHT_ATTEMPTS = 3
+_MODEL_PREFLIGHT_RETRY_SECONDS = 0.5
 
 
 # openclaw ``compatibility`` → opencode ``npm`` (AI SDK 包) 映射。
@@ -56,9 +60,9 @@ def _build_opencode_model_config(
 
     依据 opencode 文档 (https://opencode.ai/docs/providers#custom):
 
-    - 内置 provider(openai/anthropic 等):仅设置 ``options.apiKey``
-    - 自定义 endpoint(有 ``api_base_url``):设置 ``npm``、``options.baseURL``、
-      ``models``,``npm`` 按 ``compatibility`` 选择 AI SDK 包:
+    - 内置 provider(openai/anthropic 等):设置 ``options.apiKey``
+    - 自定义 endpoint(有 ``api_base_url``):设置 ``npm``、``options.baseURL``,
+      ``npm`` 按 ``compatibility`` 选择 AI SDK 包:
         * ``openai`` / 默认 → ``@ai-sdk/openai-compatible``(``/v1/chat/completions``)
         * ``anthropic`` → ``@ai-sdk/anthropic``(Anthropic Messages 格式)
     - ``model`` 字段格式为 ``"provider_id/model_id"``
@@ -79,7 +83,6 @@ def _build_opencode_model_config(
             compatibility or "openai", "@ai-sdk/openai-compatible"
         )
         options["baseURL"] = api_base_url
-        provider_config["models"] = {model_name: {"name": model_name}}
 
     if api_key:
         options["apiKey"] = api_key
@@ -87,13 +90,15 @@ def _build_opencode_model_config(
     if options:
         provider_config["options"] = options
 
-    if not provider_config:
-        return None
+    # 控制面声明的模型即权威:显式 status="active" 才能在
+    # 上游 models.dev 把同一模型标为 deprecated 时保住该条目。
+    provider_config["models"] = {model_name: {"name": model_name, "status": "active"}}
 
     return {
         "model": f"{model_provider}/{model_name}",
         "provider": {model_provider: provider_config},
     }
+
 
 def to_opencode_mcp_config(config: dict[str, Any]) -> dict[str, Any]:
     """将 MCP 配置 dict 转换为 opencode serve 可接受的格式。
@@ -275,7 +280,22 @@ class OpenCodeLifecycleService:
         with self._config_lock:
             current = self._read_config_disk()
             current["model"] = self._model_config["model"]
-            current["provider"] = self._model_config["provider"]
+
+            providers = current.get("provider")
+            if not isinstance(providers, dict):
+                providers = {}
+            for provider_id, provider_cfg in self._model_config["provider"].items():
+                existing = providers.get(provider_id)
+                if not isinstance(existing, dict):
+                    existing = {}
+                # 浅合并后,对两边都是 dict 的同名键再做一层深合并,避免丢兄弟键。
+                merged = {**existing, **provider_cfg}
+                for key, new_value in provider_cfg.items():
+                    old_value = existing.get(key)
+                    if isinstance(old_value, dict) and isinstance(new_value, dict):
+                        merged[key] = {**old_value, **new_value}
+                providers[provider_id] = merged
+            current["provider"] = providers
             self._write_config_disk(current)
 
     def mcp_set(self, name: str, config: dict[str, Any]) -> None:
@@ -305,7 +325,9 @@ class OpenCodeLifecycleService:
             if exc.status != 404:
                 logger.warning("mcp disconnect before set failed: %s", exc)
         except Exception:
-            logger.debug("mcp disconnect failed (serve may not be running)", exc_info=True)
+            logger.debug(
+                "mcp disconnect failed (serve may not be running)", exc_info=True
+            )
 
         try:
             self._client.post_mcp_add(name, oc_config)
@@ -338,7 +360,9 @@ class OpenCodeLifecycleService:
             if exc.status != 404:
                 logger.warning("mcp disconnect failed: %s", exc)
         except Exception:
-            logger.debug("mcp disconnect failed (serve may not be running)", exc_info=True)
+            logger.debug(
+                "mcp disconnect failed (serve may not be running)", exc_info=True
+            )
 
     def start_server(self) -> None:
         """启动 ``opencode serve`` 子进程。
@@ -405,6 +429,13 @@ class OpenCodeLifecycleService:
                     )
                 )
             if port_is_listening(serve_port) and self.probe_running():
+                try:
+                    self._assert_model_resolvable()
+                except OpenCodeServeStartError:
+                    # 目录不可解析意味着后续每次真实调用都会 500:绝不能留下
+                    # 一个健康但不可用的进程,否则 agent 状态与事实脱节。
+                    self._stop_serve_process()
+                    raise
                 logger.info("opencode serve started on port %s", serve_port)
                 return
             time.sleep(_STARTUP_POLL_INTERVAL)
@@ -433,6 +464,99 @@ class OpenCodeLifecycleService:
             logger.debug("opencode health probe returned non-JSON response")
             return False
         return bool(body.get("healthy"))
+
+    def _fetch_provider_models(self) -> dict[str, dict[str, Any]]:
+        """``GET /provider`` -> ``{provider_id: {model_id: model_entry}}``。"""
+        response = self._client.http_client().get("/provider", timeout=_HEALTH_TIMEOUT)
+        response.raise_for_status()
+        body = response.json()
+        all_providers = body.get("all") if isinstance(body, dict) else None
+        if not isinstance(all_providers, list):
+            raise ValueError(f"unexpected /provider payload: {str(body)[:200]}")
+        catalog: dict[str, dict[str, Any]] = {}
+        for provider in all_providers:
+            if not isinstance(provider, dict):
+                continue
+            models = provider.get("models")
+            if isinstance(models, dict):
+                catalog[str(provider.get("id"))] = models
+        return catalog
+
+    def _assert_model_resolvable(self) -> None:
+        """断言控制面声明的 ``provider/model`` 在 serve 中真实可解析。
+
+        opencode 启动时把 ``config.provider.<id>.models`` 深合并进 models.dev
+        目录:上游把同名模型标记 ``deprecated`` 时会 delete 该条目,导致
+        ``SessionPrompt.getModel`` 抛 ``ProviderModelNotFoundError``,而
+        ``/global/health`` 依然返回 healthy,表现为进程健康但每次调用 500。
+        本方法把这种静默不可用提前变成 ``OpenCodeServeStartError``。
+
+        仅在无法得出结论(传输错误 / 非 2xx / 响应非法)时重试;一旦读到确定的
+        目录就立即判定,避免把真实的模型缺失伪装成瞬时抖动。若重试后仍无法
+        得出结论,只告警放行——预检是纵深防御,不能因为一个辅助探测接口的
+        抖动而否掉已经 healthy 的 serve。
+        """
+        model_ref = (self._model_config or {}).get("model")
+        if not model_ref:
+            return
+        # 用 partition 而非 split:OpenRouter 等 provider 的 model_id 自身含 "/"。
+        # model 字段由 _build_opencode_model_config 保证形如 "<provider>/<model>"。
+        provider_id, _, model_id = str(model_ref).partition("/")
+
+        last_error: str | None = None
+        for attempt in range(1, _MODEL_PREFLIGHT_ATTEMPTS + 1):
+            try:
+                catalog = self._fetch_provider_models()
+            except (httpx.HTTPError, ValueError) as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "opencode model preflight attempt %s/%s inconclusive: %s",
+                    attempt,
+                    _MODEL_PREFLIGHT_ATTEMPTS,
+                    last_error,
+                )
+                if attempt < _MODEL_PREFLIGHT_ATTEMPTS:
+                    time.sleep(_MODEL_PREFLIGHT_RETRY_SECONDS)
+                continue
+
+            available = catalog.get(provider_id)
+            if available is None:
+                raise OpenCodeServeStartError(
+                    message=(
+                        f"provider {provider_id!r} is missing from opencode after "
+                        f"serve start; configured model {model_ref!r} cannot resolve"
+                    )
+                )
+            entry = available.get(model_id)
+            if entry is None:
+                alternatives = ", ".join(sorted(available)[:10]) or "<none>"
+                raise OpenCodeServeStartError(
+                    message=(
+                        f"configured model {model_ref!r} is missing from opencode's "
+                        "model catalog after serve start (upstream models.dev may "
+                        f"have dropped it); available: {alternatives}"
+                    )
+                )
+            status = entry.get("status") if isinstance(entry, dict) else None
+            if status == "deprecated":
+                raise OpenCodeServeStartError(
+                    message=(
+                        f"configured model {model_ref!r} is deprecated in opencode's "
+                        "model catalog after serve start; every request would fail"
+                    )
+                )
+            logger.info("opencode model preflight ok: %s", model_ref)
+            return
+
+        # 重试耗尽仍无法得出结论:不确定 ≠ 不可用,放行而不是否掉健康进程,
+        # 避免把辅助探测接口的瞬时抖动放大成整个 agent 启动失败。
+        logger.warning(
+            "opencode model preflight inconclusive after %s attempts; "
+            "cannot verify %s via GET /provider (continuing): %s",
+            _MODEL_PREFLIGHT_ATTEMPTS,
+            model_ref,
+            last_error,
+        )
 
     def stop(self) -> None:
         """优雅停止：``POST /instance/dispose`` → ``Popen.terminate()`` 兜底。
@@ -528,7 +652,6 @@ class OpenCodeLifecycleService:
                 dir_path,
                 profile,
             )
-
 
 
 __all__: Sequence[str] = (
