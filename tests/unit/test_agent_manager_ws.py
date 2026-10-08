@@ -1043,6 +1043,7 @@ async def test_install_agent_skill_surfaces_runtime_reason() -> None:
         )
 
     assert exc_info.value.code == "AGENT_SKILL_INSTALL_FAILED"
+    assert exc_info.value.status_code == 502  # 上游 5xx 归一到 502
     assert exc_info.value.details == {
         "agent_id": "agent-1",
         "skill_name": "weather",

@@ -6,8 +6,12 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from witty_agent_server.application.services.skill.base import AgentSkillServiceBase
+from witty_agent_server.application.services.skill.base import (
+    WITTYHUB_COMMAND_TIMEOUT_SECONDS,
+    AgentSkillServiceBase,
+)
 from witty_agent_server.application.services.skill.errors import (
+    AgentSkillServiceError,
     OpenCodeSkillsInstallError,
     OpenCodeSkillsQueryError,
     OpenCodeSkillsUninstallError,
@@ -296,7 +300,8 @@ class OpenCodeSkillService(AgentSkillServiceBase):
                 cwd=xdg_config_home,
                 skill_name=normalized_name,
                 error_cls=OpenCodeSkillsInstallError,
-                timeout=30,
+                skill_source=normalized_skill_source,
+                timeout=WITTYHUB_COMMAND_TIMEOUT_SECONDS,
             )
             logger.info(
                 "install_wittyhub_skill success, runtime_type=%s agent_id=%s "
@@ -337,7 +342,7 @@ class OpenCodeSkillService(AgentSkillServiceBase):
                 "install_channel": "wittyhub",
                 "filePath": str(skill_md),
             }
-        except OpenCodeSkillsInstallError:
+        except AgentSkillServiceError:
             raise
         except Exception as exc:
             raise OpenCodeSkillsInstallError(
@@ -434,6 +439,7 @@ class OpenCodeSkillService(AgentSkillServiceBase):
             cwd=xdg_config_home,
             skill_name=skill_name,
             error_cls=OpenCodeSkillsUninstallError,
+            timeout=WITTYHUB_COMMAND_TIMEOUT_SECONDS,
             raise_on_error=False,
         )
 

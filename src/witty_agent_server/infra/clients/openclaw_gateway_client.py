@@ -219,17 +219,14 @@ class OpenClawGatewayClient(ClientBase):
                 params={"key": session_key},
             )
 
-    # 通过 gateway RPC 查询指定 agent workspace 下可见的技能状态。
+    # 通过 gateway RPC 查询当前 gateway 可见的技能状态。
     def get_skills_status(self, *, agent_id: str | None = None) -> dict[str, Any]:
-        params: dict[str, Any] = {}
-        if isinstance(agent_id, str) and agent_id:
-            params["agentId"] = agent_id
         logger.info("get_skills_status start by gateway rpc, agent_id=%s", agent_id)
         with self._open_connection() as ws:
             payload = self._rpc(
                 ws,
                 method="skills.status",
-                params=params,
+                params={},
             )
         logger.info(
             "get_skills_status success, agent_id=%s payload_keys=%s",
