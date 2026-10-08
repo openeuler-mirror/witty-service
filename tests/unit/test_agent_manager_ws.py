@@ -295,6 +295,9 @@ class FakeWorkspaceStore:
     def cleanup_workspace(self, agent_id: str) -> None:
         pass
 
+    def cleanup_runtime_instances(self, agent_id: str) -> None:
+        pass
+
 
 class FakeSandboxBackend:
     def __init__(self) -> None:

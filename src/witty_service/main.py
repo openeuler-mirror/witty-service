@@ -123,6 +123,43 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
         app.state.backport_run_store.list_runs(active_run_ids=set())
 
     @app.on_event("startup")
+    def reap_orphan_agent_servers() -> None:
+        """收敛游离的 witty-agent-server 进程树（服务重启/手动测试遗留）。
+
+        必须先于 recover_agents 执行：孤儿进程占着端口与内存，还会干扰恢复时的
+        端口复用判定
+        """
+        from pathlib import Path
+
+        from witty_service.sandbox.local_process import LocalProcessSandboxBackend
+
+        services = app.state.services
+        backend = services.get_sandbox_backend("local_process")
+        if not isinstance(backend, LocalProcessSandboxBackend):
+            return
+        repository = services.repository
+        registered: dict[int, str] = {}
+        for agent in repository.list_agents():
+            state = repository.get_sandbox_state(agent.id)
+            if state is None:
+                continue
+            metadata = state.sandbox_payload_json.get("metadata", {})
+            pid = metadata.get("pid")
+            start_time = metadata.get("process_start_time")
+            if isinstance(pid, int) and isinstance(start_time, str):
+                registered[pid] = start_time
+        try:
+            reaped = backend.reap_orphan_agent_servers(
+                registered=registered,
+                workspace_root=Path(services.workspace_store.base_dir),
+            )
+        except Exception:
+            logger.exception("Failed to reap orphan agent servers on startup")
+            return
+        if reaped:
+            logger.warning("Reaped %d orphan agent server(s): %s", len(reaped), reaped)
+
+    @app.on_event("startup")
     async def recover_agents() -> None:
         import asyncio
 

@@ -311,6 +311,8 @@ class WorkspaceStore(Protocol):
 
     def cleanup_workspace(self, agent_id: str) -> None: ...
 
+    def cleanup_runtime_instances(self, agent_id: str) -> None: ...
+
 
 class SandboxBackend(Protocol):
     def start(
@@ -964,8 +966,37 @@ class AgentManager:
         self._ensure_transition(agent, AgentStatus.paused)
 
         self._stop_runtime_best_effort(agent_id)
+        self._stop_sandbox_on_pause(agent_id)
 
         return self._repository.update_agent_status(agent_id, AgentStatus.paused)
+
+    def _stop_sandbox_on_pause(self, agent_id: str) -> None:
+        """pause 时连 agent-server 沙箱一起收敛，resume 走自动重建路径。
+
+        实测保留 agent-server 仅换来 0.8–1.2s 的 resume 提速，代价是每个挂起
+        agent 常驻 65–86MB 内存并占用一个端口；resume 路径
+        （``_ensure_sandbox_ready_for_resume``）探活失败即自动重建沙箱，
+        无需额外改造。收敛失败时保留原状（探活成功仍可复用），不阻断 pause。
+        """
+        prefix = _log_prefix(agent_id=agent_id)
+        state = self._repository.get_sandbox_state(agent_id)
+        if state is None:
+            return
+        try:
+            self._sandbox_backend.stop(state.handle)
+        except Exception as exc:
+            logger.warning(
+                f"{prefix}Failed to stop sandbox on pause, keeping it for reuse: {exc}",
+                exc_info=True,
+            )
+            return
+        # 沙箱已停：标记 not ready，resume 探活失败后走重建。
+        self._repository.save_sandbox_state(
+            agent_id,
+            sandbox_payload_json=state.sandbox_payload_json,
+            adapter_base_url=state.adapter_base_url,
+            adapter_ready=False,
+        )
 
     def _stop_runtime_best_effort(self, agent_id: str) -> None:
         """尽力停掉 runtime；失败只记日志，不阻断 pause。"""
@@ -2278,6 +2309,15 @@ class AgentManager:
             except Exception as exc:
                 cleanup_errors.append(self._cleanup_error("sandbox_cleanup", exc))
 
+        # 3.5 清理磁盘：workspace 与 runtime 实例目录（opencode/dsh-instances）。
+        # 失败只记 warning 不阻断删除——磁盘残留可事后回收，但 DB 记录必须删掉，
+        # 否则 agent 永远删不掉（见 _is_tolerable_cleanup_error）。
+        self._collect_error(
+            cleanup_errors,
+            "workspace_cleanup",
+            lambda: self._cleanup_agent_disk(agent_id),
+        )
+
         # 4. 前置阶段失败即中止
         blocking_errors = [
             error
@@ -2323,11 +2363,21 @@ class AgentManager:
         按错误码判定：沙箱 backend 在句柄丢失时抛 SANDBOX_NOT_FOUND
         （sandbox/base.py 的 sandbox_not_found）。匹配 message 文案会在上游改一句话
         之后静默失效，也会放过恰好带上同一句话的无关错误。
+
+        workspace_cleanup 阶段整体可容忍：磁盘清理失败（权限/IO）只留 warning，
+        不能让它把 agent 卡成"永远删不掉"——磁盘残留可由后台 GC 事后回收。
         """
+        if error.get("stage") == "workspace_cleanup":
+            return True
         return (
             error.get("stage") == "sandbox_cleanup"
             and error.get("code") == SANDBOX_NOT_FOUND
         )
+
+    def _cleanup_agent_disk(self, agent_id: str) -> None:
+        """删除 agent 的全部磁盘产物：workspace 与 runtime 实例目录。"""
+        self._workspace_store.cleanup_workspace(agent_id)
+        self._workspace_store.cleanup_runtime_instances(agent_id)
 
     def _create_agent_record(
         self,
