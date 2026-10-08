@@ -1,15 +1,32 @@
 """dsh runtime 适配器（witty_service 侧）单元测试。
 
 覆盖：AgentManager._RUNTIME_CONFIGS 注册、DshConfig 的 env / start payload /
-无网关端口的处理策略，锁定 dsh 经 witty_service POST /agents 创建的能力。
+无网关端口的处理策略，以及多 provider 路由策略（deepseek 原生 / pi-ai
+catalog / openai-compat），锁定 dsh 经 witty_service POST /agents 创建的能力。
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from witty_service.application.agent_manager import AgentManager
-from witty_service.application.runtime_config import DshConfig
+from witty_service.application.runtime_config import (
+    DshConfig,
+    UnsupportedModelProviderError,
+)
+
+def _model_info(
+    provider: str | None, name: str = "m", api_base_url: str | None = None
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "provider": provider,
+        "api_key": "test-key",
+        "api_base_url": api_base_url,
+        "compatibility": {},
+    }
 
 
 def test_agent_manager_registers_dsh_runtime_config() -> None:
@@ -25,13 +42,7 @@ def test_dsh_config_build_env_selects_dsh_runtime() -> None:
 
 
 def test_dsh_config_build_start_payload_carries_model_config() -> None:
-    model_info = {
-        "name": "deepseek-v4-flash",
-        "provider": "deepseek",
-        "api_key": "test-key",
-        "api_base_url": None,
-        "compatibility": {},
-    }
+    model_info = _model_info("deepseek", name="deepseek-v4-flash")
     payload = DshConfig().build_start_payload(
         model_id="model-1",
         model_info=model_info,
@@ -53,11 +64,11 @@ def test_dsh_config_build_start_payload_carries_model_config() -> None:
 
 
 def test_dsh_config_rejects_unknown_provider() -> None:
-    """不在白名单内的 provider 显式拒绝，不做静默透传。"""
-    with pytest.raises(ValueError, match="unsupported dsh provider"):
+    """不在支持列表内的 provider 显式拒绝，报错展示用户原始填写名与支持列表。"""
+    with pytest.raises(UnsupportedModelProviderError, match="supported providers"):
         DshConfig().build_start_payload(
             model_id=None,
-            model_info={"name": "glm-5.2", "provider": "zhipuai"},
+            model_info=_model_info("some-unknown-vendor", name="mystery"),
             agent_key="p",
             gateway_port=1,
         )

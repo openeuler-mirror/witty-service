@@ -74,7 +74,13 @@ from witty_service.sandbox.ports import find_free_port, port_is_bindable
 from witty_service.storage.runtime_backup import RuntimeBackupStore
 
 from .artifact_paths import normalize_artifact_event
-from .runtime_config import DshConfig, OpenclawConfig, OpencodeConfig, RuntimeConfig
+from .runtime_config import (
+    DshConfig,
+    OpenclawConfig,
+    OpencodeConfig,
+    RuntimeConfig,
+    UnsupportedModelProviderError,
+)
 from .session_manager import SessionManager
 
 INVALID_AGENT_TRANSITION = "INVALID_AGENT_TRANSITION"
@@ -93,6 +99,9 @@ SKILL_UNINSTALL_RECORD_FAILED = "SKILL_UNINSTALL_RECORD_FAILED"
 SKILL_SYNC_FAILED = "SKILL_SYNC_FAILED"
 AGENT_SKILL_INSTALL_FAILED = "AGENT_SKILL_INSTALL_FAILED"
 AGENT_SKILL_UNINSTALL_FAILED = "AGENT_SKILL_UNINSTALL_FAILED"
+# 模型与 runtime 不兼容（如 dsh 不支持的 provider）：创建期前置校验即失败，
+# 前端可直接以 message 提示用户换模型或换 runtime，而非笼统的创建失败。
+UNSUPPORTED_MODEL_PROVIDER = "UNSUPPORTED_MODEL_PROVIDER"
 
 SKILL_INSTALL_TIMEOUT_SECONDS = 180.0
 
@@ -737,6 +746,14 @@ class AgentManager:
             f"{prefix}Using profile: {profile_name}, gateway_port: {gateway_port}"
         )
 
+        # 前置构建 start payload
+        start_payload = self._build_agent_start_payload(
+            adapter_type=request.adapter_type,
+            model_id=request.model_id,
+            agent_key=profile_name,
+            gateway_port=gateway_port,
+        )
+
         workspace_path = str(self._workspace_store.init_workspace(agent_id))
         logger.info(f"{prefix}Workspace initialized: path=%s", workspace_path)
         sandbox_handle: SandboxHandle | None = None
@@ -807,12 +824,7 @@ class AgentManager:
             logger.info(f"{prefix}Calling /agent/start...")
             client = httpx.Client(base_url=adapter_endpoint.base_url, timeout=120.0)
             try:
-                start_payload = self._build_agent_start_payload(
-                    adapter_type=request.adapter_type,
-                    model_id=request.model_id,
-                    agent_key=profile_name,
-                    gateway_port=gateway_port,
-                )
+                # start_payload 已在流程开头前置构建（前置兼容性校验）
                 logger.debug(
                     f"{prefix}/agent/start payload: %s",
                     redact_start_payload(start_payload),
@@ -919,15 +931,30 @@ class AgentManager:
         """构建 /agent/start 请求的 payload（创建 + 恢复通用）。
 
         通过 RuntimeConfig 策略生成差异化 payload，不再需要硬编码分支。
+        runtime 策略抛出的 ``UnsupportedModelProviderError``（模型与 runtime
+        不兼容）转为 ``UNSUPPORTED_MODEL_PROVIDER`` DomainError（400）：message
+        自解释（含模型名、provider、支持列表），前端可直接展示。
         """
         config = self._get_runtime_config(adapter_type)
         model_info = self._resolve_model_info(model_id)
-        return config.build_start_payload(
-            model_id=model_id,
-            model_info=model_info,
-            agent_key=agent_key,
-            gateway_port=gateway_port,
-        )
+        try:
+            return config.build_start_payload(
+                model_id=model_id,
+                model_info=model_info,
+                agent_key=agent_key,
+                gateway_port=gateway_port,
+            )
+        except UnsupportedModelProviderError as exc:
+            raise DomainError(
+                code=UNSUPPORTED_MODEL_PROVIDER,
+                message=str(exc),
+                status_code=400,
+                details={
+                    "adapter_type": adapter_type,
+                    "model_id": model_id,
+                    "provider": model_info.get("provider"),
+                },
+            ) from exc
 
     #: pause 时等待 runtime 优雅停止的超时。
     PAUSE_RUNTIME_TIMEOUT_SECONDS: ClassVar[float] = 30.0

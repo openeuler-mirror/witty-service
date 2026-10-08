@@ -14,11 +14,16 @@ from deepseek_harness.errors import (
 )
 
 from witty_agent_server.infra.clients import dsh_client as dsh_client_module
-from witty_agent_server.infra.clients.dsh_client import DshClient, DshClientError
+from witty_agent_server.infra.clients.dsh_client import (
+    DshClient,
+    DshClientError,
+    DshModelConfig,
+)
 
 _SESSION_KEY = "agent:1:session:9"
 _SESSION_ID = "agent-1-session-9"
 _MESSAGE_ID = "msg-001"
+_ROUTE_ENV = "WITTY_DSH_PROVIDER_API_KEY"
 
 
 def _session_event(
@@ -464,7 +469,7 @@ def test_delete_session_removes_files_and_mapping(tmp_path: Path) -> None:
 
     harness_client = _FakeHarnessClient()
     client = _client(harness_client)
-    client.update_config(dsh_home=str(home))
+    client.update_paths(dsh_home=str(home))
     client.create_session(session_key=_SESSION_KEY)
 
     client.delete_session(session_key=_SESSION_KEY)
@@ -501,7 +506,7 @@ def test_delete_session_removes_rc1_nested_home_files(tmp_path: Path) -> None:
 
     harness_client = _FakeHarnessClient()
     client = _client(harness_client)
-    client.update_config(dsh_home=str(home))
+    client.update_paths(dsh_home=str(home))
     client.create_session(session_key=_SESSION_KEY)
 
     client.delete_session(session_key=_SESSION_KEY)
@@ -527,7 +532,7 @@ def test_delete_session_preserves_unrelated_empty_dirs(tmp_path: Path) -> None:
 
     harness_client = _FakeHarnessClient()
     client = _client(harness_client)
-    client.update_config(dsh_home=str(home))
+    client.update_paths(dsh_home=str(home))
     client.create_session(session_key=_SESSION_KEY)
 
     client.delete_session(session_key=_SESSION_KEY)
@@ -556,7 +561,7 @@ def test_delete_session_does_not_follow_symlinks(tmp_path: Path) -> None:
 
     harness_client = _FakeHarnessClient()
     client = _client(harness_client)
-    client.update_config(dsh_home=str(home))
+    client.update_paths(dsh_home=str(home))
     client.create_session(session_key=_SESSION_KEY)
 
     client.delete_session(session_key=_SESSION_KEY)
@@ -581,24 +586,24 @@ def test_delete_session_without_dsh_home_only_clears_mapping() -> None:
 @pytest.mark.parametrize(
     ("update", "expect_detach"),
     [
-        ({"model": "deepseek-v4-pro"}, True),
-        ({}, False),
-        ({"model": "deepseek-v4-flash"}, False),  # 与默认值相同：无变更
+        (DshModelConfig(model="deepseek-v4-pro"), True),
+        (DshModelConfig(), False),
+        (DshModelConfig(model="deepseek-v4-flash"), False),  # 与默认值相同：无变更
     ],
 )
-def test_update_config_detaches_harness_only_on_change(
-    update: dict[str, Any], expect_detach: bool
+def test_apply_model_config_detaches_harness_only_on_change(
+    update: DshModelConfig, expect_detach: bool
 ) -> None:
     harness_client = _FakeHarnessClient()
     client = DshClient(harness=harness_client)
 
-    client.update_config(**update)
+    client.apply_model_config(update)
 
     assert harness_client.closed is expect_detach
     assert client.harness is (None if expect_detach else harness_client)
 
 
-def test_update_config_detach_keeps_inflight_turn_alive() -> None:
+def test_apply_model_config_detach_keeps_inflight_turn_alive() -> None:
     """detach 语义：不关在途 turn 的 harness，生成器退出（finally 释放引用）后才关闭。"""
     harness_client = _FakeHarnessClient(_full_turn_script(_SESSION_ID, _MESSAGE_ID))
     client = DshClient(harness=harness_client)
@@ -606,7 +611,7 @@ def test_update_config_detach_keeps_inflight_turn_alive() -> None:
     gen = client.stream_turn(session_key=_SESSION_KEY, message="q")
     assert next(gen)["method"] == "session.status"  # 悬挂在 yield 处
 
-    client.update_config(model="deepseek-v4-pro")
+    client.apply_model_config(DshModelConfig(model="deepseek-v4-pro"))
 
     assert client.harness is None
     assert harness_client.closed is False
@@ -616,12 +621,12 @@ def test_update_config_detach_keeps_inflight_turn_alive() -> None:
     assert harness_client.closed is True
 
 
-def test_update_config_detach_then_ensure_harness_rebuilds() -> None:
+def test_apply_model_config_detach_then_ensure_harness_rebuilds() -> None:
     """detach 后 ensure_harness 按新配置重建（新实例，旧实例已关闭）。"""
     harness_client = _FakeHarnessClient()
     client = DshClient(harness=harness_client)
 
-    client.update_config(model="deepseek-v4-pro")
+    client.apply_model_config(DshModelConfig(model="deepseek-v4-pro"))
 
     assert harness_client.closed is True
     harness = client.ensure_harness()
@@ -630,16 +635,48 @@ def test_update_config_detach_then_ensure_harness_rebuilds() -> None:
     assert harness.config.model == "deepseek-v4-pro"
 
 
+def test_apply_model_config_none_falls_back_to_defaults() -> None:
+    """未选模型路径：provider/model 为 None 归一化到默认值，不落空。"""
+    client = DshClient()
+
+    client.apply_model_config(DshModelConfig())
+
+    assert client._model_config.provider == dsh_client_module._DEFAULT_PROVIDER
+    assert client._model_config.model == dsh_client_module._DEFAULT_MODEL
+    assert client._model_config.provider_route is None
+
+
+def test_apply_model_config_full_group_replaces_no_half_update() -> None:
+    """整组替换回归：None 即显式清除，上一模型的凭据/路由不残留。"""
+    client = DshClient()
+    client.apply_model_config(
+        DshModelConfig(
+            provider="openai",
+            model="gpt-4o-mini",
+            api_key="sk-old",
+            provider_route={"api_key_env": _ROUTE_ENV},
+        )
+    )
+
+    client.apply_model_config(
+        DshModelConfig(provider="glm", model="glm-5.2", api_key=None)
+    )
+
+    assert client._model_config.api_key is None  # 旧凭据被清除
+    assert client._model_config.provider_route is None  # 旧路由被清除
+
+
 def test_ensure_harness_builds_from_config_and_reuses_instance() -> None:
     client = DshClient()
-    client.update_config(
-        workspace_dir="/tmp/dsh-ws",
-        dsh_home="/tmp/dsh-home",
-        provider="custom-endpoint",
-        model="custom-model",
-        api_key="sk-test",
-        base_url="https://example.internal/v1",
-        max_tokens=4096,
+    client.update_paths(workspace_dir="/tmp/dsh-ws", dsh_home="/tmp/dsh-home")
+    client.apply_model_config(
+        DshModelConfig(
+            provider="custom-endpoint",
+            model="custom-model",
+            api_key="sk-test",
+            base_url="https://example.internal/v1",
+            max_tokens=4096,
+        )
     )
 
     harness = client.ensure_harness()

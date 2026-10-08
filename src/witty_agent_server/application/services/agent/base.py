@@ -6,6 +6,7 @@ from threading import RLock
 from typing import Any, Protocol, runtime_checkable
 
 from witty_agent_server.application.models.agent import Agent, AgentStatus
+from witty_agent_server.infra.clients.dsh_client import DshModelConfig
 from witty_agent_server.runtimes.runtime_base import RuntimeType
 
 
@@ -80,11 +81,7 @@ class DshLifecycleControlPort(RuntimeLifecyclePort, Protocol):
         self,
         *,
         agent_id: str | None = None,
-        provider: str | None = None,
-        model: str | None = None,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        max_tokens: int | None = None,
+        model_config: DshModelConfig | None = None,
     ) -> None: ...
 
 

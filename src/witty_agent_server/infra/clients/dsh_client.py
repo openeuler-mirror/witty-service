@@ -6,9 +6,11 @@ import threading
 import time
 from collections import deque
 from collections.abc import Iterator
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import yaml
 from deepseek_harness import DeepSeekHarness, DeepSeekHarnessConfig, Notification
 from deepseek_harness.errors import (
     HarnessError,
@@ -24,6 +26,25 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_PROVIDER = "deepseek-official"
 _DEFAULT_MODEL = "deepseek-v4-flash"
+
+
+@dataclass(frozen=True)
+class DshModelConfig:
+    """dsh 模型配置的成组契约（wire ``config["dsh"]`` 的模型面）。
+
+    ``apply_model_config`` 按 ``==`` 整组替换：None 即显式清除该字段，由
+    归一化兜底（provider/model 回落默认值），不存在「未传」与「显式 None」
+    的区分——「未传」即「不调用」。
+    """
+
+    provider: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    max_tokens: int | None = None
+    # 非 deepseek 路由的 pi-ai 物化参数（api_key_env / api / base_url），
+    # None 表示走 deepseek-official 原生路径（DEEPSEEK_* env）。
+    provider_route: dict[str, Any] | None = None
 
 # 消费轮询间隔：SDK ``next()`` 无超时，循环用非阻塞 ``drain()`` + sleep
 # 轮询，保证软 abort 在通知停滞期也至多一个周期内生效。
@@ -105,87 +126,199 @@ class DshClient(ClientBase):
         self._retired_harnesses: dict[int, DeepSeekHarness] = {}
         self._workspace_dir: str | None = None
         self._dsh_home: str | None = None
-        self._provider: str = _DEFAULT_PROVIDER
-        self._model: str = _DEFAULT_MODEL
-        self._api_key: str | None = None
-        self._base_url: str | None = None
-        self._max_tokens: int | None = None
+        # 模型配置成组持有（已归一化：provider/model 恒非 None）。
+        self._model_config = DshModelConfig(
+            provider=_DEFAULT_PROVIDER, model=_DEFAULT_MODEL
+        )
 
     @property
     def harness(self) -> DeepSeekHarness | None:
         return self._harness
 
-    def update_config(
-        self,
-        *,
-        workspace_dir: str | None = None,
-        dsh_home: str | None = None,
-        provider: str | None = None,
-        model: str | None = None,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        max_tokens: int | None = None,
+    def update_paths(
+        self, *, workspace_dir: str | None = None, dsh_home: str | None = None
     ) -> None:
-        """运行时更新配置（detach 语义）：任一字段真实变更即替换 harness。
+        """幂等同步实例目录（update_config / start_server 调用）：不触碰模型配置。
 
-        旧 harness 无活动 turn 立即关闭，有则挂入待回收列表，由最后退出
-        的生成器在 finally 中关闭；start 由 lifecycle 触发。
+        None 跳过；真实变更即 detach 旧 harness（detach 语义同
+        ``apply_model_config``）。
         """
-        updates = {
+        changed = False
+        for attr, value in {
             "_workspace_dir": workspace_dir,
             "_dsh_home": dsh_home,
-            "_provider": provider,
-            "_model": model,
-            "_api_key": api_key,
-            "_base_url": base_url,
-            "_max_tokens": max_tokens,
-        }
-        changed = False
-        for attr, value in updates.items():
+        }.items():
             if value is not None and value != getattr(self, attr):
                 setattr(self, attr, value)
                 changed = True
         if changed:
             self._detach_harness()
 
+    def apply_model_config(self, config: DshModelConfig) -> None:
+        """整组替换模型配置（detach 语义）：None 即显式清除该字段。
+
+        provider/model 为 None 时归一化到默认值（未选模型路径），
+        避免 provider 回落为空导致 harness 启动失败；真实变更即 detach
+        旧 harness——无活动 turn 立即关闭，有则挂入待回收列表，由最后
+        退出的生成器在 finally 中关闭；start 由 lifecycle 触发。
+        """
+        normalized = replace(
+            config,
+            provider=config.provider or _DEFAULT_PROVIDER,
+            model=config.model or _DEFAULT_MODEL,
+        )
+        if normalized != self._model_config:
+            self._model_config = normalized
+            self._detach_harness()
+
     def reset_model_config(self) -> None:
         """将模型配置复位为默认值（切换 agent 时调用），防止上一 agent 的
-        凭据被沿用；任一字段真实变更即 detach 旧 harness。"""
-        updates = {
-            "_provider": _DEFAULT_PROVIDER,
-            "_model": _DEFAULT_MODEL,
-            "_api_key": None,
-            "_base_url": None,
-            "_max_tokens": None,
-        }
-        changed = False
-        for attr, value in updates.items():
-            if value != getattr(self, attr):
-                setattr(self, attr, value)
-                changed = True
-        if changed:
-            self._detach_harness()
+        凭据被沿用；真实变更即 detach 旧 harness。"""
+        self.apply_model_config(DshModelConfig())
 
     def ensure_harness(self) -> DeepSeekHarness:
         """按当前配置懒建 harness（不 start；start 由 lifecycle 触发）。
 
-        懒建是 check-then-act，持 ``_harness_lock`` 防并发 ensure 各自
-        建 harness 导致已建 harness（含已 start 的子进程）泄漏。
+        持 ``_harness_lock`` 防并发 ensure 各建 harness，导致已 start 的子进程泄漏。
+        非 deepseek 路由（``provider_route`` 非空）先物化 per-agent
+        ``<dsh_home>/settings.yaml``，并把 api_key 经 ``api_key_env`` 注入子进程
+        env；deepseek-official 走原生路径（api_key/base_url → DEEPSEEK_* env）。
         """
         with self._harness_lock:
             if self._harness is None:
+                cfg = self._model_config
+                env: dict[str, str] = {}
+                api_key = cfg.api_key
+                base_url = cfg.base_url
+                if cfg.provider_route is not None:
+                    if not self._dsh_home:
+                        raise DshClientError(
+                            reason="config-invalid",
+                            message=(
+                                "dsh provider route requires dsh_home "
+                                "(agent workspace); cannot materialize "
+                                "llm-pi-ai settings"
+                            ),
+                        )
+                    self._materialize_pi_ai_settings(
+                        Path(self._dsh_home), cfg.provider_route
+                    )
+                    api_key_env = cfg.provider_route.get("api_key_env")
+                    if api_key_env and api_key:
+                        env[api_key_env] = api_key
+                    # 非 deepseek 路由不复用 DEEPSEEK_* env：凭据只经
+                    # provider_route 的 api_key_env 注入，避免串扰。
+                    api_key = None
+                    base_url = None
+                elif self._dsh_home:
+                    # 路由切回 deepseek 原生路径：清除残留的 pi-ai 路由注册，
+                    # 避免 settings.yaml 留下不再使用的 provider 条目。
+                    self._clear_pi_ai_providers(Path(self._dsh_home))
                 self._harness = DeepSeekHarness(
                     DeepSeekHarnessConfig(
                         cwd=self._workspace_dir,
                         dsh_home=self._dsh_home,
-                        provider=self._provider,
-                        model=self._model,
-                        max_tokens=self._max_tokens,
-                        api_key=self._api_key,
-                        base_url=self._base_url,
+                        provider=cfg.provider,
+                        model=cfg.model,
+                        max_tokens=cfg.max_tokens,
+                        api_key=api_key,
+                        base_url=base_url,
+                        env=env,
                     )
                 )
             return self._harness
+
+    def _materialize_pi_ai_settings(
+        self, dsh_home: Path, route: dict[str, Any]
+    ) -> None:
+        """把当前 pi-ai provider 路由写入 ``<dsh_home>/settings.yaml``。
+
+        dsh 启动时由 dsh-settings-file 插件读取（llm-pi-ai 插件据此注册
+        provider 路由，initialize 的 provider 才能命中 adapter）。只替换
+        ``llm-pi-ai.providers`` 子树，其余顶层配置节与同级键尽力保留；写失败
+        抛 ``DshClientError``，不静默。
+        """
+        cfg = self._model_config
+        profile: dict[str, Any] = {
+            # 显式声明模型（覆盖/补充 catalog 条目）：注册表模型名不受 catalog
+            # 目录收录与否限制。
+            "models": [{"id": cfg.model, "name": cfg.model}]
+        }
+        api_key_env = route.get("api_key_env")
+        if api_key_env and cfg.api_key:
+            profile["apiKeyEnv"] = api_key_env
+        if route.get("base_url"):
+            profile["baseURL"] = route["base_url"]
+        if route.get("api"):
+            profile["api"] = route["api"]
+
+        settings_path = dsh_home / "settings.yaml"
+        document = self._load_settings_document(settings_path)
+        pi_ai = document.get("llm-pi-ai")
+        if not isinstance(pi_ai, dict):
+            pi_ai = {}
+        pi_ai["providers"] = {cfg.provider: profile}
+        document["llm-pi-ai"] = pi_ai
+        try:
+            dsh_home.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(
+                yaml.safe_dump(document, sort_keys=True), encoding="utf-8"
+            )
+        except OSError as exc:
+            raise DshClientError(
+                reason="config-invalid",
+                message=f"dsh cannot write llm-pi-ai settings to {settings_path}: {exc}",
+            ) from exc
+
+    def _clear_pi_ai_providers(self, dsh_home: Path) -> None:
+        """删除 ``<dsh_home>/settings.yaml`` 的 ``llm-pi-ai.providers`` 子树。
+
+        路由切回 deepseek 原生路径时调用，清除残留的 provider 注册；文件
+        不存在或无该子树时为 no-op。清理失败只告警不阻断（残留非致命）。
+        """
+        settings_path = dsh_home / "settings.yaml"
+        if not settings_path.is_file():
+            return
+        document = self._load_settings_document(settings_path)
+        pi_ai = document.get("llm-pi-ai")
+        if not isinstance(pi_ai, dict) or "providers" not in pi_ai:
+            return
+        del pi_ai["providers"]
+        try:
+            settings_path.write_text(
+                yaml.safe_dump(document, sort_keys=True), encoding="utf-8"
+            )
+        except OSError:
+            logger.warning(
+                "dsh cannot clear stale llm-pi-ai providers in %s; leaving as-is",
+                settings_path,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _load_settings_document(settings_path: Path) -> dict[str, Any]:
+        """读取 settings.yaml 为 dict；缺失/不可读/非 dict 时告警并返回空文档。
+
+        非 dict 的合法 YAML（如崩溃截断残留）同样告警，避免静默丢弃其它
+        插件配置节。
+        """
+        if not settings_path.is_file():
+            return {}
+        try:
+            loaded = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            logger.warning(
+                "dsh cannot read existing settings.yaml at %s; overwriting",
+                settings_path,
+            )
+            return {}
+        if not isinstance(loaded, dict):
+            logger.warning(
+                "dsh settings.yaml at %s is not a mapping; overwriting",
+                settings_path,
+            )
+            return {}
+        return loaded
 
     def close_harness(self) -> None:
         """关闭并丢弃当前 harness 及待回收 harness（stop 时调用；尽力而为）。"""
@@ -456,4 +589,9 @@ class DshClient(ClientBase):
         return removed_any
 
 
-__all__ = ["DshClient", "DshClientError", "derive_dsh_session_id"]
+__all__ = [
+    "DshClient",
+    "DshClientError",
+    "DshModelConfig",
+    "derive_dsh_session_id",
+]
