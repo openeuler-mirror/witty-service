@@ -11,6 +11,8 @@
 # https://gitcode.com/openlibing/docs/blob/main/static-code-analysis/solutions/pre-commit-solution.md
 minimum_pre_commit_version: "4.0"
 
+default_stages: [pre-commit]
+
 repos:
   # ===================== 通用基础钩子（所有语言） =====================
   - repo: https://gitcode.com/gh_mirrors/pr/pre-commit-hooks
