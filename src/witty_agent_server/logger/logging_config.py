@@ -18,3 +18,5 @@ def configure_logging() -> None:
         level=level,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
+    # 与 witty-service 侧 logger.py 保持一致
+    logging.getLogger("httpx").setLevel(logging.WARNING)

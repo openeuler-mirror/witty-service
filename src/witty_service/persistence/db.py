@@ -30,6 +30,7 @@ def init_db(engine: Engine, *, auto_create: bool | None = None) -> None:
     """在应用启动时自动执行数据库迁移（含新建表 & schema 变更）。"""
     if auto_create is None:
         from witty_service.config import get_settings
+
         auto_create = get_settings().database.auto_create
     if not auto_create:
         _logger.info("WITTY_DATABASE_AUTO_CREATE is false, skip auto migration")
@@ -177,7 +178,9 @@ def _handle_legacy_db_if_needed(engine: Engine, alembic_cfg: AlembicConfig) -> N
             if c.get("name")
         ]
         for name, cols in named_columns.items():
-            if not any(n == name and cols == cols_set for n, cols_set in existing_uniques):
+            if not any(
+                n == name and cols == cols_set for n, cols_set in existing_uniques
+            ):
                 missing.append(f"unique {table}.{name}")
     for table, checks in required_checks.items():
         if table not in existing_tables:
@@ -188,7 +191,7 @@ def _handle_legacy_db_if_needed(engine: Engine, alembic_cfg: AlembicConfig) -> N
         }
         for name, needles in checks.items():
             if not any(
-                n == name and all(nd in text for nd in needles)
+                n == name and all(needle in text for needle in needles)
                 for n, text in existing_checks
             ):
                 missing.append(f"check {table}.{name}")
@@ -208,6 +211,7 @@ def _handle_legacy_db_if_needed(engine: Engine, alembic_cfg: AlembicConfig) -> N
         "Stamping head to skip already-applied migrations."
     )
     alembic_command.stamp(alembic_cfg, "head")
+
 
 def _configure_sqlite_engine(engine: Engine) -> None:
     """统一配置 SQLite 连接级 PRAGMA。
@@ -240,3 +244,44 @@ def _configure_sqlite_engine(engine: Engine) -> None:
         # 多会话/多线程并发写时不要立刻抛 "database is locked"。
         cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
+
+
+#: WAL 定期 checkpoint 的等待上限。TRUNCATE 模式在有活跃读事务时会通过
+#: busy-handler 等待读者；超限后返回 busy（不报错），留给下一次周期重试。
+CHECKPOINT_BUSY_TIMEOUT_MS = 5_000
+
+
+def checkpoint_database() -> bool:
+    """对主库执行一次 ``wal_checkpoint(TRUNCATE)``，成功时把 ``-wal`` 截断为 0。
+
+    - 独立短连接（从 settings 读 URL），不依赖 engine/连接池的注入路径；
+    - busy 超时 5s：碰上活跃读事务就放弃本次（返回 False），绝不长时间阻塞；
+    - 只能低频调用（定时器 / delete_agent 后）。若放进事件消费循环高频执行，
+      等于退化回"每次 commit 都 fsync"，会重新触发上面注释里的事件循环压死事故。
+    """
+    import sqlite3
+
+    from witty_service.config import get_settings
+
+    database_url = get_settings().database.url
+    if not database_url.startswith("sqlite:///"):
+        _logger.debug("checkpoint skipped: non-sqlite database")
+        return False
+    db_path = database_url.replace("sqlite:///", "")
+    try:
+        # connect(timeout=...) 即 busy_timeout，限制 TRUNCATE 等待读者的时长。
+        conn = sqlite3.connect(db_path, timeout=CHECKPOINT_BUSY_TIMEOUT_MS / 1000)
+        try:
+            result = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        _logger.warning("wal_checkpoint failed", exc_info=True)
+        return False
+    # 返回 (busy, log_pages, checkpointed_pages)；busy=1 表示有读者未放行，未完成。
+    busy = bool(result and result[0])
+    if busy:
+        _logger.info("wal_checkpoint deferred (busy): retried on next schedule")
+        return False
+    _logger.info("wal_checkpoint(TRUNCATE) completed: %s", result)
+    return True

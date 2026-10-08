@@ -9,7 +9,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
@@ -144,6 +144,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
         try:
             logger.info(f"[LocalProcessSandbox] Starting process in cwd: {command}")
             logger.info(f"[LocalProcessSandbox] Workspace path: {workspace_path}")
+            self._rotate_stderr_log_if_needed(stderr_log_path)
             with stderr_log_path.open("a", encoding="utf-8") as stderr_file:
                 process = subprocess.Popen(
                     command,
@@ -497,7 +498,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
     def reap_orphan_agent_servers(
         self,
         *,
-        registered: dict[int, str],
+        registered: dict[int, str | None],
         workspace_root: Path,
     ) -> list[int]:
         """扫描 ``/proc``，收敛游离的 witty-agent-server 进程树。
@@ -532,8 +533,14 @@ class LocalProcessSandboxBackend(SandboxBackend):
             if stat is None:
                 continue
             _state, pgrp, start_time = stat
-            if start_time is not None and registered.get(pid) == start_time:
-                continue
+            if pid in registered:
+                registered_start_time = registered[pid]
+                # 老句柄缺 process_start_time（存量数据）：宽松豁免，宁可漏杀不可误杀
+                if registered_start_time is None:
+                    continue
+                # 新句柄：pid 与 process_start_time 双重精确匹配（防 pid 复用误杀）
+                if registered_start_time == start_time:
+                    continue
             if not self._cwd_under(pid, root):
                 logger.info(
                     "[LocalProcessSandbox] Skip pid=%s: cwd is outside workspace root",
@@ -549,26 +556,38 @@ class LocalProcessSandboxBackend(SandboxBackend):
             # 正常路径（backend 自行拉起、start_new_session 自成会话）整组收敛即可
             # 覆盖；手动/异常启动的树可能各成进程组，需逐个补杀。
             descendants = self._collect_descendants(pid)
-            if pgrp == str(pid):
-                self._reap_process_group(int(pgrp), timeout=self.stop_timeout)
-            else:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.kill(pid, signal.SIGTERM)
-                if self._process_exists(pid):
-                    with contextlib.suppress(ProcessLookupError, PermissionError):
-                        os.kill(pid, signal.SIGKILL)
-            for child in descendants:
-                child_stat = read_proc_stat(child)
-                child_pgrp = child_stat[1] if child_stat is not None else None
-                if child_pgrp == str(child):
-                    self._reap_process_group(int(child_pgrp), timeout=self.stop_timeout)
+            try:
+                if pgrp == str(pid):
+                    self._reap_process_group(int(pgrp), timeout=self.stop_timeout)
                 else:
                     with contextlib.suppress(ProcessLookupError, PermissionError):
-                        os.kill(child, signal.SIGTERM)
-                    if self._process_exists(child):
+                        os.kill(pid, signal.SIGTERM)
+                    if self._process_exists(pid):
                         with contextlib.suppress(ProcessLookupError, PermissionError):
-                            os.kill(child, signal.SIGKILL)
-            reaped.append(pid)
+                            os.kill(pid, signal.SIGKILL)
+                for child in descendants:
+                    child_stat = read_proc_stat(child)
+                    child_pgrp = child_stat[1] if child_stat is not None else None
+                    if child_pgrp == str(child):
+                        self._reap_process_group(
+                            int(child_pgrp), timeout=self.stop_timeout
+                        )
+                    else:
+                        with contextlib.suppress(ProcessLookupError, PermissionError):
+                            os.kill(child, signal.SIGTERM)
+                        if self._process_exists(child):
+                            with contextlib.suppress(
+                                ProcessLookupError, PermissionError
+                            ):
+                                os.kill(child, signal.SIGKILL)
+                reaped.append(pid)
+            except Exception as exc:
+                logger.warning(
+                    "[LocalProcessSandbox] Failed to reap orphan agent server "
+                    "pid=%s: %s",
+                    pid,
+                    exc,
+                )
         return reaped
 
     @staticmethod
@@ -689,6 +708,35 @@ class LocalProcessSandboxBackend(SandboxBackend):
             Path(workspace_path).expanduser().resolve(strict=False)
             / "agent-server.stderr.log"
         )
+
+    #: stderr 日志轮转阈值。单 agent 封顶 ≈ 20MB（当前文件 + 1 个备份）。
+    STDERR_ROTATE_MAX_BYTES: ClassVar[int] = 10 * 1024 * 1024
+
+    @classmethod
+    def _rotate_stderr_log_if_needed(cls, stderr_log_path: Path) -> None:
+        """超阈值时轮转 stderr 日志（rename 旧文件，新文件从空开始）。"""
+        try:
+            if not stderr_log_path.exists():
+                return
+            if stderr_log_path.stat().st_size < cls.STDERR_ROTATE_MAX_BYTES:
+                return
+            backup_path = stderr_log_path.with_suffix(".log.1")
+            backup_path.unlink(missing_ok=True)
+            stderr_log_path.replace(backup_path)
+            logger.info(
+                "[LocalProcessSandbox] Rotated stderr log (size over %d bytes): "
+                "%s -> %s",
+                cls.STDERR_ROTATE_MAX_BYTES,
+                stderr_log_path,
+                backup_path,
+            )
+        except OSError as exc:
+            # 轮转失败不阻断启动：最坏情况是文件继续增长，不该让 agent 起不来。
+            logger.warning(
+                "[LocalProcessSandbox] Failed to rotate stderr log %s: %s",
+                stderr_log_path,
+                exc,
+            )
 
     def _resolve_handle(self, handle: SandboxHandle | str) -> SandboxHandle:
         if isinstance(handle, SandboxHandle):

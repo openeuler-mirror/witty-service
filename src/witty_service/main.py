@@ -24,6 +24,9 @@ from witty_service.logger import configure_logging
 
 logger = logging.getLogger(__name__)
 
+#: wal_checkpoint 周期：1 小时（保证 ``-wal`` 无上限增长，不频繁到影响性能）
+_CHECKPOINT_INTERVAL_S = 3600.0
+
 
 async def _call(method: object) -> Any:
     """调用容器成员并兼容**非协程测试替身**（`MagicMock` 容器的 `start`/`stop`）。
@@ -138,7 +141,7 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
         if not isinstance(backend, LocalProcessSandboxBackend):
             return
         repository = services.repository
-        registered: dict[int, str] = {}
+        registered: dict[int, str | None] = {}
         for agent in repository.list_agents():
             state = repository.get_sandbox_state(agent.id)
             if state is None:
@@ -146,8 +149,8 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
             metadata = state.sandbox_payload_json.get("metadata", {})
             pid = metadata.get("pid")
             start_time = metadata.get("process_start_time")
-            if isinstance(pid, int) and isinstance(start_time, str):
-                registered[pid] = start_time
+            if isinstance(pid, int):
+                registered[pid] = start_time if isinstance(start_time, str) else None
         try:
             reaped = backend.reap_orphan_agent_servers(
                 registered=registered,
@@ -270,9 +273,39 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
                 getattr(gateway, "guard_reason", None),
             )
 
+    @app.on_event("startup")
+    def start_wal_checkpoint_scheduler() -> None:
+        """每小时对 sqlite 主库做一次 wal_checkpoint(TRUNCATE)。
+
+        WAL 模式下写入只追加 ``-wal`` 文件；若存在长期持有旧读快照的连接，
+        autocheckpoint 推进不过去，``-wal`` 会无上限增长（磁盘泄漏 + 重启变慢）。
+        低频 checkpoint 把它截断回 0。详见 db.checkpoint_database 的注释——
+        切忌高频调用，会退化回"每次 commit 都 fsync"。
+        """
+        from witty_service.persistence.db import checkpoint_database
+
+        _stop_event = threading.Event()
+
+        def _run_checkpoint_forever() -> None:
+            while not _stop_event.wait(_CHECKPOINT_INTERVAL_S):
+                try:
+                    checkpoint_database()
+                except Exception:
+                    logger.exception("Periodic wal_checkpoint failed")
+
+        threading.Thread(
+            target=_run_checkpoint_forever,
+            name="wal-checkpoint",
+            daemon=True,
+        ).start()
+        app.state.wal_checkpoint_stop_event = _stop_event
+
     @app.on_event("shutdown")
     async def close_services() -> None:
         # 关闭顺序（框架设计 §7.2）：网关 -> 调度器 -> services.close()
+        checkpoint_stop_event = getattr(app.state, "wal_checkpoint_stop_event", None)
+        if checkpoint_stop_event is not None:
+            checkpoint_stop_event.set()
         gateway = getattr(app.state.services, "channel_gateway", None)
         if gateway is not None:
             await _call(gateway.stop)

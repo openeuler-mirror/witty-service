@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Callable
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,6 +67,7 @@ from witty_service.sandbox.base import (
     SANDBOX_NOT_FOUND,
     SandboxHandle,
 )
+from witty_service.sandbox.docker import DockerSandboxBackend
 
 # 沙箱进程存活判定与 local_process backend 共用同一套 /proc 解析：两者判的是同一
 # 件事（这个 pid 是不是还活着），分成两套实现迟早会漂移。
@@ -657,7 +659,8 @@ class AgentManager:
                     timeout=SKILL_INSTALL_TIMEOUT_SECONDS,
                 )
             except httpx.HTTPError as exc:
-                details = self._build_runtime_skill_error_details(
+                details = await asyncio.to_thread(
+                    self._build_runtime_skill_error_details,
                     agent_id=agent_id,
                     skill_name=skill_name,
                     exc=exc,
@@ -710,7 +713,8 @@ class AgentManager:
                     json=request_body,
                 )
             except httpx.HTTPError as exc:
-                details = self._build_runtime_skill_error_details(
+                details = await asyncio.to_thread(
+                    self._build_runtime_skill_error_details,
                     agent_id=agent_id,
                     skill_name=skill_name,
                     exc=exc,
@@ -2355,6 +2359,21 @@ class AgentManager:
                 cause=exc,
                 cleanup_errors=cleanup_errors,
             )
+        # 批量删除会产生大量 WAL 条目；顺手 checkpoint 立即回收 -wal 空间，不用等
+        # 下一个小时级周期。放在删除成功之后：失败仅记日志，绝不算删除失败。
+        # 用 to_thread 包裹：checkpoint 忙等期间不阻塞事件循环（与上面第 2/3 步的
+        # 同步调用不同——那两步是仓库既有惯例，这里新加的调用应该用非阻塞写法）。
+        await asyncio.to_thread(self._checkpoint_database_quietly)
+
+    @staticmethod
+    def _checkpoint_database_quietly() -> None:
+        """best-effort 执行 wal_checkpoint(TRUNCATE)；任何失败只记日志。"""
+        from witty_service.persistence.db import checkpoint_database
+
+        try:
+            checkpoint_database()
+        except Exception:
+            logger.warning("post-delete wal_checkpoint failed", exc_info=True)
 
     @staticmethod
     def _is_tolerable_cleanup_error(error: dict[str, str]) -> bool:
@@ -2766,8 +2785,9 @@ class AgentManager:
         """停止 witty-agent-server 运行时"""
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
-            # 可能已经停止
-            with contextlib.suppress(httpx.HTTPStatusError):
+            # 可能已经停止：HTTP 报错（server 活着但拒绝）与连接失败（server 已死，
+            # 如 pause 时沙箱已整体收敛）都无需优雅停止
+            with contextlib.suppress(httpx.HTTPStatusError, httpx.ConnectError):
                 await adaptor_client.post("/agent/stop", json={})
         finally:
             await adaptor_client.close()
@@ -2865,19 +2885,97 @@ class AgentManager:
             return 504
         return 502
 
-    @staticmethod
     def _build_runtime_skill_error_details(
+        self,
         *,
         agent_id: str,
         skill_name: str,
         exc: httpx.HTTPError,
     ) -> dict[str, Any]:
-        details = AgentManager._describe_http_error(agent_id=agent_id, exc=exc)
+        details = self._describe_http_error(agent_id=agent_id, exc=exc)
         details["skill_name"] = skill_name
         return details
 
-    @staticmethod
+    #: 失败诊断时从 agent-server stderr 日志拉取的最大字节数 / 行数。
+    STDERR_TAIL_MAX_BYTES: ClassVar[int] = 64 * 1024
+    STDERR_TAIL_MAX_LINES: ClassVar[int] = 50
+
+    def _read_stderr_tail(self, agent_id: str) -> str | None:
+        """读取 agent-server stderr 日志的尾部，用于失败诊断。
+
+        witty-agent-server 是独立子进程，其内部异常（gateway 崩溃、runtime 启动失败
+        等）只写进 workspace 的 ``agent-server.stderr.log``；witty-service 这边只能
+        看到 5xx 二阶症状。失败路径上拉一次尾部，根因就能直接进本服务日志/异常detail
+
+        按沙箱类型分两条路：
+        - local_process：读 workspace 里的 stderr 文件（metadata.stderr_log_path）；
+        - docker：stderr 进 Docker 日志驱动，回退到 ``docker logs --tail`` 按
+          容器名（witty-sandbox-<agent_id>，跨重启稳定）拉取。
+        """
+        try:
+            sandbox_state = self._repository.get_sandbox_state(agent_id)
+        except Exception:
+            return None
+        if sandbox_state is None:
+            return None
+        metadata = sandbox_state.sandbox_payload_json.get("metadata", {})
+        stderr_log_path = metadata.get("stderr_log_path")
+        if isinstance(stderr_log_path, str) and stderr_log_path:
+            return self._read_stderr_file_tail(stderr_log_path)
+        # docker 沙箱：handle payload 不含 sandbox_type，以 metadata.container_id
+        # （docker.py 的 _build_handle_from_container 写入）为判定特征。
+        if isinstance(metadata.get("container_id"), str):
+            return self._read_docker_logs_tail(agent_id)
+        return None
+
+    def _read_stderr_file_tail(self, stderr_log_path: str) -> str | None:
+        """local_process：从 stderr 文件尾部截取（防 GB 级整读）。"""
+        try:
+            path = Path(stderr_log_path).expanduser()
+            if not path.is_file():
+                return None
+            size = path.stat().st_size
+            with path.open("rb") as f:
+                f.seek(max(0, size - self.STDERR_TAIL_MAX_BYTES))
+                chunk = f.read()
+            text = chunk.decode("utf-8", errors="replace")
+            lines = text.splitlines()[-self.STDERR_TAIL_MAX_LINES :]
+            tail = "\n".join(lines).strip()
+            return tail or None
+        except OSError:
+            return None
+
+    def _read_docker_logs_tail(self, agent_id: str) -> str | None:
+        """docker：用 ``docker logs --tail`` 拉容器日志尾部。
+
+        容器名 <CONTAINER_NAME_PREFIX>-<agent_id> 是沙箱层的稳定约定，不依赖
+        进程内 handle 登记表，服务重启后依然可用。诊断增强必须全程静默降级：
+        docker 不可用 / 容器不存在 / 超时都返回 None。
+        """
+        try:
+            import docker as docker_sdk
+        except ImportError:
+            return None
+        container_name = f"{DockerSandboxBackend.CONTAINER_NAME_PREFIX}-{agent_id}"
+        try:
+            # 短连接：诊断路径不该复用/污染沙箱层的 client 缓存。
+            client = docker_sdk.from_env(timeout=5)
+            try:
+                container = client.containers.get(container_name)
+                raw = container.logs(tail=self.STDERR_TAIL_MAX_LINES, timestamps=True)
+            finally:
+                client.close()
+        except Exception:
+            return None
+        if isinstance(raw, bytes):
+            text = raw.decode("utf-8", errors="replace")
+        else:
+            text = str(raw)
+        tail = text.strip()
+        return tail or None
+
     def _describe_http_error(
+        self,
         *,
         agent_id: str,
         exc: httpx.HTTPError,
@@ -2889,6 +2987,17 @@ class AgentManager:
             "agent_id": agent_id,
             "error": str(exc),
         }
+        # 响应体只是 agent-server 的二阶症状；stderr 尾部常含真正根因（如 gateway
+        # "unknown agent id"、runtime 崩溃栈）。附加进 details 并打到本服务日志，
+        # 排查不用再翻 workspace 里的 stderr 文件。
+        stderr_tail = self._read_stderr_tail(agent_id)
+        if stderr_tail:
+            details["stderr_tail"] = stderr_tail
+            logger.error(
+                "%sagent-server stderr tail (root cause hint):\n%s",
+                _log_prefix(agent_id),
+                stderr_tail,
+            )
         if not isinstance(exc, httpx.HTTPStatusError):
             return details
 
@@ -2969,6 +3078,8 @@ class AgentManager:
         }
         if isinstance(cause, DomainError):
             details["cause_code"] = cause.code
+            if cause.details:
+                details["cause_details"] = deepcopy(cause.details)
         if compensation_errors:
             details["compensation_errors"] = list(compensation_errors)
         raise DomainError(code=code, message=message, details=details) from cause
