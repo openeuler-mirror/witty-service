@@ -12,6 +12,7 @@ from witty_agent_server.runtimes.runtime_base import (
     TurnEventType,
     tool_call_delta_event,
 )
+from witty_agent_server.runtimes.stream_errors import normalize_opencode_error
 from witty_agent_server.runtimes.usage import (
     has_token_usage,
     normalize_usage_payload,
@@ -137,7 +138,10 @@ class OpenCodeRuntime(RuntimeBase):
             return
 
         if event_type == "session.error":
-            yield {"type": TurnEventType.STREAM_ERROR, "payload": {"error": raw}}
+            yield {
+                "type": TurnEventType.STREAM_ERROR,
+                "payload": normalize_opencode_error(raw),
+            }
             return
 
         if event_type == "question.asked":
@@ -145,7 +149,10 @@ class OpenCodeRuntime(RuntimeBase):
             if result is not None:
                 yield result
             else:
-                yield {"type": TurnEventType.STREAM_ERROR, "payload": {"error": raw}}
+                yield {
+                    "type": TurnEventType.STREAM_ERROR,
+                    "payload": normalize_opencode_error(raw),
+                }
             return
 
         if event_type == "question.replied":

@@ -19,6 +19,7 @@ from witty_agent_server.application.services.task_pool import (
     SessionBusyError,
     TaskPool,
 )
+from witty_agent_server.runtimes.stream_errors import normalize_stream_error
 
 logger = logging.getLogger(__name__)
 
@@ -336,12 +337,17 @@ def _client_error(
     message: str,
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "code": code,
-        "message": message,
-    }
-    if details is not None:
-        payload["details"] = details
+    """client.error 载荷走 stream_errors 统一出口：字段集合、message 单行
+    截断与 stream.error 一致；code 为协议层私有码（词表外，经
+    normalize_stream_error 原样放行），附加信息用契约的 ``detail`` 键
+    """
+    payload = normalize_stream_error(
+        code=code,
+        message=message,
+        source="internal",
+        retryable=False,
+        detail=details,
+    )
     return {
         "type": "client.error",
         "agent_id": agent_id,

@@ -403,6 +403,11 @@ def _assemble_message(msg: MessageORM, events: list[MessageEventORM]) -> dict[st
                 "question_id": question_id,
             }
 
+        elif evt.event_type in ("stream.error", "client.error"):
+            # 失败轮次的统一错误载荷（agent-server stream_errors.py 契约），
+            # 前端刷新后凭它还原错误码/根因，而非只剩 status=error。
+            item["payload"] = payload
+
         elif evt.event_type in (
             "artifact.started",
             "artifact.delta",

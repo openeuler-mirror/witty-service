@@ -102,9 +102,24 @@ CREDENTIAL_INVALID_TEXT = "机器人凭据已失效，需重新接入。"
 TURN_FAILED_TEXT = "处理这条消息时出错了，请稍后重试。"
 INTERACTION_NOTICE_TEXT = "该请求需要在控制台处理。"
 ACCESS_DENIED_TEXT = "你当前未获授权使用该机器人，请联系部署方处理。"
-UNSUPPORTED_CONTENT_TEMPLATE = "当前只支持文本消息，收到的是一条{label}，请改用文字发送。"
+UNSUPPORTED_CONTENT_TEMPLATE = (
+    "当前只支持文本消息，收到的是一条{label}，请改用文字发送。"
+)
 AGENT_NOT_RUNNABLE_TEMPLATE = "agent「{name}」当前状态为 {status}，暂时无法处理消息。"
 QUEUE_FULL_TEMPLATE = "前面还有 {depth} 条消息在排队，这条未被受理，请稍后再发。"
+
+#: 上游/运行时错误类别（agent-server `stream_errors.StreamErrorCode`）→ 用户
+#: 文案。渠道层此前不区分上游错误一律兜底 TURN_FAILED_TEXT；按类别给出更
+#: 可操作的提示（如鉴权失败指向 API Key 配置）。未列出的类别仍走兜底。
+STREAM_ERROR_TEXTS: dict[str, str] = {
+    "UPSTREAM_AUTH": "模型鉴权失败，请检查 API Key 配置。",
+    "UPSTREAM_RATE_LIMIT": "模型服务限流，请稍后重试。",
+    "UPSTREAM_QUOTA_EXCEEDED": "模型配额已用尽，请检查账户余额或套餐配额。",
+    "UPSTREAM_TIMEOUT": "模型服务响应超时，请稍后重试。",
+    "UPSTREAM_SERVER": "模型服务暂时不可用，请稍后重试。",
+    "TRANSPORT_CLOSED": "运行时连接已断开，请稍后重试。",
+    "TRANSPORT_ERROR": "运行时连接异常，请稍后重试。",
+}
 STATUS_TEMPLATE = (
     "当前状态：\n"
     "- agent：{agent}\n"
@@ -120,7 +135,9 @@ HELP_TEMPLATE = (
     "- /version 查看服务版本与渠道适配器版本"
 )
 HELP_NO_AGENT_SUFFIX = "\n\n提示：该机器人当前没有可用的 agent，请联系部署方处理。"
-VERSION_TEMPLATE = "witty-service {service_version}；渠道适配器 {channel} {adapter_version}"
+VERSION_TEMPLATE = (
+    "witty-service {service_version}；渠道适配器 {channel} {adapter_version}"
+)
 
 UNSUPPORTED_KIND_LABELS: dict[str, str] = {
     "image": "图片",
@@ -211,9 +228,7 @@ def render_unsupported_content(kind: str | None) -> str:
 
 
 def render_agent_not_runnable(*, agent_name: str | None, status: str) -> str:
-    return AGENT_NOT_RUNNABLE_TEMPLATE.format(
-        name=agent_name or "该", status=status
-    )
+    return AGENT_NOT_RUNNABLE_TEMPLATE.format(name=agent_name or "该", status=status)
 
 
 def render_queue_full(*, depth: int) -> str:
@@ -252,7 +267,9 @@ def render_error(
         return ACCESS_DENIED_TEXT
     if code == err.CHANNEL_DELIVERY_UNCERTAIN:
         return DELIVERY_FAILED_TEXT
-    return TURN_FAILED_TEXT
+    # 上游/运行时错误类别（stream.error payload.code）按类别映射文案，
+    # 其余（渠道码之外的未知码、内部错误）走兜底。
+    return STREAM_ERROR_TEXTS.get(code, TURN_FAILED_TEXT)
 
 
 __all__ = [
@@ -277,6 +294,7 @@ __all__ = [
     "STOP_ACK_TEXT",
     "STOP_CANCELLED_TEXT",
     "STOP_IDLE_ACK_TEXT",
+    "STREAM_ERROR_TEXTS",
     "TURN_FAILED_TEXT",
     "UNKNOWN_VERSION",
     "ParsedCommand",

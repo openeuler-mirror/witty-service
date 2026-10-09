@@ -25,6 +25,7 @@ from witty_agent_server.runtimes.runtime_base import (
     supports_runtime_lifecycle,
     supports_runtime_turn,
 )
+from witty_agent_server.runtimes.stream_errors import normalize_exception_error
 from witty_service.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -107,16 +108,7 @@ class SessionWSOrchestrator:
                     event=event,
                 )
         except Exception as exc:
-            code = getattr(exc, "code", "RUNTIME_UPSTREAM_ERROR")
-            message_text = getattr(exc, "message", "runtime request failed")
-            if not isinstance(code, str) or not code:
-                code = "RUNTIME_UPSTREAM_ERROR"
-            if not isinstance(message_text, str) or not message_text:
-                message_text = "runtime request failed"
-            payload = {
-                "code": code,
-                "message": message_text,
-            }
+            payload = normalize_exception_error(exc)
             self._append_session_event(
                 agent_id=agent_id,
                 session_id=session_id,
