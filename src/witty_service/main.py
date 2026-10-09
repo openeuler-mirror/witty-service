@@ -24,6 +24,9 @@ from witty_service.logger import configure_logging
 
 logger = logging.getLogger(__name__)
 
+#: wal_checkpoint 周期：1 小时（保证 ``-wal`` 无上限增长，不频繁到影响性能）
+_CHECKPOINT_INTERVAL_S = 3600.0
+
 
 async def _call(method: object) -> Any:
     """调用容器成员并兼容**非协程测试替身**（`MagicMock` 容器的 `start`/`stop`）。
@@ -121,6 +124,43 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
         base_dir = app.state.services.workspace_store.base_dir
         app.state.backport_run_store = BackportRunStore(base_dir / "backport-runs")
         app.state.backport_run_store.list_runs(active_run_ids=set())
+
+    @app.on_event("startup")
+    def reap_orphan_agent_servers() -> None:
+        """收敛游离的 witty-agent-server 进程树（服务重启/手动测试遗留）。
+
+        必须先于 recover_agents 执行：孤儿进程占着端口与内存，还会干扰恢复时的
+        端口复用判定
+        """
+        from pathlib import Path
+
+        from witty_service.sandbox.local_process import LocalProcessSandboxBackend
+
+        services = app.state.services
+        backend = services.get_sandbox_backend("local_process")
+        if not isinstance(backend, LocalProcessSandboxBackend):
+            return
+        repository = services.repository
+        registered: dict[int, str | None] = {}
+        for agent in repository.list_agents():
+            state = repository.get_sandbox_state(agent.id)
+            if state is None:
+                continue
+            metadata = state.sandbox_payload_json.get("metadata", {})
+            pid = metadata.get("pid")
+            start_time = metadata.get("process_start_time")
+            if isinstance(pid, int):
+                registered[pid] = start_time if isinstance(start_time, str) else None
+        try:
+            reaped = backend.reap_orphan_agent_servers(
+                registered=registered,
+                workspace_root=Path(services.workspace_store.base_dir),
+            )
+        except Exception:
+            logger.exception("Failed to reap orphan agent servers on startup")
+            return
+        if reaped:
+            logger.warning("Reaped %d orphan agent server(s): %s", len(reaped), reaped)
 
     @app.on_event("startup")
     async def recover_agents() -> None:
@@ -233,9 +273,39 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
                 getattr(gateway, "guard_reason", None),
             )
 
+    @app.on_event("startup")
+    def start_wal_checkpoint_scheduler() -> None:
+        """每小时对 sqlite 主库做一次 wal_checkpoint(TRUNCATE)。
+
+        WAL 模式下写入只追加 ``-wal`` 文件；若存在长期持有旧读快照的连接，
+        autocheckpoint 推进不过去，``-wal`` 会无上限增长（磁盘泄漏 + 重启变慢）。
+        低频 checkpoint 把它截断回 0。详见 db.checkpoint_database 的注释——
+        切忌高频调用，会退化回"每次 commit 都 fsync"。
+        """
+        from witty_service.persistence.db import checkpoint_database
+
+        _stop_event = threading.Event()
+
+        def _run_checkpoint_forever() -> None:
+            while not _stop_event.wait(_CHECKPOINT_INTERVAL_S):
+                try:
+                    checkpoint_database()
+                except Exception:
+                    logger.exception("Periodic wal_checkpoint failed")
+
+        threading.Thread(
+            target=_run_checkpoint_forever,
+            name="wal-checkpoint",
+            daemon=True,
+        ).start()
+        app.state.wal_checkpoint_stop_event = _stop_event
+
     @app.on_event("shutdown")
     async def close_services() -> None:
         # 关闭顺序（框架设计 §7.2）：网关 -> 调度器 -> services.close()
+        checkpoint_stop_event = getattr(app.state, "wal_checkpoint_stop_event", None)
+        if checkpoint_stop_event is not None:
+            checkpoint_stop_event.set()
         gateway = getattr(app.state.services, "channel_gateway", None)
         if gateway is not None:
             await _call(gateway.stop)

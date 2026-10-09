@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from docker.errors import APIError, NotFound
+from docker.types import LogConfig
 from requests.exceptions import ConnectionError
 
 from witty_service.sandbox.base import (
@@ -26,6 +27,9 @@ DEFAULT_DOCKER_BASE_IMAGE = "ghcr.io/openwitty/witty-agent-server"
 DEFAULT_CONTAINER_PORT = 8080
 # 默认契约必须保持为 /witty-workspace，除非显式配置 container_workspace_path。
 DEFAULT_CONTAINER_WORKSPACE_PATH = "/witty-workspace"
+
+#: 容器日志上限（json-file 驱动）
+_DOCKER_LOG_CONFIG: dict[str, str] = {"max-size": "10m", "max-file": "2"}
 
 
 def _with_retry(operation, *, max_retries: int = 3, base_delay: float = 0.5):
@@ -182,6 +186,7 @@ class DockerSandboxBackend(SandboxBackend):
                         "hard": self.nofile_hard_limit,
                     },
                 ],
+                log_config=LogConfig(type="json-file", config=dict(_DOCKER_LOG_CONFIG)),
             )
         except Exception as exc:
             raise sandbox_start_failed(
@@ -281,26 +286,48 @@ class DockerSandboxBackend(SandboxBackend):
             ) from exc
 
     def stop(self, handle: SandboxHandle | str, **kwargs: Any) -> None:
+        """停止并移除沙箱容器，同时注销内存句柄。
 
+        容器名 ``witty-sandbox-<agent_id>`` 与 agent_id 一一绑定，停止后必须
+        连容器一起移除；否则后续 start() 会经 _find_handle_by_agent_id /
+        _try_find_container 认领到 exited 容器，探活永远失败，pause→resume
+        通道就此断裂。服务重启后内存句柄丢失，此时按容器名兜底查找。
+        """
         sandbox_handle = self._resolve_handle(handle)
         container = self._containers.get(sandbox_handle.sandbox_id)
         if container is None:
-            return
+            container = self._try_find_container_by_name(sandbox_handle.agent_id)
+
+        if container is not None:
+            timeout = int(kwargs.get("timeout", self.stop_timeout))
+            try:
+                _with_retry(lambda: container.stop(timeout=timeout))
+            except NotFound:
+                pass
+            except Exception as exc:
+                # 容器停止失败：句柄保留（容器可能仍在运行），由上层重试/告警
+                raise self._sandbox_operation_failed(
+                    operation="stop",
+                    sandbox_handle=sandbox_handle,
+                    container=container,
+                    error=exc,
+                ) from exc
+            # 容器停止成功：移除容器释放名字（供后续 start() 重建），失败不阻断
+            with contextlib.suppress(Exception):
+                _with_retry(lambda: container.remove(force=True))
+
+        # 无论容器是否存在（已停/已删/从未创建），都注销内存句柄
+        self._containers.pop(sandbox_handle.sandbox_id, None)
+        self._handles.pop(sandbox_handle.sandbox_id, None)
+
+    def _try_find_container_by_name(self, agent_id: str) -> Any | None:
+        container_name = f"{self.CONTAINER_NAME_PREFIX}-{agent_id}"
         try:
-            _with_retry(
-                lambda: container.stop(
-                    timeout=int(kwargs.get("timeout", self.stop_timeout))
-                )
+            return _with_retry(
+                lambda: self._get_client().containers.get(container_name)
             )
-        except NotFound:
-            return
-        except Exception as exc:
-            raise self._sandbox_operation_failed(
-                operation="stop",
-                sandbox_handle=sandbox_handle,
-                container=container,
-                error=exc,
-            ) from exc
+        except (NotFound, APIError):
+            return None
 
     def status(self, handle: SandboxHandle | str, **kwargs: Any) -> SandboxStatus:
 
@@ -348,32 +375,37 @@ class DockerSandboxBackend(SandboxBackend):
         return None
 
     def cleanup(self, handle: SandboxHandle | str, **kwargs: Any) -> None:
+        """删除 agent 时清理沙箱：停容器、移除容器、注销句柄。
 
+        与 stop() 语义一致（pause 后 resume 需要全新容器），直接复用；
+        区别是 cleanup 会把 stop/remove 的失败聚合成 sandbox_stop_failed 抛出，
+        便于上层把清理失败记进 tolerable errors。
+        """
         sandbox_handle = self._resolve_handle(handle)
         container = self._containers.get(sandbox_handle.sandbox_id)
+        if container is None:
+            container = self._try_find_container_by_name(sandbox_handle.agent_id)
+
         stop_error: Exception | None = None
         remove_error: Exception | None = None
         if container is not None:
+            timeout = int(kwargs.get("timeout", self.stop_timeout))
             try:
-                _with_retry(
-                    lambda: container.stop(
-                        timeout=int(kwargs.get("timeout", self.stop_timeout))
-                    )
-                )
+                _with_retry(lambda: container.stop(timeout=timeout))
             except NotFound:
                 pass
             except Exception as exc:
                 stop_error = exc
             try:
-                _with_retry(
-                    lambda: container.remove(force=bool(kwargs.get("force", False)))
-                )
+                _with_retry(lambda: container.remove(force=True))
             except NotFound:
                 pass
             except Exception as exc:
                 remove_error = exc
+
         self._containers.pop(sandbox_handle.sandbox_id, None)
         self._handles.pop(sandbox_handle.sandbox_id, None)
+
         if stop_error or remove_error:
             raise self._sandbox_operation_failed(
                 operation="cleanup",
@@ -414,13 +446,16 @@ class DockerSandboxBackend(SandboxBackend):
         return str(path.resolve())
 
     def _resolve_handle(self, handle: SandboxHandle | str) -> SandboxHandle:
-        sandbox_id = handle.sandbox_id if isinstance(handle, SandboxHandle) else handle
+        if isinstance(handle, SandboxHandle):
+            # handle 对象直接使用，不查内存登记表——stop() 已把句柄从内存注销，
+            # 但 pause→resume→delete 流程仍会拿 DB 里的 handle 来调 cleanup()
+            return handle
         try:
-            return self._handles[sandbox_id]
+            return self._handles[handle]
         except KeyError as exc:
             raise sandbox_not_found(
                 sandbox_type=self.sandbox_type,
-                sandbox_id=sandbox_id,
+                sandbox_id=handle,
             ) from exc
 
     def _sandbox_operation_failed(

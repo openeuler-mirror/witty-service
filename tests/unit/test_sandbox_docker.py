@@ -155,6 +155,10 @@ def test_docker_runtime_start_mounts_workspace_to_witty_workspace(
             "ulimits": [
                 {"name": "nofile", "soft": 1024, "hard": 4096},
             ],
+            "log_config": {
+                "Type": "json-file",
+                "Config": {"max-size": "10m", "max-file": "2"},
+            },
         }
     ]
     assert handle.workspace_path == workspace_path

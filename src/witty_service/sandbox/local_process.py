@@ -8,9 +8,8 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from math import log
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
@@ -145,6 +144,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
         try:
             logger.info(f"[LocalProcessSandbox] Starting process in cwd: {command}")
             logger.info(f"[LocalProcessSandbox] Workspace path: {workspace_path}")
+            self._rotate_stderr_log_if_needed(stderr_log_path)
             with stderr_log_path.open("a", encoding="utf-8") as stderr_file:
                 process = subprocess.Popen(
                     command,
@@ -157,7 +157,9 @@ class LocalProcessSandboxBackend(SandboxBackend):
                     # serve + MCP 子进程）都在同一个组里，停止时才能一起收敛。
                     start_new_session=True,
                 )
-            logger.info(f"[LocalProcessSandbox] Process started with PID: {process.pid} in cwd: {app_dir}")
+            logger.info(
+                f"[LocalProcessSandbox] Process started with PID: {process.pid} in cwd: {app_dir}"
+            )
         except OSError as exc:
             logger.error(f"[LocalProcessSandbox] Failed to start process: {exc}")
             raise sandbox_start_failed(
@@ -174,7 +176,9 @@ class LocalProcessSandboxBackend(SandboxBackend):
         logger.info(f"[LocalProcessSandbox] Initial poll returncode: {returncode}")
         if returncode is not None:
             stderr = self._read_stderr_log(stderr_log_path)
-            logger.error(f"[LocalProcessSandbox] Process exited immediately: returncode={returncode}, stderr={stderr}")
+            logger.error(
+                f"[LocalProcessSandbox] Process exited immediately: returncode={returncode}, stderr={stderr}"
+            )
             raise sandbox_start_failed(
                 sandbox_type=self.sandbox_type,
                 message="Local process sandbox exited immediately after startup.",
@@ -187,7 +191,9 @@ class LocalProcessSandboxBackend(SandboxBackend):
 
         sandbox_id = str(uuid4())
         base_url = f"http://{self.host}:{port}"
-        logger.info(f"[LocalProcessSandbox] Sandbox ID: {sandbox_id}, base_url: {base_url}")
+        logger.info(
+            f"[LocalProcessSandbox] Sandbox ID: {sandbox_id}, base_url: {base_url}"
+        )
         handle = SandboxHandle(
             sandbox_id=sandbox_id,
             agent_id=agent_id,
@@ -208,7 +214,9 @@ class LocalProcessSandboxBackend(SandboxBackend):
         )
         self._handles[sandbox_id] = handle
         self._processes[sandbox_id] = process
-        logger.info(f"[LocalProcessSandbox] Sandbox started successfully, returning handle")
+        logger.info(
+            "[LocalProcessSandbox] Sandbox started successfully, returning handle"
+        )
         return handle
 
     def stop(self, handle: SandboxHandle | str, **kwargs: Any) -> None:
@@ -272,9 +280,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
             return SandboxStatus.running
         return SandboxStatus.stopped
 
-    def endpoint(
-        self, handle: SandboxHandle | str, **kwargs: Any
-    ) -> AdapterEndpoint:
+    def endpoint(self, handle: SandboxHandle | str, **kwargs: Any) -> AdapterEndpoint:
         sandbox_handle = self._resolve_handle(handle)
         base_url = str(sandbox_handle.metadata["base_url"])
         return AdapterEndpoint(base_url=base_url, health_url=f"{base_url}/ping")
@@ -325,8 +331,8 @@ class LocalProcessSandboxBackend(SandboxBackend):
     def _port_in_cmdline(cmdline: list[str], port: Any) -> bool:
         """命令行里是否出现 ``--port <port>``。"""
         expected = str(port)
-        for index, token in enumerate(cmdline):
-            if token == "--port" and index + 1 < len(cmdline):
+        for index, arg in enumerate(cmdline):
+            if arg == "--port" and index + 1 < len(cmdline):
                 return cmdline[index + 1] == expected
         return False
 
@@ -355,7 +361,9 @@ class LocalProcessSandboxBackend(SandboxBackend):
         except ProcessLookupError:
             return False
         except PermissionError:
-            logger.warning("[LocalProcessSandbox] No permission to signal process group %s", pgid)
+            logger.warning(
+                "[LocalProcessSandbox] No permission to signal process group %s", pgid
+            )
             return False
 
     @staticmethod
@@ -478,12 +486,157 @@ class LocalProcessSandboxBackend(SandboxBackend):
             return
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
-        if not self._wait_until(lambda: not self._process_exists(pid), self.stop_timeout):
+        if not self._wait_until(
+            lambda: not self._process_exists(pid), self.stop_timeout
+        ):
             raise sandbox_stop_failed(
                 sandbox_type=self.sandbox_type,
                 message="Local process sandbox survived stop signals.",
                 details={"pid": pid},
             )
+
+    def reap_orphan_agent_servers(
+        self,
+        *,
+        registered: dict[int, str | None],
+        workspace_root: Path,
+    ) -> list[int]:
+        """扫描 ``/proc``，收敛游离的 witty-agent-server 进程树。
+
+        服务重启、异常退出或手动测试会在系统里留下不属于任何 DB 登记 agent 的
+        agent-server 进程（及其 runtime 子进程），白白占用端口和内存。本方法在
+        服务启动时调用，把这些孤儿按进程组收敛掉。
+
+        豁免条件（命中其一即跳过）：
+
+        - ``(pid, process_start_time)`` 与 *registered* 一致——DB 登记在案的沙箱
+          （startup 恢复流程会接管它）；
+        - 进程 cwd 不在 *workspace_root* 之下——属于其它 witty-service 实例
+          （不同 WITTY_WORKSPACE_ROOT），不能误杀。
+
+        返回被收敛的 leader pid 列表。
+        """
+        reaped: list[int] = []
+        root = Path(workspace_root).expanduser().resolve()
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return reaped
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            cmdline = read_proc_cmdline(pid)
+            if not cmdline or "witty_agent_server.app:create_app" not in cmdline:
+                continue
+            stat = read_proc_stat(pid)
+            if stat is None:
+                continue
+            _state, pgrp, start_time = stat
+            if pid in registered:
+                registered_start_time = registered[pid]
+                # 老句柄缺 process_start_time（存量数据）：宽松豁免，宁可漏杀不可误杀
+                if registered_start_time is None:
+                    continue
+                # 新句柄：pid 与 process_start_time 双重精确匹配（防 pid 复用误杀）
+                if registered_start_time == start_time:
+                    continue
+            if not self._cwd_under(pid, root):
+                logger.info(
+                    "[LocalProcessSandbox] Skip pid=%s: cwd is outside workspace root",
+                    pid,
+                )
+                continue
+            logger.warning(
+                "[LocalProcessSandbox] Reaping orphan agent server pid=%s "
+                "(not registered in DB)",
+                pid,
+            )
+            # 先快照后代：leader 死后子进程会被 init 收养，届时无从追踪。
+            # 正常路径（backend 自行拉起、start_new_session 自成会话）整组收敛即可
+            # 覆盖；手动/异常启动的树可能各成进程组，需逐个补杀。
+            descendants = self._collect_descendants(pid)
+            try:
+                if pgrp == str(pid):
+                    self._reap_process_group(int(pgrp), timeout=self.stop_timeout)
+                else:
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.kill(pid, signal.SIGTERM)
+                    if self._process_exists(pid):
+                        with contextlib.suppress(ProcessLookupError, PermissionError):
+                            os.kill(pid, signal.SIGKILL)
+                for child in descendants:
+                    child_stat = read_proc_stat(child)
+                    child_pgrp = child_stat[1] if child_stat is not None else None
+                    if child_pgrp == str(child):
+                        self._reap_process_group(
+                            int(child_pgrp), timeout=self.stop_timeout
+                        )
+                    else:
+                        with contextlib.suppress(ProcessLookupError, PermissionError):
+                            os.kill(child, signal.SIGTERM)
+                        if self._process_exists(child):
+                            with contextlib.suppress(
+                                ProcessLookupError, PermissionError
+                            ):
+                                os.kill(child, signal.SIGKILL)
+                reaped.append(pid)
+            except Exception as exc:
+                logger.warning(
+                    "[LocalProcessSandbox] Failed to reap orphan agent server "
+                    "pid=%s: %s",
+                    pid,
+                    exc,
+                )
+        return reaped
+
+    @staticmethod
+    def _collect_descendants(pid: int) -> list[int]:
+        """收集 *pid* 的全部后代（必须在 leader 被杀之前调用）。
+
+        杀掉 leader 后子进程会被 init 收养（ppid 变 1），与父进程的关联就此丢失，
+        因此先按 ppid 关系做一次 BFS 快照。
+        """
+        children: dict[int, list[int]] = {}
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return []
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                raw = Path(f"/proc/{entry}/stat").read_text(encoding="utf-8")
+            except OSError:
+                continue
+            _, sep, rest = raw.rpartition(")")
+            if not sep:
+                continue
+            fields = rest.split()
+            if len(fields) < 2:
+                continue
+            try:
+                ppid = int(fields[1])
+            except ValueError:
+                continue
+            children.setdefault(ppid, []).append(int(entry))
+        result: list[int] = []
+        queue = [pid]
+        while queue:
+            current = queue.pop()
+            for child in children.get(current, []):
+                result.append(child)
+                queue.append(child)
+        return result
+
+    @staticmethod
+    def _cwd_under(pid: int, root: Path) -> bool:
+        """进程的 cwd 是否位于 *root* 目录树之内（判归属的关键依据）。"""
+        try:
+            cwd = Path(os.readlink(f"/proc/{pid}/cwd")).resolve()
+        except OSError:
+            return False
+        return cwd == root or root in cwd.parents
 
     def _build_command(self, *, port: int, app_dir: str) -> list[str]:
         """构造 witty-agent-server 的启动命令。"""
@@ -520,18 +673,20 @@ class LocalProcessSandboxBackend(SandboxBackend):
             path = Path(self.agent_server_app_dir).expanduser().resolve(strict=False)
             if path.is_dir():
                 return str(path)
-        
+
         # 自动检测：从当前文件所在位置推断项目根目录
         # 当前文件路径: /root/new/witty-service/src/sandbox/local_process.py
         # 项目根目录: /root/new/witty-service
         # witty_agent_server 目录: /root/new/witty-service/witty_agent_server
         current_file = Path(__file__).resolve()
-        project_root = current_file.parent.parent.parent  # src/sandbox -> src -> project_root
+        project_root = (
+            current_file.parent.parent.parent
+        )  # src/sandbox -> src -> project_root
         witty_agent_server_dir = project_root / "witty_agent_server"
-        
+
         if witty_agent_server_dir.is_dir():
             return str(witty_agent_server_dir)
-        
+
         raise sandbox_start_failed(
             sandbox_type=self.sandbox_type,
             message=(
@@ -549,7 +704,39 @@ class LocalProcessSandboxBackend(SandboxBackend):
     def _build_stderr_log_path(workspace_path: str) -> Path:
         """为本地子进程生成固定的 stderr 日志文件路径。"""
         logger.info(f"Building stderr log path for workspace: {workspace_path}")
-        return Path(workspace_path).expanduser().resolve(strict=False) / "agent-server.stderr.log"
+        return (
+            Path(workspace_path).expanduser().resolve(strict=False)
+            / "agent-server.stderr.log"
+        )
+
+    #: stderr 日志轮转阈值。单 agent 封顶 ≈ 20MB（当前文件 + 1 个备份）。
+    STDERR_ROTATE_MAX_BYTES: ClassVar[int] = 10 * 1024 * 1024
+
+    @classmethod
+    def _rotate_stderr_log_if_needed(cls, stderr_log_path: Path) -> None:
+        """超阈值时轮转 stderr 日志（rename 旧文件，新文件从空开始）。"""
+        try:
+            if not stderr_log_path.exists():
+                return
+            if stderr_log_path.stat().st_size < cls.STDERR_ROTATE_MAX_BYTES:
+                return
+            backup_path = stderr_log_path.with_suffix(".log.1")
+            backup_path.unlink(missing_ok=True)
+            stderr_log_path.replace(backup_path)
+            logger.info(
+                "[LocalProcessSandbox] Rotated stderr log (size over %d bytes): "
+                "%s -> %s",
+                cls.STDERR_ROTATE_MAX_BYTES,
+                stderr_log_path,
+                backup_path,
+            )
+        except OSError as exc:
+            # 轮转失败不阻断启动：最坏情况是文件继续增长，不该让 agent 起不来。
+            logger.warning(
+                "[LocalProcessSandbox] Failed to rotate stderr log %s: %s",
+                stderr_log_path,
+                exc,
+            )
 
     def _resolve_handle(self, handle: SandboxHandle | str) -> SandboxHandle:
         if isinstance(handle, SandboxHandle):
