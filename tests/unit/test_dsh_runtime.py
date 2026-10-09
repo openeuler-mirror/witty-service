@@ -566,9 +566,14 @@ def test_turn_end_error_yields_turn_completed_and_stream_error() -> None:
         {
             "type": "stream.error",
             "payload": {
-                "code": "INVALID_REQUEST",
+                "code": "UPSTREAM_REQUEST",
                 "message": "model not found",
-                "status": 400,
+                "source": "upstream",
+                "retryable": False,
+                "detail": {
+                    "provider_code": "INVALID_REQUEST",
+                    "status_code": 400,
+                },
             },
         },
         {"type": "turn.completed", "payload": {"reason": "error"}},
@@ -720,8 +725,8 @@ def test_error_fixture_replay() -> None:
     assert types == ["message.started", "stream.error", "turn.completed"]
     stream_error = events[1]
     assert stream_error["type"] == "stream.error"
-    assert stream_error["payload"]["code"] == "INVALID_REQUEST"
-    assert stream_error["payload"]["status"] == 400
+    assert stream_error["payload"]["code"] == "UPSTREAM_REQUEST"
+    assert stream_error["payload"]["detail"]["status_code"] == 400
     assert (
         "deepseek-v4-flash-model-does-not-exist-xyz"
         in (stream_error["payload"]["message"])
@@ -922,7 +927,7 @@ def test_run_turn_error_turn_no_synthesized_completed() -> None:
         "stream.error",
         "turn.completed",
     ]
-    assert events[1]["payload"]["code"] == "INVALID_REQUEST"
+    assert events[1]["payload"]["code"] == "UPSTREAM_REQUEST"
     assert events[2]["payload"] == {"reason": "error"}
 
 
@@ -994,8 +999,11 @@ def test_run_turn_client_error_converted_to_stream_error() -> None:
         "turn.completed",
     ]
     assert events[2]["payload"] == {
-        "code": "transport-closed",
+        "code": "TRANSPORT_CLOSED",
         "message": "dsh stream_turn failed",
+        "source": "transport",
+        "retryable": True,
+        "detail": {"provider_code": "transport-closed"},
     }
     assert events[3]["payload"] == {"reason": "error"}
 
@@ -1014,8 +1022,13 @@ def test_run_turn_client_error_before_any_event_synthesizes_started() -> None:
     ]
     assert events[0]["payload"] == {}
     assert events[1]["payload"] == {
-        "code": "not-started",
+        # not-started 是 harness 未启动的生命周期错误：不可重试，
+        # 不再落入默认的可重试 TRANSPORT_ERROR。
+        "code": "RUNTIME_LIFECYCLE_ERROR",
         "message": "harness is not started",
+        "source": "runtime",
+        "retryable": False,
+        "detail": {"provider_code": "not-started"},
     }
     assert events[2]["payload"] == {"reason": "error"}
 

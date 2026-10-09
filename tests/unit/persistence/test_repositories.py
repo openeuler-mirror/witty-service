@@ -1372,7 +1372,7 @@ def test_create_message_events_bulk_writes_batch_in_one_commit(
     )
 
     assert written == 3
-    with repo._session_factory() as db:  # noqa: SLF001 - 断言原始行，绕开组装/压缩
+    with repo._session_factory() as db:
         rows = (
             db.query(MessageEventORM)
             .filter(MessageEventORM.session_id == "session-1")
@@ -1411,7 +1411,7 @@ def test_create_message_events_bulk_retries_on_seq_conflict(
     )
 
     assert written == 2
-    with repo._session_factory() as db:  # noqa: SLF001
+    with repo._session_factory() as db:
         rows = (
             db.query(MessageEventORM)
             .filter(MessageEventORM.session_id == "session-1")
@@ -1690,3 +1690,45 @@ def test_assemble_message_artifact_error_keeps_error_status(
 
     assert msg["artifacts"][0]["status"] == "error"
     assert "content" not in msg["artifacts"][0]
+
+
+def test_assemble_message_stream_error_event_carries_payload(
+    repo: SqliteRepository,
+) -> None:
+    """失败轮次的 stream.error 事件序列化时携带统一错误载荷（code/message/detail），
+    前端刷新后凭它还原错误码与根因。"""
+    _create_agent(repo)
+    _create_session(repo)
+    message_id = repo.create_message(
+        agent_id="agent-1",
+        session_id="session-1",
+        role="assistant",
+        content="",
+        status=MessageStatus.error,
+    )
+    repo.create_message_event_with_retry(
+        agent_id="agent-1",
+        session_id="session-1",
+        message_id=message_id,
+        event_type="stream.error",
+        payload_json={
+            "code": "UPSTREAM_QUOTA_EXCEEDED",
+            "message": "Insufficient Balance",
+            "source": "upstream",
+            "retryable": False,
+            "detail": {"request_id": "req-1"},
+        },
+        seq_no=1,
+    )
+
+    messages, _ = repo.get_messages_with_events("session-1")
+    error_items = [e for e in messages[0]["events"] if e["type"] == "stream.error"]
+
+    assert len(error_items) == 1
+    assert error_items[0]["payload"] == {
+        "code": "UPSTREAM_QUOTA_EXCEEDED",
+        "message": "Insufficient Balance",
+        "source": "upstream",
+        "retryable": False,
+        "detail": {"request_id": "req-1"},
+    }

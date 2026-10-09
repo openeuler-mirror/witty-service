@@ -187,3 +187,23 @@ def test_render_error_uses_details_when_available() -> None:
     assert "error" in runnable
     assert "2 条" in queue_full
     assert "图片" in unsupported
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("UPSTREAM_AUTH", "模型鉴权失败，请检查 API Key 配置。"),
+        ("UPSTREAM_RATE_LIMIT", "模型服务限流，请稍后重试。"),
+        ("UPSTREAM_QUOTA_EXCEEDED", "模型配额已用尽，请检查账户余额或套餐配额。"),
+        ("UPSTREAM_TIMEOUT", "模型服务响应超时，请稍后重试。"),
+        ("UPSTREAM_SERVER", "模型服务暂时不可用，请稍后重试。"),
+        ("TRANSPORT_CLOSED", "运行时连接已断开，请稍后重试。"),
+        ("TRANSPORT_ERROR", "运行时连接异常，请稍后重试。"),
+        # 未映射的类别码（如 UPSTREAM_REQUEST / INTERNAL_ERROR）走兜底
+        ("UPSTREAM_REQUEST", commands.TURN_FAILED_TEXT),
+        ("INTERNAL_ERROR", commands.TURN_FAILED_TEXT),
+    ],
+)
+def test_render_error_maps_stream_error_categories(code: str, expected: str) -> None:
+    """上游/运行时错误类别（stream.error payload.code）映射用户文案。"""
+    assert commands.render_error(code=code) == expected
