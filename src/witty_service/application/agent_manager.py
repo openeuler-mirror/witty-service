@@ -922,6 +922,13 @@ class AgentManager:
                 "agent_delete",
                 lambda: self._repository.delete_agent(agent_id),
             )
+            # 失败的 create 也可能已产生磁盘产物（openclaw profile、opencode
+            # instances 等），与 delete 路径同样做磁盘兜底，防止泄漏。
+            self._collect_error(
+                cleanup_errors,
+                "agent_disk_cleanup",
+                lambda: self._cleanup_agent_disk(agent_id),
+            )
             self._raise_operation_failed(
                 code=AGENT_CREATE_FAILED,
                 message="Agent creation failed.",
@@ -1016,7 +1023,9 @@ class AgentManager:
 
         client: httpx.Client | None = None
         try:
-            # 调用 witty-agent-server /agent/stop 优雅停止运行时
+            # 调用 witty-agent-server /agent/stop 优雅停止运行时。
+            # pause 语义：不传 wipe（默认 false），只停进程、保留 profile 目录
+            # （openclaw 插件与会话状态），resume 时免 ~17s 的 npm 插件重装。
             client = httpx.Client(
                 base_url=sandbox_state.adapter_base_url,
                 timeout=self.PAUSE_RUNTIME_TIMEOUT_SECONDS,
@@ -2428,9 +2437,11 @@ class AgentManager:
         )
 
     def _cleanup_agent_disk(self, agent_id: str) -> None:
-        """删除 agent 的全部磁盘产物：workspace 与 runtime 实例目录。"""
+        """删除 agent 的全部磁盘产物：workspace、runtime 实例目录与
+        openclaw profile 主目录（``/agent/stop?wipe=true`` 失败时的兜底）。"""
         self._workspace_store.cleanup_workspace(agent_id)
         self._workspace_store.cleanup_runtime_instances(agent_id)
+        self._workspace_store.cleanup_openclaw_profile(agent_id)
 
     def _create_agent_record(
         self,
@@ -2816,13 +2827,15 @@ class AgentManager:
             self._sandbox_backend.cleanup(sandbox_state.handle)
 
     async def _stop_runtime(self, agent_id: str) -> None:
-        """停止 witty-agent-server 运行时"""
+        """停止 witty-agent-server 运行时（delete 路径，wipe=true 完整卸载）"""
         adaptor_client = self._get_adaptor_http_client(agent_id)
         try:
             # 可能已经停止：HTTP 报错（server 活着但拒绝）与连接失败（server 已死，
             # 如 pause 时沙箱已整体收敛）都无需优雅停止
             with contextlib.suppress(httpx.HTTPStatusError, httpx.ConnectError):
-                await adaptor_client.post("/agent/stop", json={})
+                await adaptor_client.post(
+                    "/agent/stop", json={}, params={"wipe": "true"}
+                )
         finally:
             await adaptor_client.close()
 

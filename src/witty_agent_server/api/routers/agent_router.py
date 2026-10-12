@@ -71,13 +71,18 @@ def create_agent_router(
     def stop_agent(
         request: Request,
         id: str | None = None,
+        wipe: bool = False,
     ) -> dict[str, Any] | JSONResponse:
+        # wipe=true：delete 语义，完整卸载本地数据（如 openclaw profile 目录）；
+        # 默认 false：pause 语义，只停进程、保留数据以便快速恢复。
         try:
             resolved_agent_id = _resolve_request_agent_id(
                 agent_service=agent_service,
                 agent_id=id,
             )
-            return agent_service.stop(agent_id=resolved_agent_id).model_dump()
+            return agent_service.stop(
+                agent_id=resolved_agent_id, wipe=wipe
+            ).model_dump()
         except AgentServiceError as exc:
             return _map_agent_error(request=request, exc=exc)
 

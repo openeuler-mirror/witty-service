@@ -25,7 +25,7 @@ class RuntimeLifecyclePort(Protocol):
 
     def probe_running(self) -> bool: ...
 
-    def stop(self) -> None: ...
+    def stop(self, *, wipe: bool = False) -> None: ...
 
     def start_server(self) -> None: ...
 
@@ -131,8 +131,14 @@ class AgentServiceBase(ABC):
     ) -> Agent:
         """启动 agent。"""
 
-    def stop(self, *, agent_id: str | None = None) -> Agent:
-        """将 agent 状态切换为 stopped。"""
+    def stop(self, *, agent_id: str | None = None, wipe: bool = False) -> Agent:
+        """将 agent 状态切换为 stopped。
+
+        ``wipe`` 仅对支持"profile 目录"概念的 runtime（openclaw）有意义：
+        True 表示删除时彻底卸载本地数据；False（pause）只停进程、保留数据。
+        其他 runtime 忽略该参数。
+        """
+        del wipe
         with self._lock:
             self._ensure_agent_context(agent_id=agent_id)
             self._transition(
