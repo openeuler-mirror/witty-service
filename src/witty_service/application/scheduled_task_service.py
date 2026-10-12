@@ -741,7 +741,11 @@ class ScheduledTaskService:
                     message=str(
                         error_payload.get("message") or "Scheduled task stream failed."
                     ),
-                    details={"session_id": session_id},
+                    details={
+                        "session_id": session_id,
+                        # 统一错误契约的结构化根因（agent-server stream_errors.py）
+                        "error_detail": error_payload.get("detail"),
+                    },
                 )
             raise DomainError(
                 code="INVALID_MESSAGE_STREAM",

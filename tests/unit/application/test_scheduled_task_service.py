@@ -330,3 +330,56 @@ async def test_run_agent_turn_recognizes_user_abort() -> None:
         )
 
     assert exc_info.value.code == "TASK_RUN_ABORTED"
+
+
+class _StreamErrorManager:
+    """流以统一契约的 stream.error 事件终止（无 terminal 事件）。"""
+
+    async def send_message_stream(self, agent_id: str, session_id: str, content: str):
+        yield {"event": {"type": "message.delta", "payload": {"delta": "partial"}}}
+        yield {
+            "event": {
+                "type": "stream.error",
+                "payload": {
+                    "code": "UPSTREAM_AUTH",
+                    "message": "Invalid Authentication",
+                    "source": "upstream",
+                    "retryable": False,
+                    "detail": {
+                        "provider_code": "AUTH",
+                        "status_code": 401,
+                    },
+                },
+            }
+        }
+
+
+class _FailedRunFakeRepository(_AbortedRunFakeRepository):
+    def find_last_assistant_message_for_session(
+        self, session_id: str
+    ) -> SimpleNamespace:
+        # 非 interrupted：走 stream.error 载荷透传分支而非 abort 分支。
+        return SimpleNamespace(status=MessageStatus.completed)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_turn_passes_through_unified_stream_error() -> None:
+    """流以统一错误契约终止时，code 与结构化 detail 原样透传进 DomainError。"""
+    service = _make_service(_FailedRunFakeRepository())
+    service._get_agent_manager = lambda agent_id: _StreamErrorManager()  # type: ignore[method-assign]
+    service._prepare_workspace_folder = lambda task: None  # type: ignore[method-assign]
+
+    with pytest.raises(DomainError) as exc_info:
+        await service._run_agent_turn(
+            _make_task("t1"),
+            run_id="run-1",
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+            provided_session_id="session-1",
+        )
+
+    assert exc_info.value.code == "UPSTREAM_AUTH"
+    assert exc_info.value.message == "Invalid Authentication"
+    assert exc_info.value.details["error_detail"] == {
+        "provider_code": "AUTH",
+        "status_code": 401,
+    }

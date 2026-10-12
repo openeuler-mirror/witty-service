@@ -16,6 +16,10 @@ from witty_agent_server.runtimes.runtime_base import (
     RuntimeType,
     TurnEventType,
 )
+from witty_agent_server.runtimes.stream_errors import (
+    normalize_dsh_client_error,
+    normalize_dsh_turn_error,
+)
 from witty_agent_server.runtimes.usage import (
     has_token_usage,
     normalize_usage_payload,
@@ -53,7 +57,7 @@ class DshRuntime(RuntimeBase):
             yield from self._on_mapped_event(
                 {
                     "type": TurnEventType.STREAM_ERROR,
-                    "payload": {"code": exc.reason, "message": exc.message},
+                    "payload": normalize_dsh_client_error(exc.reason, exc.message),
                 }
             )
             yield from self._on_mapped_event(
@@ -206,11 +210,7 @@ class DshRuntime(RuntimeBase):
             error = error if isinstance(error, dict) else {}
             yield {
                 "type": TurnEventType.STREAM_ERROR,
-                "payload": {
-                    "code": error.get("code") or "DSH_TURN_ERROR",
-                    "message": error.get("message") or "dsh turn ended with error",
-                    "status": error.get("status"),
-                },
+                "payload": normalize_dsh_turn_error(error),
             }
         yield {"type": TurnEventType.TURN_COMPLETED, "payload": {"reason": kind}}
 

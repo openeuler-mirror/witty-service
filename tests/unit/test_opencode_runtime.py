@@ -241,7 +241,12 @@ def test_map_opencode_event_question_asked_missing_id_yields_stream_error() -> N
 
     assert len(events) == 1
     assert events[0]["type"] == "stream.error"
-    assert events[0]["payload"]["error"] == raw
+    payload = events[0]["payload"]
+    # 畸形事件无 error 对象：按协议错误归类，raw JSON 截断保留诊断信息。
+    assert payload["code"] == "RUNTIME_PROTOCOL_ERROR"
+    assert payload["source"] == "runtime"
+    assert payload["retryable"] is False
+    assert "question.asked" in payload["detail"]["raw_event"]
 
 
 # =============================================================================

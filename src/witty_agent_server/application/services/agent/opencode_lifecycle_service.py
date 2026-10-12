@@ -24,6 +24,7 @@ from witty_agent_server.infra.clients.opencode_client import (
     OpenCodeClient,
     OpenCodeClientError,
 )
+from witty_agent_server.runtimes.opencode_mcp_config import to_opencode_mcp_config
 from witty_service.config import get_settings
 from witty_service.workspace_paths import agent_workspace_path
 
@@ -98,54 +99,6 @@ def _build_opencode_model_config(
         "model": f"{model_provider}/{model_name}",
         "provider": {model_provider: provider_config},
     }
-
-
-def to_opencode_mcp_config(config: dict[str, Any]) -> dict[str, Any]:
-    """将 MCP 配置 dict 转换为 opencode serve 可接受的格式。
-
-    转换后输出:
-        {"type": "local", "command": ["npx", "-y", "..."], "environment": {...}, "enabled": true}
-    """
-    # 推断 opencode type
-    oc_type: str = "remote" if "url" in config else "local"
-    oc_config: dict[str, Any] = {"type": oc_type}
-
-    if oc_type == "local":
-        command = config.get("command")
-        args = config.get("args")
-        if isinstance(command, str):
-            merged = [command]
-            if isinstance(args, list):
-                merged.extend(str(a) for a in args)
-            oc_config["command"] = merged
-        elif isinstance(command, list):
-            merged = list(command)
-            if isinstance(args, list):
-                merged.extend(str(a) for a in args)
-            oc_config["command"] = merged
-        else:
-            logger.warning(
-                "MCP server config has invalid 'command' field (type=%s), "
-                "server will not be functional. config keys: %s",
-                type(command).__name__,
-                list(config.keys()),
-            )
-            oc_config["enabled"] = False
-            return oc_config
-        if "env" in config:
-            oc_config["environment"] = config["env"]
-        if "cwd" in config:
-            oc_config["cwd"] = config["cwd"]
-    else:
-        # remote
-        if "url" in config:
-            oc_config["url"] = config["url"]
-        if "headers" in config:
-            oc_config["headers"] = config["headers"]
-
-    oc_config["enabled"] = config.get("enabled", True)
-
-    return oc_config
 
 
 class OpenCodeLifecycleError(Exception):

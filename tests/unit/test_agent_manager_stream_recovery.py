@@ -141,13 +141,15 @@ async def _consume(
 ) -> list[dict[str, Any]]:
     with patch.object(pool, "get_client", return_value=client):
         received: list[dict[str, Any]] = []
-        async for chunk in manager.send_message_stream(AGENT_ID, SESSION_ID, "分析 redis"):
+        async for chunk in manager.send_message_stream(
+            AGENT_ID, SESSION_ID, "分析 redis"
+        ):
             received.append(chunk["event"])
         return received
 
 
 def _assistant_message(repository: SqliteRepository) -> MessageORM:
-    with repository._session_factory() as db:  # noqa: SLF001 - 测试直接查库断言
+    with repository._session_factory() as db:
         row = (
             db.query(MessageORM)
             .filter(MessageORM.session_id == SESSION_ID, MessageORM.role == "assistant")
@@ -158,7 +160,7 @@ def _assistant_message(repository: SqliteRepository) -> MessageORM:
 
 
 def _event_row_count(repository: SqliteRepository) -> int:
-    with repository._session_factory() as db:  # noqa: SLF001
+    with repository._session_factory() as db:
         return (
             db.query(MessageEventORM)
             .filter(MessageEventORM.session_id == SESSION_ID)
@@ -167,7 +169,7 @@ def _event_row_count(repository: SqliteRepository) -> int:
 
 
 def _session_status(repository: SqliteRepository) -> str:
-    with repository._session_factory() as db:  # noqa: SLF001
+    with repository._session_factory() as db:
         row = db.get(SessionORM, SESSION_ID)
         assert row is not None
         return row.status.value
@@ -194,7 +196,10 @@ def test_stream_disconnect_finalizes_message_and_session(tmp_path: Path) -> None
         received = await _consume(manager, pool, client)
 
         assert received[-1]["type"] == "stream.error"
-        assert received[-1]["payload"]["code"] == "CONSUMER_ERROR"
+        # 统一错误契约：后端消费者异常归类 INTERNAL_ERROR（agent-server
+        # stream_errors.py 词表），不再用 CONSUMER_ERROR。
+        assert received[-1]["payload"]["code"] == "INTERNAL_ERROR"
+        assert received[-1]["payload"]["source"] == "internal"
         assert sum(1 for e in received if e["type"] == "message.delta") == 200
 
         message = _assistant_message(repository)
@@ -228,5 +233,99 @@ def test_stream_completion_persists_all_batched_events(tmp_path: Path) -> None:
         assert message.content == text
         # message.completed 会把 150 条 message.delta 压缩成一条分段事件
         assert _event_row_count(repository) == 2
+
+    asyncio.run(run())
+
+
+def _single_event_payload(
+    repository: SqliteRepository, event_type: str
+) -> dict[str, Any]:
+    """取该 session 下唯一一条指定类型事件的 payload。"""
+    with repository._session_factory() as db:
+        row = (
+            db.query(MessageEventORM)
+            .filter(
+                MessageEventORM.session_id == SESSION_ID,
+                MessageEventORM.event_type == event_type,
+            )
+            .one()
+        )
+        return dict(row.payload_json or {})
+
+
+def test_stream_error_event_is_persisted_with_message(tmp_path: Path) -> None:
+    """stream.error 终态事件随消息时间线落库：刷新后前端能还原错误码与根因。"""
+
+    async def run() -> None:
+        manager, repository, pool = _make_manager(tmp_path)
+        events = [
+            _event("message.delta", {"delta": "前半"}),
+            _event(
+                "stream.error",
+                {
+                    "code": "UPSTREAM_QUOTA_EXCEEDED",
+                    "message": "Insufficient Balance",
+                    "source": "upstream",
+                    "retryable": False,
+                    "detail": {"request_id": "req-1"},
+                },
+            ),
+        ]
+        client = _ScriptedWsClient(events)
+
+        received = await _consume(manager, pool, client)
+
+        assert received[-1]["type"] == "stream.error"
+        message = _assistant_message(repository)
+        assert message.status == MessageStatus.error
+        assert message.content == "前半"
+        # message.delta ×1 + stream.error ×1
+        assert _event_row_count(repository) == 2
+        assert _single_event_payload(repository, "stream.error") == {
+            "code": "UPSTREAM_QUOTA_EXCEEDED",
+            "message": "Insufficient Balance",
+            "source": "upstream",
+            "retryable": False,
+            "detail": {"request_id": "req-1"},
+        }
+        # 会话状态由 _sync_session_state_from_event 在收到 stream.error 时置为
+        # error（既有的语义：标记上轮失败），下一轮提问时复位 running。
+        assert _session_status(repository) == "error"
+
+    asyncio.run(run())
+
+
+def test_stream_error_before_any_content_creates_errored_message(
+    tmp_path: Path,
+) -> None:
+    """错误先于任何内容事件到达：兜底建空 assistant 消息，错误事件照样落库。"""
+
+    async def run() -> None:
+        manager, repository, pool = _make_manager(tmp_path)
+        events = [
+            _event(
+                "stream.error",
+                {
+                    "code": "TRANSPORT_CLOSED",
+                    "message": "connection closed",
+                    "source": "transport",
+                    "retryable": True,
+                },
+            ),
+        ]
+        client = _ScriptedWsClient(events)
+
+        received = await _consume(manager, pool, client)
+
+        assert received[-1]["type"] == "stream.error"
+        message = _assistant_message(repository)
+        assert message.status == MessageStatus.error
+        assert message.content == ""
+        assert _event_row_count(repository) == 1
+        assert _single_event_payload(repository, "stream.error")["code"] == (
+            "TRANSPORT_CLOSED"
+        )
+        # 同上：会话被 _sync_session_state_from_event 置为 error，下轮提问复位。
+        assert _session_status(repository) == "error"
 
     asyncio.run(run())

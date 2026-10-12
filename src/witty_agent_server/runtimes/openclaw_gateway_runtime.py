@@ -12,6 +12,9 @@ from witty_agent_server.runtimes.runtime_base import (
     TurnEventType,
     tool_call_delta_event,
 )
+from witty_agent_server.runtimes.stream_errors import (
+    normalize_openclaw_lifecycle_error,
+)
 from witty_agent_server.runtimes.usage import (
     has_token_usage,
     normalize_usage_payload,
@@ -213,22 +216,9 @@ class OpenClawGatewayRuntime(RuntimeBase):
                     yield {"type": TurnEventType.TURN_COMPLETED, "payload": {}}
                     return
                 if normalized_phase == "error":
-                    code = self._pick_string(data, "code") or "OPENCLAW_LIFECYCLE_ERROR"
-                    message = (
-                        self._pick_string(
-                            data,
-                            "message",
-                            "error",
-                        )
-                        or "openclaw lifecycle stream error"
-                    )
                     yield {
                         "type": TurnEventType.STREAM_ERROR,
-                        "payload": {
-                            "code": code,
-                            "message": message,
-                            "source": "lifecycle",
-                        },
+                        "payload": normalize_openclaw_lifecycle_error(data),
                     }
                     return
             return

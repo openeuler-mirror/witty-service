@@ -8,6 +8,8 @@ import threading
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from witty_agent_server.runtimes.stream_errors import internal_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -155,10 +157,10 @@ class TaskPool:
                         "type": "stream.error",
                         "agent_id": agent_id,
                         "session_id": session_id,
-                        "payload": {
-                            "code": "PRODUCER_ERROR",
-                            "message": "Internal stream producer encountered an error",
-                        },
+                        # 统一错误契约（stream_errors.py）唯一出口，避免手写字面量漂移
+                        "payload": internal_error(
+                            "Internal stream producer encountered an error"
+                        ),
                     },
                 )
             finally:

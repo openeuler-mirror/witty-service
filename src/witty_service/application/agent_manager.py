@@ -15,6 +15,10 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
 
+# 统一错误契约（stream_errors.py）：跨包复用有先例（repositories.py 导入
+# runtimes.usage），合成 stream.error 载荷必须走唯一出口，避免手写漂移。
+from witty_agent_server.runtimes.stream_errors import internal_error
+
 logger = logging.getLogger(__name__)
 
 _recovery_lock = asyncio.Lock()
@@ -1556,14 +1560,22 @@ class AgentManager:
                 # Handle client.error events from witty-agent-server
                 if event_dict["type"] in {"client.error", "stream.error"}:
                     error_payload = event_dict.get("payload", {})
-                    error_code = error_payload.get("code", "UNKNOWN_ERROR")
+                    error_code = error_payload.get("code", "INTERNAL_ERROR")
                     error_message = error_payload.get(
                         "message", "Unknown error from adaptor"
                     )
+                    error_details: dict[str, Any] = {
+                        "session_id": session_id,
+                        "agent_id": agent_id,
+                    }
+                    # 统一错误契约（stream_errors.py）携带结构化根因；
+                    # 旧形态事件无 detail 键，容忍缺失。
+                    if isinstance(error_payload.get("detail"), dict):
+                        error_details["error_detail"] = error_payload["detail"]
                     raise DomainError(
                         code=error_code,
                         message=error_message,
-                        details={"session_id": session_id, "agent_id": agent_id},
+                        details=error_details,
                     )
                 if self._should_filter_session_event(event_dict):
                     self._logger.info(
@@ -1765,17 +1777,40 @@ class AgentManager:
 
                     if event_dict["type"] in {"client.error", "stream.error"}:
                         error_payload = event_dict.get("payload", {})
-                        error_code = error_payload.get("code", "UNKNOWN_ERROR")
+                        error_code = error_payload.get("code", "INTERNAL_ERROR")
                         error_message = error_payload.get(
                             "message", "Unknown error from adaptor"
                         )
                         failure_status = MessageStatus.error
+                        # 统一错误契约（agent-server stream_errors.py）的结构化
+                        # 根因；旧形态事件无 detail 键，容忍缺失。
+                        error_detail = error_payload.get("detail")
                         self._logger.error(
-                            "Stream error in background consumer: agent_id=%s session_id=%s code=%s message=%s",
+                            "Stream error in background consumer: agent_id=%s session_id=%s code=%s message=%s detail=%s",
                             agent_id,
                             session_id,
                             error_code,
                             error_message,
+                            error_detail if isinstance(error_detail, dict) else "",
+                        )
+                        # 错误事件随消息时间线落库
+                        if assistant_msg_id is None:
+                            assistant_msg_id = self._repository.create_message(
+                                agent_id=agent_id,
+                                session_id=session_id,
+                                role="assistant",
+                                content="",
+                                status=MessageStatus.generating,
+                            )
+                        seq_no += 1
+                        pending_events.append(
+                            (
+                                seq_no,
+                                event_dict["type"],
+                                error_payload
+                                if isinstance(error_payload, dict)
+                                else {},
+                            )
                         )
                         _stream_registry.push_event(session_id, event_dict, stream_gen)
                         _stream_registry.end_stream(session_id)
@@ -1919,10 +1954,9 @@ class AgentManager:
                     session_id,
                     {
                         "type": "stream.error",
-                        "payload": {
-                            "code": "CONSUMER_ERROR",
-                            "message": "Background WS consumer encountered an error",
-                        },
+                        "payload": internal_error(
+                            "Background WS consumer encountered an error"
+                        ),
                     },
                     stream_gen,
                 )

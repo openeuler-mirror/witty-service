@@ -19,9 +19,7 @@ from typing import Any
 import git
 import yaml
 
-from witty_agent_server.application.services.agent.opencode_lifecycle_service import (
-    to_opencode_mcp_config,
-)
+from witty_agent_server.runtimes.opencode_mcp_config import to_opencode_mcp_config
 from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.application.agent_manager import (
     AgentCreateRequest,
@@ -258,9 +256,7 @@ class AgentTemplateService:
     # skill 仓库缓存（B2）
     # ------------------------------------------------------------------
 
-    def resolve_skill_cache_dir(
-        self, git_url: str, branch: str | None = None
-    ) -> Path:
+    def resolve_skill_cache_dir(self, git_url: str, branch: str | None = None) -> Path:
         """只计算 skill 内容仓库的本地缓存路径，不触发任何拉取（GET 用）。
 
         缓存目录与既有 agenthub 模板缓存同根（``TEMPLATE_STORE_DIR``）、
@@ -322,7 +318,11 @@ class AgentTemplateService:
             raise DomainError(
                 code="TEMPLATE_SKILL_REPO_UNREACHABLE",
                 message="Skill repository cache is incomplete.",
-                details={"git_url": git_url, "branch": branch, "cache_dir": str(cache_dir)},
+                details={
+                    "git_url": git_url,
+                    "branch": branch,
+                    "cache_dir": str(cache_dir),
+                },
             )
         return cache_dir, commit
 
@@ -354,7 +354,9 @@ class AgentTemplateService:
                     cache_dir.parent.mkdir(parents=True, exist_ok=True)
                     if cache_dir.exists():
                         shutil.rmtree(cache_dir)
-                    logger.info("Prewarm cloning skill repo: %s -> %s", git_url, cache_dir)
+                    logger.info(
+                        "Prewarm cloning skill repo: %s -> %s", git_url, cache_dir
+                    )
                     git.Repo.clone_from(git_url, cache_dir, branch=branch, depth=1)
                 else:
                     self._pull_skill_repo(cache_dir, branch)
@@ -514,7 +516,9 @@ class AgentTemplateService:
 
         # c. 写 AGENTS.md（在 create_agent/onboard 之后，避免被种子化覆盖）
         if template.prompt.system:
-            (workspace / "AGENTS.md").write_text(template.prompt.system, encoding="utf-8")
+            (workspace / "AGENTS.md").write_text(
+                template.prompt.system, encoding="utf-8"
+            )
             logger.info("Wrote AGENTS.md: agent_id=%s", agent.id)
 
         # d. 合并 opencode.json 的 instructions（保留已有 model/provider/mcp）
@@ -611,7 +615,9 @@ class AgentTemplateService:
         config["instructions"] = merged
         self._write_opencode_config(workspace, config)
 
-    def _merge_opencode_mcp(self, workspace: Path, template: AgentTemplate) -> list[str]:
+    def _merge_opencode_mcp(
+        self, workspace: Path, template: AgentTemplate
+    ) -> list[str]:
         """把模板 ``mcp`` 段合并写进 ``opencode/opencode.json`` 的 ``mcp``（G1）。
 
         与 ``POST /agent/mcp/enable`` 复用同一个转换器 ``to_opencode_mcp_config``，
@@ -643,7 +649,9 @@ class AgentTemplateService:
         return names
 
     @staticmethod
-    def _resolve_mcp_env(server_name: str, storage_config: dict[str, Any]) -> dict[str, Any]:
+    def _resolve_mcp_env(
+        server_name: str, storage_config: dict[str, Any]
+    ) -> dict[str, Any]:
         """展开 mcp.env 里的 ``${VAR}`` 引用（凭据来自服务进程环境，不进模板）。
 
         未设置的环境变量对应的条目会被丢弃并记 warning——把字面量 ``${VAR}`` 传给 MCP
@@ -692,7 +700,9 @@ class AgentTemplateService:
                 agent.id,
             )
             return
-        client = AdaptorHttpClient(base_url=sandbox_state.adapter_base_url, timeout=15.0)
+        client = AdaptorHttpClient(
+            base_url=sandbox_state.adapter_base_url, timeout=15.0
+        )
         try:
             for server in template.mcp:
                 try:
