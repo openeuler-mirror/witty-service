@@ -81,19 +81,117 @@ class TaskListOverview:
 
 BUILTIN_TEMPLATES: tuple[ScheduledTaskTemplate, ...] = (
     ScheduledTaskTemplate(
-        key="daily_competitor_tracking",
-        name="每日竞品动态追踪",
-        description="每天定时抓取并汇总竞品动态、文档更新与版本发布信息。",
+        key="daily_ai_news",
+        name="每日 AI 新闻推送",
+        description="每天汇总 AI 领域的重要动态，侧重 AI coding 与具身智能进展。",
         schedule_type="cron",
         cron_expr="0 9 * * *",
         interval_seconds=None,
         timezone="Asia/Shanghai",
         content=(
-            "请执行每日竞品动态追踪：收集主要竞品的最新动态（新闻、文档更新、"
-            "版本发布、社交媒体公告），整理成带来源链接的结构化摘要，并输出到"
-            "工作目录下的今日报告文件中。"
+            "请推送今天的 AI 领域重要动态：关注 AI coding 与具身智能方向，"
+            "筛选 3-5 条值得关注的信息，逐条给出要点摘要与来源链接，"
+            "并说明每条动态对我的实际影响。"
         ),
-        workspace_folder="code/competitor-tracking",
+        workspace_folder=None,
+    ),
+    ScheduledTaskTemplate(
+        key="daily_english_words",
+        name="每日 5 个英语单词",
+        description="每天推荐 5 个高频实用英语单词，包含词义、音标、例句与记忆提示。",
+        schedule_type="cron",
+        cron_expr="0 8 * * *",
+        interval_seconds=None,
+        timezone="Asia/Shanghai",
+        content=(
+            "请推荐今天要学习的 5 个高频实用英语单词：每个单词给出词义、音标、"
+            "一条地道例句以及一个记忆提示，最后用一句话串联复习这 5 个单词。"
+        ),
+        workspace_folder=None,
+    ),
+    ScheduledTaskTemplate(
+        key="daily_repo_digest",
+        name="每日代码仓库巡检",
+        description="工作日上午汇总我参与仓库的 PR 与 Issue 进展，输出待关注事项。",
+        schedule_type="cron",
+        cron_expr="0 10 * * mon-fri",
+        interval_seconds=None,
+        timezone="Asia/Shanghai",
+        content=(
+            "请巡检我参与的代码仓库：汇总最近的 Pull Request 与 Issue 进展，"
+            "输出关键变更、待处理事项以及需要我关注的风险点，按优先级排序。"
+        ),
+        workspace_folder=None,
+    ),
+    ScheduledTaskTemplate(
+        key="weekly_work_report",
+        name="每周工作周报",
+        description="每周五汇总本周工作进展与下周计划，输出结构化周报。",
+        schedule_type="cron",
+        cron_expr="0 18 * * fri",
+        interval_seconds=None,
+        timezone="Asia/Shanghai",
+        content=(
+            "请生成本周工作周报：汇总本周已完成事项、进行中事项、遇到的问题，"
+            "并给出下周计划，按「完成 / 进行中 / 风险 / 下周计划」结构化输出。"
+        ),
+        workspace_folder=None,
+    ),
+    ScheduledTaskTemplate(
+        key="weekly_dependency_check",
+        name="每周依赖与安全更新检查",
+        description="每周一检查项目依赖的版本更新与已知安全问题，给出升级建议。",
+        schedule_type="cron",
+        cron_expr="0 9 * * mon",
+        interval_seconds=None,
+        timezone="Asia/Shanghai",
+        content=(
+            "请检查项目主要依赖：列出有更新的依赖版本与已知安全问题，"
+            "给出升级建议以及每项升级的影响面评估，标注需要优先处理的高风险项。"
+        ),
+        workspace_folder=None,
+    ),
+    ScheduledTaskTemplate(
+        key="interview_prep_reminder",
+        name="面试准备提醒",
+        description="工作日上午每 2 小时提醒复习大模型与编程知识，并生成模拟面试题。",
+        schedule_type="cron",
+        cron_expr="0 9-18/2 * * mon-fri",
+        interval_seconds=None,
+        timezone="Asia/Shanghai",
+        content=(
+            "请提醒我进行面试准备：复习大模型与编程的高频考点，"
+            "并生成 3 个模拟面试问题，附上回答要点与常见追问。"
+        ),
+        workspace_folder=None,
+    ),
+    ScheduledTaskTemplate(
+        key="meeting_prep_reminder",
+        name="会议前准备",
+        description="每个工作日早上提醒整理当天会议的议题、目标与待确认问题。",
+        schedule_type="cron",
+        cron_expr="30 9 * * mon-fri",
+        interval_seconds=None,
+        timezone="Asia/Shanghai",
+        content=(
+            "请帮我做会议前准备：整理今天会议的议题、目标、待确认问题和关键结论，"
+            "输出一份便于会前快速过一遍的准备清单。"
+        ),
+        workspace_folder=None,
+    ),
+    ScheduledTaskTemplate(
+        key="focus_break_reminder",
+        name="专注与休息提醒",
+        description="每 2 小时提醒暂存当前进度、短暂休息并明确下一步行动。",
+        schedule_type="interval",
+        cron_expr=None,
+        interval_seconds=7200,
+        timezone="Asia/Shanghai",
+        content=(
+            "请提醒我暂存当前任务进度、起身短暂休息，并帮我列出返回工作后的"
+            "下一步行动，让我能快速回到专注状态。"
+        ),
+        workspace_folder=None,
     ),
 )
 

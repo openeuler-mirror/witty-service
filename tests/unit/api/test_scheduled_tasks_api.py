@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
+from apscheduler.triggers.cron import CronTrigger
 from pydantic import ValidationError
 
 from witty_service.api import scheduled_tasks as tasks_api
@@ -445,9 +447,24 @@ def test_list_templates_returns_builtins() -> None:
 
     resp = tasks_api.list_templates(services=services)
 
-    assert len(resp) == 1
-    assert resp[0].key == "daily_competitor_tracking"
-    assert resp[0].name == "每日竞品动态追踪"
+    keys = [template.key for template in resp]
+    assert len(resp) == 8
+    assert len(keys) == len(set(keys))
+    # 每个模板必须具备可展示的文案，且计划合法：非法计划会在调度器
+    # 启动时被静默跳过，这里做前置防呆。
+    for template in resp:
+        assert template.key
+        assert template.name
+        assert template.description
+        assert template.content
+        if template.schedule_type == "cron":
+            CronTrigger.from_crontab(
+                template.cron_expr, timezone=ZoneInfo(template.timezone)
+            )
+        else:
+            assert template.schedule_type == "interval"
+            assert template.interval_seconds is not None
+            assert template.interval_seconds > 0
 
 
 def test_conversation_summary_carries_scheduled_task_id() -> None:
