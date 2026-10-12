@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
+import shutil
 import time
 from typing import Any, ClassVar
 
@@ -25,6 +28,7 @@ from witty_agent_server.infra.clients.openclaw_gateway_client import (
     OpenClawGatewayClientError,
 )
 from witty_agent_server.runtimes.runtime_base import RuntimeType
+from witty_service.workspace_paths import openclaw_profile_home
 
 logger = logging.getLogger(__name__)
 
@@ -92,15 +96,58 @@ class OpenClawAgentService(AgentServiceBase):
                 else None
             )
 
-            is_running = self._probe_openclaw_running()
+            model_provider = (
+                config.get("model", {}).get("provider", "") if config else ""
+            )
+            auth_choice = self.PROVIDER_TO_AUTH_CHOICE.get(
+                model_provider, "deepseek-api-key"
+            )
+
+            # 工厂构造本 service 时不带 profile（见 runtime_factory），这里从
+            # start payload 同步到自身、lifecycle 与 gateway client
+            if profile is not None:
+                self._profile = profile
+                self._gateway_port = gateway_port
+                self._lifecycle_service.update_config(
+                    profile=profile,
+                    gateway_port=gateway_port,
+                )
+                self._gateway_agent_client.update_config(
+                    profile=profile,
+                    gateway_port=gateway_port,
+                )
+
+            # Phase 2：全新 profile 且 provider 模板存在 → 复制模板（免 ~17s
+            # 的 per-profile npm 插件安装）。失败回退慢路径，不影响正确性。
+            was_provisioned = self._lifecycle_service.profile_is_provisioned()
+            allocated_from_template = False
+            if not was_provisioned:
+                allocated_from_template = self._allocate_profile_from_template(
+                    auth_choice=auth_choice
+                )
+
+            # probe 的 ~1.2s CLI 冷启动只在 gateway 可能已在运行时才有意义
+            # （resume / agent-server 崩溃恢复）；全新 profile（uuid4，无论是否
+            # 来自模板）不可能有 gateway 在运行，直接跳过。
+            if was_provisioned:
+                is_running = self._probe_openclaw_running()
+            else:
+                is_running = False
+                logger.info(
+                    "skipping gateway probe: profile not provisioned: profile=%s",
+                    profile,
+                )
+
             logger.info(
-                "agent start requested: agent_id=%s runtime=%s reload=%s running=%s profile=%s gateway_port=%s",
+                "agent start requested: agent_id=%s runtime=%s reload=%s running=%s "
+                "profile=%s gateway_port=%s from_template=%s",
                 agent_id,
                 self._runtime,
                 reload,
                 is_running,
                 profile,
                 gateway_port,
+                allocated_from_template,
             )
 
             if is_running and not reload:
@@ -121,9 +168,6 @@ class OpenClawAgentService(AgentServiceBase):
             if is_running:
                 self._stop_openclaw()
 
-            model_provider = (
-                config.get("model", {}).get("provider", "") if config else ""
-            )
             api_key = config.get("model", {}).get("api_key", "") if config else ""
             custom_base_url = (
                 config.get("model", {}).get("api_base_url") if config else None
@@ -133,15 +177,22 @@ class OpenClawAgentService(AgentServiceBase):
                 config.get("model", {}).get("compatibility") if config else None
             )
 
-            self._onboard_openclaw(
-                model_provider=model_provider,
-                api_key=api_key,
-                profile=profile,
-                gateway_port=gateway_port,
-                custom_base_url=custom_base_url,
-                custom_model_id=custom_model_id,
-                custom_compatibility=custom_compatibility,
-            )
+            try:
+                self._onboard_openclaw(
+                    model_provider=model_provider,
+                    api_key=api_key,
+                    profile=profile,
+                    gateway_port=gateway_port,
+                    custom_base_url=custom_base_url,
+                    custom_model_id=custom_model_id,
+                    custom_compatibility=custom_compatibility,
+                )
+            except AgentServiceError:
+                if allocated_from_template:
+                    # profile 来自模板而 onboard 仍失败 → 模板疑似陈旧/损坏
+                    # 丢弃模板，下次 create自动走慢路径重建。
+                    self._discard_profile_template(auth_choice=auth_choice)
+                raise
 
             resolved_agent_id, configured_agent = self._resolve_target_agent(
                 requested_agent_id=agent_id
@@ -259,6 +310,10 @@ class OpenClawAgentService(AgentServiceBase):
                 details=self._lifecycle_error_details(exc),
             ) from exc
 
+        # onboard 成功、gateway run 之前：profile 仍是纯净态（无会话/日志），
+        # 顺便快照为该 provider 的模板，供后续 agent 免 17s npm 安装。
+        self._snapshot_profile_template(auth_choice=auth_choice)
+
         try:
             self._lifecycle_service.start_server()
         except OpenClawLifecycleError as exc:
@@ -269,19 +324,103 @@ class OpenClawAgentService(AgentServiceBase):
                 details=self._lifecycle_error_details(exc),
             ) from exc
 
+    @staticmethod
+    def _template_profile_name(auth_choice: str) -> str:
+        """由 auth_choice 推导模板 profile 名（``tpl-<auth-choice>``）。"""
+        sanitized = re.sub(r"[^a-z0-9-]", "-", auth_choice.lower()).strip("-")
+        return f"tpl-{sanitized or 'default'}"
+
+    def _allocate_profile_from_template(self, *, auth_choice: str) -> bool:
+        """全新 profile 时从 provider 模板复制一份（省 ~17s npm 插件安装）。
+
+        模板只承担"插件已装好"的物理事实；key/model/workspace/port 等一切
+        绑定参数由随后的 onboard 重跑完成（实测 ~3s）。复制失败/模板缺失 →
+        False，调用方自然回退全量 onboard 慢路径。
+        """
+        if not self._profile:
+            return False
+        template_home = openclaw_profile_home(self._template_profile_name(auth_choice))
+        if not (
+            (template_home / "openclaw.json").exists()
+            and (template_home / "npm").exists()
+        ):
+            return False
+        profile_home = openclaw_profile_home(self._profile)
+        if profile_home.exists():
+            # 已存在（不可能走此分支：调用前置条件是未 provisioned），防御性拒绝
+            return False
+        try:
+            shutil.copytree(template_home, profile_home)
+        except OSError:
+            logger.warning(
+                "template allocation failed, falling back to slow onboard: "
+                "profile=%s template=%s",
+                self._profile,
+                template_home.name,
+                exc_info=True,
+            )
+            shutil.rmtree(profile_home, ignore_errors=True)
+            return False
+        logger.info(
+            "allocated profile from template: profile=%s template=%s",
+            self._profile,
+            template_home.name,
+        )
+        return True
+
+    def _snapshot_profile_template(self, *, auth_choice: str) -> None:
+        """onboard 成功后（gateway run 前）将 profile 快照为 provider 模板。"""
+        if not self._profile:
+            return
+        template_home = openclaw_profile_home(self._template_profile_name(auth_choice))
+        if template_home.exists():
+            return
+        profile_home = openclaw_profile_home(self._profile)
+        if not profile_home.exists():
+            return
+        staging = template_home.with_name(f"{template_home.name}.tmp-{os.getpid()}")
+        try:
+            shutil.copytree(
+                profile_home,
+                staging,
+                ignore=shutil.ignore_patterns(
+                    "state", "logs", "workspace-attestations"
+                ),
+            )
+            staging.rename(template_home)
+            logger.info("saved provider template: template=%s", template_home.name)
+        except OSError:
+            # 模板只是加速器：失败（含与并发快照的 rename 竞争）不影响启动。
+            logger.warning(
+                "failed to save provider template: template=%s",
+                template_home.name,
+                exc_info=True,
+            )
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def _discard_profile_template(self, *, auth_choice: str) -> None:
+        """丢弃疑似陈旧/损坏的模板，下次 create 走慢路径自动重建。"""
+        template_home = openclaw_profile_home(self._template_profile_name(auth_choice))
+        if template_home.exists():
+            shutil.rmtree(template_home, ignore_errors=True)
+            logger.warning(
+                "discarded provider template after onboard failure: template=%s",
+                template_home.name,
+            )
+
     def status(self, *, agent_id: str | None = None) -> Agent:
         with self._lock:
             self._ensure_agent_context(agent_id=agent_id)
             return self.agent
 
-    def stop(self, *, agent_id: str | None = None) -> Agent:
+    def stop(self, *, agent_id: str | None = None, wipe: bool = False) -> Agent:
         with self._lock:
             self._ensure_agent_context(agent_id=agent_id)
             self._transition(
                 allowed_current=(AgentStatus.RUNNING, AgentStatus.PAUSED),
                 target=AgentStatus.STOPPED,
             )
-            self._stop_openclaw()
+            self._stop_openclaw(wipe=wipe)
             return self.agent
 
     def list_agents(self) -> dict[str, Any]:
@@ -305,10 +444,14 @@ class OpenClawAgentService(AgentServiceBase):
                 details=self._lifecycle_error_details(exc),
             ) from exc
 
-    def _stop_openclaw(self) -> None:
-        """重载前先停止旧 runtime，避免进程和端口残留。"""
+    def _stop_openclaw(self, *, wipe: bool = False) -> None:
+        """停止 runtime。
+
+        ``wipe=False`` 只终止 gateway 进程（pause 语义，保留 profile 目录，
+        resume 时免重复 npm 安装插件）；``wipe=True`` 完整卸载（delete 语义）。
+        """
         try:
-            self._lifecycle_service.stop()
+            self._lifecycle_service.stop(wipe=wipe)
         except OpenClawLifecycleError as exc:
             raise AgentServiceError(
                 code="OPENCLAW_STOP_FAILED",

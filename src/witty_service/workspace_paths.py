@@ -61,3 +61,20 @@ def agent_workspace_path(agent_id: str, *, root: Path | None = None) -> Path:
     validate_agent_id(agent_id)
     base = root if root is not None else workspace_root()
     return (base / "agent-workspaces" / agent_id / "workspace").resolve()
+
+
+#: openclaw CLI 的 profile 主目录前缀（``~/.openclaw-<profile>`` 约定）。
+OPENCLAW_PROFILE_HOME_PREFIX = ".openclaw-"
+
+
+def openclaw_profile_home(profile: str) -> Path:
+    """返回 openclaw profile 主目录（``~/.openclaw-<profile>``）。
+
+    单一事实来源：openclaw CLI 自身的目录约定，由 witty-service 侧
+    （``WorkspaceStore.cleanup_openclaw_profile`` 删除兜底）与
+    witty-agent-server 侧（lifecycle probe 跳过 / provider 模板池）共同引用。
+    ``profile`` 即 agent_id（运行时）或 ``tpl-*``（模板），二者均为单段
+    目录名，``validate_agent_id`` 一并防路径穿越。
+    """
+    validate_agent_id(profile)
+    return (Path.home() / f"{OPENCLAW_PROFILE_HOME_PREFIX}{profile}").resolve()

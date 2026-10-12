@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -18,7 +17,9 @@ def client() -> AdaptorHttpClient:
     )
 
 
-def test_client_initialization_stores_base_configuration(client: AdaptorHttpClient) -> None:
+def test_client_initialization_stores_base_configuration(
+    client: AdaptorHttpClient,
+) -> None:
     assert client.base_url == "http://localhost:8080"
     assert client._timeout == 5.0
     assert client._default_headers == {"Authorization": "Bearer secret-token"}
@@ -44,7 +45,9 @@ async def test_get_client_creates_async_client_with_default_headers(
 
 
 @pytest.mark.asyncio
-async def test_request_uses_single_request_entrypoint(client: AdaptorHttpClient) -> None:
+async def test_request_uses_single_request_entrypoint(
+    client: AdaptorHttpClient,
+) -> None:
     request_client = AsyncMock()
     response = MagicMock()
     request_client.request.return_value = response
@@ -90,24 +93,37 @@ async def test_request_json_returns_parsed_payload(client: AdaptorHttpClient) ->
 
 
 @pytest.mark.asyncio
-async def test_get_post_and_delete_delegate_to_request_json(client: AdaptorHttpClient) -> None:
-    with patch.object(client, "_request_json", new=AsyncMock(side_effect=[{"a": 1}, {"b": 2}, {"c": 3}])) as request_json:
+async def test_get_post_and_delete_delegate_to_request_json(
+    client: AdaptorHttpClient,
+) -> None:
+    with patch.object(
+        client,
+        "_request_json",
+        new=AsyncMock(side_effect=[{"a": 1}, {"b": 2}, {"c": 3}]),
+    ) as request_json:
         get_result = await client.get("/api/items", params={"page": 1})
-        post_result = await client.post("/api/items", json={"name": "test"}, timeout=10.0)
+        post_result = await client.post(
+            "/api/items", json={"name": "test"}, timeout=10.0
+        )
         delete_result = await client.delete("/api/items/1")
 
     assert get_result == {"a": 1}
     assert post_result == {"b": 2}
     assert delete_result == {"c": 3}
     assert request_json.await_args_list == [
-        (( "GET", "/api/items"), {"params": {"page": 1}}),
-        (( "POST", "/api/items"), {"json": {"name": "test"}, "timeout": 10.0}),
-        (( "DELETE", "/api/items/1"), {}),
+        (("GET", "/api/items"), {"params": {"page": 1}}),
+        (
+            ("POST", "/api/items"),
+            {"json": {"name": "test"}, "timeout": 10.0, "params": None},
+        ),
+        (("DELETE", "/api/items/1"), {}),
     ]
 
 
 @pytest.mark.asyncio
-async def test_list_agents_uses_existing_runtime_endpoint(client: AdaptorHttpClient) -> None:
+async def test_list_agents_uses_existing_runtime_endpoint(
+    client: AdaptorHttpClient,
+) -> None:
     with patch.object(client, "get", new=AsyncMock(return_value={"agents": []})) as get:
         result = await client.list_agents()
 
@@ -118,7 +134,9 @@ async def test_list_agents_uses_existing_runtime_endpoint(client: AdaptorHttpCli
 @pytest.mark.asyncio
 async def test_health_check_returns_true_for_200(client: AdaptorHttpClient) -> None:
     response = MagicMock(status_code=200)
-    with patch.object(client, "_request", new=AsyncMock(return_value=response)) as request:
+    with patch.object(
+        client, "_request", new=AsyncMock(return_value=response)
+    ) as request:
         result = await client.health_check()
 
     assert result is True
@@ -126,7 +144,9 @@ async def test_health_check_returns_true_for_200(client: AdaptorHttpClient) -> N
 
 
 @pytest.mark.asyncio
-async def test_health_check_returns_false_for_non_200(client: AdaptorHttpClient) -> None:
+async def test_health_check_returns_false_for_non_200(
+    client: AdaptorHttpClient,
+) -> None:
     response = MagicMock(status_code=503)
     with patch.object(client, "_request", new=AsyncMock(return_value=response)):
         result = await client.health_check()
@@ -135,15 +155,21 @@ async def test_health_check_returns_false_for_non_200(client: AdaptorHttpClient)
 
 
 @pytest.mark.asyncio
-async def test_health_check_returns_false_for_transport_error(client: AdaptorHttpClient) -> None:
-    with patch.object(client, "_request", new=AsyncMock(side_effect=httpx.ConnectError("boom"))):
+async def test_health_check_returns_false_for_transport_error(
+    client: AdaptorHttpClient,
+) -> None:
+    with patch.object(
+        client, "_request", new=AsyncMock(side_effect=httpx.ConnectError("boom"))
+    ):
         result = await client.health_check()
 
     assert result is False
 
 
 @pytest.mark.asyncio
-async def test_close_closes_client_and_resets_instance(client: AdaptorHttpClient) -> None:
+async def test_close_closes_client_and_resets_instance(
+    client: AdaptorHttpClient,
+) -> None:
     request_client = AsyncMock()
     client._client = request_client
 

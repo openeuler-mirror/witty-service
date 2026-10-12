@@ -1,6 +1,8 @@
+import contextlib
 import json
 import logging
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -15,12 +17,23 @@ from witty_agent_server.application.services.agent._process_utils import (
     port_is_listening,
     start_stderr_drainer,
 )
-from witty_service.workspace_paths import agent_workspace_path
+from witty_service.workspace_paths import agent_workspace_path, openclaw_profile_home
 
 logger = logging.getLogger(__name__)
 
 
 CommandRunner = Callable[[list[str]], CompletedProcess[str]]
+
+#: gateway 进程 pidfile 文件名（存于 agent workspace，与 stderr 日志同目录；
+#: pause 保留 workspace，故跨 agent-server 重启仍可定位孤儿 gateway）。
+_GATEWAY_PIDFILE_NAME = "gateway.pid"
+
+#: 孤儿 gateway SIGTERM 后的存活复查间隔。
+_ORPHAN_POLL_INTERVAL_SECONDS = 0.2
+
+#: start_server 等待 gateway 端口监听的轮询间隔（gateway 实测 ~4s 起监听，
+#: 1s 粒度平均多等 0.4s，0.2s 粒度足够省时且轮询开销可忽略）。
+_GATEWAY_PORT_POLL_INTERVAL_SECONDS = 0.2
 
 
 class OpenClawLifecycleError(Exception):
@@ -206,9 +219,31 @@ class OpenClawLifecycleService:
             return False
         return self._result_indicates_running(result)
 
-    def stop(self) -> None:
-        """停止 openclaw gateway 并执行完整卸载"""
+    def profile_is_provisioned(self) -> bool:
+        """profile 是否已完成过 onboard（存在 openclaw.json 配置）。
+
+        未 provisioned 的 profile 不可能有 gateway 在运行（onboard 先于
+        gateway run），调用方可据此跳过 ``probe_running`` 的 ~1.2s CLI 冷启动；
+        也是 provider 模板池「全新 profile 才分配」的判定依据。
+        """
         if not self._profile:
+            return False
+        return (openclaw_profile_home(self._profile) / "openclaw.json").exists()
+
+    def stop(self, *, wipe: bool = False) -> None:
+        """停止 openclaw gateway。
+
+        - ``wipe=False``（pause 路径）：只终止 gateway 进程，保留 profile 目录
+          （含已安装的 provider 插件、openclaw 会话状态与 workspace）。注意
+          ``uninstall --all`` 会连 agent workspace 一起删除（数据丢失），且
+          强制下次启动重新 npm 安装插件（~17s），因此 pause 绝不可用。
+        - ``wipe=True``（delete 路径）：执行 ``uninstall --all`` 完整卸载。
+        """
+        if not self._profile:
+            return
+
+        if not wipe:
+            self._stop_gateway_process()
             return
 
         # 构建卸载命令
@@ -275,6 +310,7 @@ class OpenClawLifecycleService:
             log_prefix="openclaw gateway stderr",
             thread_name="openclaw-gateway-stderr-drainer",
         )
+        self._write_gateway_pidfile(self._gateway_process.pid)
 
         deadline = time.time() + 30
         while time.time() < deadline:
@@ -294,7 +330,7 @@ class OpenClawLifecycleService:
                     "Gateway started successfully on port %s", self._gateway_port
                 )
                 return
-            time.sleep(1)
+            time.sleep(_GATEWAY_PORT_POLL_INTERVAL_SECONDS)
 
         self._stop_gateway_process()
         raise OpenClawLifecycleError(
@@ -308,26 +344,133 @@ class OpenClawLifecycleService:
 
     def _stop_gateway_process(self) -> None:
         process = self._gateway_process
-        if process is None:
-            return
-        self._gateway_process = None
+        if process is not None:
+            self._gateway_process = None
 
-        try:
-            process.terminate()
-            process.wait(timeout=_STOP_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
             try:
-                process.kill()
-                process.wait(timeout=_KILL_TIMEOUT_SECONDS)
+                process.terminate()
+                process.wait(timeout=_STOP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                    process.wait(timeout=_KILL_TIMEOUT_SECONDS)
+                except Exception:
+                    logger.exception("Failed to kill gateway process, giving up")
             except Exception:
-                logger.exception("Failed to kill gateway process, giving up")
-        except Exception:
-            logger.exception("Failed to terminate gateway process")
+                logger.exception("Failed to terminate gateway process")
+        else:
+            # 本进程没有 Popen 句柄：agent-server 重启/崩溃后遗留的孤儿
+            # gateway 仍占着端口，若不回收，start_server 会因端口冲突失败
+            self._kill_orphan_gateway()
 
+        self._remove_gateway_pidfile()
         drainer = self._stderr_drainer
         self._stderr_drainer = None
         if drainer is not None and drainer.is_alive():
             drainer.join(timeout=_STDERR_DRAIN_JOIN_TIMEOUT)
+
+    def _gateway_pidfile_path(self) -> Path | None:
+        workspace = self._workspace_path()
+        if workspace is None:
+            return None
+        return workspace / _GATEWAY_PIDFILE_NAME
+
+    def _write_gateway_pidfile(self, pid: int) -> None:
+        pidfile = self._gateway_pidfile_path()
+        if pidfile is None:
+            return
+        try:
+            pidfile.parent.mkdir(parents=True, exist_ok=True)
+            pidfile.write_text(str(pid), encoding="utf-8")
+        except OSError:
+            logger.warning(
+                "Failed to write gateway pidfile: profile=%s pid=%s",
+                self._profile,
+                pid,
+                exc_info=True,
+            )
+
+    def _remove_gateway_pidfile(self) -> None:
+        pidfile = self._gateway_pidfile_path()
+        if pidfile is None:
+            return
+        try:
+            pidfile.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "Failed to remove gateway pidfile: profile=%s", self._profile
+            )
+
+    def _kill_orphan_gateway(self) -> None:
+        """按 pidfile 回收孤儿 gateway。"""
+        pidfile = self._gateway_pidfile_path()
+        if pidfile is None or not pidfile.exists():
+            return
+        try:
+            pid = int(pidfile.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            logger.warning(
+                "Ignoring unreadable gateway pidfile: profile=%s", self._profile
+            )
+            return
+
+        if not self._pid_is_gateway_for_workspace(pid):
+            # PID 已被回收复用或非本 profile 的 gateway，pidfile 过期。
+            return
+
+        logger.info(
+            "Killing orphan gateway process: profile=%s pid=%s",
+            self._profile,
+            pid,
+        )
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except OSError:
+            logger.warning(
+                "Failed to signal orphan gateway: profile=%s pid=%s",
+                self._profile,
+                pid,
+                exc_info=True,
+            )
+            return
+
+        deadline = time.time() + _STOP_TIMEOUT_SECONDS
+        while time.time() < deadline:
+            if not self._pid_alive(pid):
+                return
+            time.sleep(_ORPHAN_POLL_INTERVAL_SECONDS)
+
+        logger.warning(
+            "Orphan gateway survived SIGTERM, escalating to SIGKILL: profile=%s pid=%s",
+            self._profile,
+            pid,
+        )
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
+
+    def _pid_is_gateway_for_workspace(self, pid: int) -> bool:
+        """校验 PID 确为本 profile 的 gateway（environ 匹配），防误杀复用 PID。"""
+        workspace = self._workspace_path()
+        if workspace is None:
+            return False
+        expected = f"OPENCLAW_WORKSPACE_DIR={workspace}"
+        try:
+            environ = Path(f"/proc/{pid}/environ").read_bytes()
+        except OSError:
+            return False
+        return expected.encode("utf-8") in environ
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
 
     def mcp_set(self, name: str, config: dict[str, object]) -> None:
         if not self._profile:

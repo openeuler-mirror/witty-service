@@ -558,12 +558,13 @@ class OpenCodeLifecycleService:
             last_error,
         )
 
-    def stop(self) -> None:
+    def stop(self, *, wipe: bool = False) -> None:
         """优雅停止：``POST /instance/dispose`` → ``Popen.terminate()`` 兜底。
 
         不变量：调用结束时分机进程**必须**已终止；若 dispose 与 fallback
         终止都未能杀死进程，显式 raise ``OpenCodeLifecycleError``。
         """
+        del wipe  # opencode 无 profile 目录概念，pause/delete 停止行为一致
         disposed = False
         process = self._serve_process
         try:

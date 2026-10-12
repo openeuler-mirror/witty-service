@@ -177,12 +177,13 @@ class DshAgentService(AgentServiceBase):
                 }
         return sanitized
 
-    def stop(self, *, agent_id: str | None = None) -> Agent:
+    def stop(self, *, agent_id: str | None = None, wipe: bool = False) -> Agent:
         """停止 dsh harness 并将状态切换为 stopped。
 
         若 harness 在 SDK 终止兜底后仍存活（stop 抛 DshLifecycleError），
         将状态置为 FAILED。
         """
+        del wipe  # dsh 无 profile 目录概念，pause/delete 停止行为一致
         with self._lock:
             self._ensure_agent_context(agent_id=agent_id)
 

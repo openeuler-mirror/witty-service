@@ -4,7 +4,6 @@ from typing import Any
 
 import httpx
 
-
 QueryParams = dict[str, Any] | list[tuple[str, Any]]
 
 
@@ -81,8 +80,11 @@ class AdaptorHttpClient:
         path: str,
         json: dict[str, Any] | None = None,
         timeout: float | None = None,
+        params: QueryParams | None = None,
     ) -> Any:
-        return await self._request_json("POST", path, json=json, timeout=timeout)
+        return await self._request_json(
+            "POST", path, params=params, json=json, timeout=timeout
+        )
 
     async def get(
         self,

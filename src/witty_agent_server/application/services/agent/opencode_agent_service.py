@@ -3,8 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from witty_agent_server.application.models.agent import Agent
-from witty_agent_server.application.models.agent import AgentStatus
+from witty_agent_server.application.models.agent import Agent, AgentStatus
 from witty_agent_server.application.services.agent.base import (
     AgentServiceBase,
     OpenCodeLifecycleControlPort,
@@ -16,7 +15,6 @@ from witty_agent_server.application.services.agent.opencode_lifecycle_service im
 )
 from witty_agent_server.infra.clients.opencode_client import OpenCodeClient
 from witty_agent_server.runtimes.runtime_base import RuntimeType
-
 
 logger = logging.getLogger(__name__)
 
@@ -147,11 +145,12 @@ class OpenCodeAgentService(AgentServiceBase):
                 compatibility=model_cfg.get("compatibility"),
             )
 
-    def stop(self, *, agent_id: str | None = None) -> Agent:
+    def stop(self, *, agent_id: str | None = None, wipe: bool = False) -> Agent:
         """停止 opencode serve 进程并将状态切换为 stopped。
 
         若进程在 dispose + terminate + kill 后仍存活，将状态置为 FAILED
         """
+        del wipe  # opencode 无 profile 目录概念，pause/delete 停止行为一致
         with self._lock:
             self._ensure_agent_context(agent_id=agent_id)
 

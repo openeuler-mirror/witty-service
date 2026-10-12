@@ -150,13 +150,14 @@ class DshLifecycleService:
             DshLifecycleService._is_harness_alive(harness)
         )
 
-    def stop(self) -> None:
+    def stop(self, *, wipe: bool = False) -> None:
         """关闭 harness；复查底层进程存活，仍存活则抛 DshLifecycleError。
 
         不变量：正常返回时子进程必须已终止——close 为 best-effort，
         直读 ``poll()`` 复查（不依赖 close 时重置的 ``_initialized``），
         避免僵尸进程泄漏且状态误报 STOPPED。
         """
+        del wipe  # dsh 无 profile 目录概念，pause/delete 停止行为一致
         harness = self._client.harness
         self._client.close_harness()
         if harness is not None:
