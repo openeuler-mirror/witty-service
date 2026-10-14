@@ -60,7 +60,12 @@ from witty_service.adapter.websocket_client_pool import (
 )
 from witty_service.adapter.websocket_protocol import OutboundMessage
 from witty_service.domain.enums import AgentStatus, can_transition
-from witty_service.domain.errors import DomainError, agent_not_found
+from witty_service.domain.errors import (
+    DomainError,
+    agent_not_found,
+    regenerate_target_not_found,
+    session_busy,
+)
 from witty_service.domain.field_limits import (
     validate_agent_description,
     validate_agent_name,
@@ -214,7 +219,34 @@ class AgentRepository(Protocol):
         role: str,
         content: str,
         metadata_json: dict[str, Any] | None = None,
+        status: MessageStatus = MessageStatus.completed,
+        replaces_message_id: str | None = None,
     ) -> str: ...
+
+    def delete_message(self, message_id: str, *, session_id: str) -> bool: ...
+
+    def create_message_events_bulk(
+        self,
+        *,
+        agent_id: str,
+        session_id: str,
+        events: list[tuple[int, str, dict[str, Any]]],
+        message_id: str | None = None,
+        max_retries: int = 5,
+    ) -> int: ...
+
+    def finalize_message(
+        self,
+        message_id: str,
+        *,
+        status: MessageStatus,
+        content: str | None = None,
+        last_stream_at: datetime | None = None,
+    ) -> None: ...
+
+    def find_last_user_message_at_or_before(
+        self, session_id: str, created_at: datetime
+    ) -> Any | None: ...
 
     def create_message_event_with_retry(
         self,
@@ -360,6 +392,15 @@ class SessionStreamRegistry:
         self._terminated.discard(session_id)
         return gen
 
+    def try_start_stream(self, session_id: str) -> int | None:
+        """占用会话流并返回 generation；已有活动流时返回 None。
+
+        判断与占用之间没有 await，同一事件循环内不会再被插入别的请求。
+        """
+        if self.is_active(session_id):
+            return None
+        return self.start_stream(session_id)
+
     def push_event(
         self, session_id: str, event: dict[str, Any], generation: int
     ) -> None:
@@ -379,6 +420,11 @@ class SessionStreamRegistry:
 
     def is_active(self, session_id: str) -> bool:
         return session_id in self._subscribers and session_id not in self._terminated
+
+    def release_stream(self, session_id: str, generation: int) -> None:
+        """释放尚未交给消费任务的预约；generation 已不是当前流时不动。"""
+        if self._generation.get(session_id) == generation:
+            self.end_stream(session_id)
 
     def get_buffered_events(self, session_id: str) -> list[dict[str, Any]]:
         return list(self._buffers.get(session_id, []))
@@ -1651,6 +1697,84 @@ class AgentManager:
         session_id: str,
         content: str,
     ) -> AsyncIterator[dict[str, Any]]:
+        """发送一条用户消息，流式返回本轮助手回复。"""
+        agent, session = await self._resolve_turn_context(agent_id, session_id)
+
+        self._repository.create_message(
+            agent_id=agent_id,
+            session_id=session_id,
+            role="user",
+            content=content,
+        )
+        self._auto_generate_session_title(agent_id, session_id, session=session)
+
+        ws_content = self._maybe_prepend_interruption_prefix(session_id, content)
+        async for item in self._stream_assistant_turn(
+            agent_id, session_id, ws_content, agent=agent, session=session
+        ):
+            yield item
+
+    async def regenerate_message_stream(
+        self,
+        agent_id: str,
+        session_id: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """重跑会话最后一条助手回复，不新增用户消息。"""
+        agent, session = await self._resolve_turn_context(agent_id, session_id)
+
+        # 会话已有生成在飞：拒绝并发重跑（409）。占用与后面的前置校验之间没有
+        # await，所以同进程内两个重跑不可能同时通过；跨进程仍靠 agent-server 兜底。
+        stream_gen = _stream_registry.try_start_stream(session_id)
+        if stream_gen is None:
+            raise session_busy(session_id=session_id)
+
+        try:
+            target = self._repository.find_last_assistant_message_for_session(
+                session_id
+            )
+            if target is None:
+                raise regenerate_target_not_found(session_id=session_id)
+
+            prompt_row = self._repository.find_last_user_message_at_or_before(
+                session_id, target.created_at
+            )
+            if prompt_row is None or not prompt_row.content.strip():
+                raise regenerate_target_not_found(session_id=session_id)
+
+            # 前缀取决于被替换回复的状态，必须在删行前计算。
+            ws_content = self._maybe_prepend_interruption_prefix(
+                session_id, prompt_row.content
+            )
+            self._logger.info(
+                "regenerate: replacing assistant message: agent_id=%s session_id=%s "
+                "target_msg_id=%s target_status=%s prompt_msg_id=%s",
+                agent_id,
+                session_id,
+                target.id,
+                target.status,
+                prompt_row.id,
+            )
+        except BaseException:
+            _stream_registry.release_stream(session_id, stream_gen)
+            raise
+
+        # 删旧行推迟到新行落库的同一事务（superseded_message_id）：本轮在写出
+        # 第一个事件前失败时，旧答案仍然在库里。标题取自首条用户消息，无需重算。
+        async for item in self._stream_assistant_turn(
+            agent_id,
+            session_id,
+            ws_content,
+            agent=agent,
+            session=session,
+            superseded_message_id=target.id,
+            stream_gen=stream_gen,
+        ):
+            yield item
+
+    async def _resolve_turn_context(
+        self, agent_id: str, session_id: str
+    ) -> tuple[AgentRecord, SessionRecord | None]:
+        """取本轮所需的 agent / session，paused 时先拉起。"""
         agent = self._get_agent(agent_id)
         # 同 send_message：只查一次，读完沿调用链传下去。
         session = self._session_manager.get_session(agent_id, session_id)
@@ -1663,22 +1787,37 @@ class AgentManager:
                 message="Agent must be running to send messages.",
                 details={"agent_id": agent_id, "status": agent.status.value},
             )
+        return agent, session
 
-        self._repository.create_message(
-            agent_id=agent_id,
-            session_id=session_id,
-            role="user",
-            content=content,
-        )
-        self._auto_generate_session_title(agent_id, session_id, session=session)
+    async def _stream_assistant_turn(
+        self,
+        agent_id: str,
+        session_id: str,
+        content: str,
+        *,
+        agent: AgentRecord,
+        session: SessionRecord | None,
+        superseded_message_id: str | None = None,
+        stream_gen: int | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """发送 ``content``、落库并流式产出助手回复；用户消息由调用方负责。
 
-        ws_content = self._maybe_prepend_interruption_prefix(session_id, content)
-        ws_client = await self._prepare_ws_message_client(
-            agent_id, session_id, ws_content, agent=agent, session=session
-        )
+        ``stream_gen`` 是调用方（重生成）已占用的流：交接前失败要由这里释放，
+        交接后由消费任务自己收尾。``superseded_message_id`` 是要被本轮替换掉的
+        助手消息，与新建行在同一事务里删除。
+        """
+        try:
+            ws_client = await self._prepare_ws_message_client(
+                agent_id, session_id, content, agent=agent, session=session
+            )
+        except BaseException:
+            if stream_gen is not None:
+                _stream_registry.release_stream(session_id, stream_gen)
+            raise
 
-        # Start a new stream generation
-        stream_gen = _stream_registry.start_stream(session_id)
+        if stream_gen is None:
+            # Start a new stream generation
+            stream_gen = _stream_registry.start_stream(session_id)
         queue = _stream_registry.subscribe(session_id)
 
         seq_no = 0
@@ -1854,6 +1993,7 @@ class AgentManager:
                             role="assistant",
                             content="",
                             status=MessageStatus.generating,
+                            replaces_message_id=superseded_message_id,
                         )
 
                     event_type = event_dict["type"]

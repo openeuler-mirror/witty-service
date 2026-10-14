@@ -972,8 +972,14 @@ class SqliteRepository:
         content: str,
         metadata_json: dict[str, Any] | None = None,
         status: MessageStatus = MessageStatus.completed,
+        replaces_message_id: str | None = None,
     ) -> str:
+        """新增消息；``replaces_message_id`` 与新增同一事务删除（重生成替换语义）。"""
         with self._session_factory() as session:
+            if replaces_message_id is not None:
+                self._delete_message_in_session(
+                    session, replaces_message_id, session_id=session_id
+                )
             row = MessageORM(
                 id=str(uuid4()),
                 agent_id=agent_id,
@@ -986,6 +992,36 @@ class SqliteRepository:
             session.add(row)
             session.commit()
             return row.id
+
+    def delete_message(self, message_id: str, *, session_id: str) -> bool:
+        """硬删除一条消息及其事件（限定会话），返回是否命中。"""
+        with self._session_factory() as session:
+            removed = self._delete_message_in_session(
+                session, message_id, session_id=session_id
+            )
+            session.commit()
+            return removed
+
+    @staticmethod
+    def _delete_message_in_session(
+        session: Session, message_id: str, *, session_id: str
+    ) -> bool:
+        """在给定事务内删掉消息及其事件；未命中返回 False（幂等）。"""
+        row = (
+            session.query(MessageORM)
+            .filter(
+                MessageORM.id == message_id,
+                MessageORM.session_id == session_id,
+            )
+            .one_or_none()
+        )
+        if row is None:
+            return False
+        session.query(MessageEventORM).filter(
+            MessageEventORM.message_id == message_id
+        ).delete(synchronize_session=False)
+        session.delete(row)
+        return True
 
     def create_message_event_with_retry(
         self,
@@ -1144,6 +1180,22 @@ class SqliteRepository:
                     MessageORM.session_id == session_id,
                     MessageORM.role == "assistant",
                     MessageORM.status == MessageStatus.generating,
+                )
+                .order_by(MessageORM.created_at.desc())
+                .first()
+            )
+
+    def find_last_user_message_at_or_before(
+        self, session_id: str, created_at: datetime
+    ) -> MessageORM | None:
+        """取该时间点（含）之前最后一条用户消息（重生成据此取原提问）。"""
+        with self._session_factory() as session:
+            return (
+                session.query(MessageORM)
+                .filter(
+                    MessageORM.session_id == session_id,
+                    MessageORM.role == "user",
+                    MessageORM.created_at <= created_at,
                 )
                 .order_by(MessageORM.created_at.desc())
                 .first()

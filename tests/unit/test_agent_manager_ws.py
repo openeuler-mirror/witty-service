@@ -164,6 +164,8 @@ class FakeRepository:
         role: str,
         content: str,
         metadata_json: dict[str, Any] | None = None,
+        status: Any = None,
+        replaces_message_id: str | None = None,
     ) -> str:
         self.messages.append(
             {
