@@ -714,6 +714,24 @@ async def send_message_stream(
 
 
 @router.post(
+    "/{agent_id}/sessions/{session_id}/messages/regenerate",
+    response_class=StreamingResponse,
+)
+async def regenerate_message_stream(
+    agent_id: str,
+    session_id: str,
+    services: ServiceContainer = Depends(get_services),
+) -> StreamingResponse:
+    """重跑会话最后一条助手回复（SSE 事件契约同发消息）。"""
+    manager = services.get_agent_manager_for_agent(agent_id)
+    event_stream = manager.regenerate_message_stream(
+        agent_id=agent_id,
+        session_id=session_id,
+    )
+    return await _build_sse_streaming_response(event_stream)
+
+
+@router.post(
     "/{agent_id}/sessions/{session_id}/messages/stream/reconnect",
     response_class=StreamingResponse,
 )

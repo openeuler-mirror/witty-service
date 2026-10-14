@@ -14,6 +14,8 @@ INSIGHT_SESSION_MAPPING_NOT_FOUND = "INSIGHT_SESSION_MAPPING_NOT_FOUND"
 SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
 AGENT_NOT_FOUND = "AGENT_NOT_FOUND"
 INVALID_SESSION_METADATA = "INVALID_SESSION_METADATA"
+REGENERATE_TARGET_NOT_FOUND = "REGENERATE_TARGET_NOT_FOUND"
+SESSION_BUSY = "SESSION_BUSY"
 
 
 class DomainError(Exception):
@@ -175,6 +177,30 @@ class InvalidSessionMetadataError(FieldValidationError):
     error_message = "invalid session metadata"
 
 
+class RegenerateTargetNotFoundError(DomainError):
+    """会话里没有可重生成的助手回复（404）。"""
+
+    def __init__(self, *, session_id: str) -> None:
+        super().__init__(
+            code=REGENERATE_TARGET_NOT_FOUND,
+            message="No assistant message available to regenerate.",
+            status_code=404,
+            details={"session_id": session_id},
+        )
+
+
+class SessionBusyError(DomainError):
+    """同会话已有生成在飞，拒绝并发重生成（409）；错误码与 agent-server 对齐。"""
+
+    def __init__(self, *, session_id: str) -> None:
+        super().__init__(
+            code=SESSION_BUSY,
+            message="Session already has a generation in flight.",
+            status_code=409,
+            details={"session_id": session_id},
+        )
+
+
 def insight_disabled() -> DomainError:
     return DomainError(
         code=INSIGHT_DISABLED,
@@ -264,3 +290,13 @@ def session_not_found(
 ) -> SessionNotFoundError:
     """会话不存在，统一 404（具名子类，便于与 agent 缺失区分）。"""
     return SessionNotFoundError(session_id=session_id, agent_id=agent_id)
+
+
+def regenerate_target_not_found(*, session_id: str) -> RegenerateTargetNotFoundError:
+    """没有可重生成的助手回复，统一 404。"""
+    return RegenerateTargetNotFoundError(session_id=session_id)
+
+
+def session_busy(*, session_id: str) -> SessionBusyError:
+    """会话正在生成，统一 409。"""
+    return SessionBusyError(session_id=session_id)
