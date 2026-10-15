@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from witty_service.channels import errors as err
 from witty_service.channels.adapters.base import (
@@ -53,6 +54,9 @@ from witty_service.persistence.orm import ChannelInstanceStatus, ProvisioningSta
 STATE_FIELD = "state_b64"
 
 logger = logging.getLogger(__name__)
+
+#: 成功实例 id 的进程内缓存上限。
+FINISHED_INSTANCE_CACHE_MAX = 256
 
 DriverFactory = Callable[[str], ProvisioningDriver]
 InstanceReadyHook = Callable[[ChannelInstanceRecord], Coroutine[Any, Any, None]]
@@ -176,6 +180,10 @@ class ProvisioningFlow:
         #: (channel, owner_ref) -> attempt_id：同一实例只允许一个进行中的接入尝试
         self._inflight: dict[tuple[str, str | None], str] = {}
         self._last_poll_at: dict[str, datetime] = {}
+        #: attempt_id -> 同一接入的 poll/cancel 串行锁
+        self._poll_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        #: attempt_id -> 成功实例 id（进程内、容量有界）
+        self._finished_instance_ids: dict[str, str] = {}
 
     # ==========================================================================
     # 开始
@@ -244,10 +252,20 @@ class ProvisioningFlow:
     # ==========================================================================
 
     async def poll(self, attempt_id: str, *, force: bool = False) -> ProvisioningResult:
+        lock = self._poll_locks.setdefault(attempt_id, asyncio.Lock())
+        async with lock:
+            return await self._poll_locked(attempt_id, force=force)
+
+    async def _poll_locked(
+        self, attempt_id: str, *, force: bool = False
+    ) -> ProvisioningResult:
         attempt = self._require_attempt(attempt_id)
 
         if attempt.status != ProvisioningStatus.waiting.value:
-            return ProvisioningResult(attempt=self._view(attempt), instance=None)
+            return ProvisioningResult(
+                attempt=self._view(attempt),
+                instance=self._load_finished_instance(attempt.id),
+            )
 
         now = self._clock()
         if self._is_expired(attempt, now):
@@ -284,9 +302,9 @@ class ProvisioningFlow:
             outcome = ProvisioningOutcome(
                 status=STATUS_FAILED, error_code=err.CHANNEL_PROVISIONING_FAILED
             )
-        return self._apply_outcome(attempt, outcome)
+        return await self._apply_outcome(attempt, outcome)
 
-    def _apply_outcome(
+    async def _apply_outcome(
         self, attempt: ChannelProvisioningRecord, outcome: ProvisioningOutcome
     ) -> ProvisioningResult:
         if outcome.status == STATUS_WAITING:
@@ -315,7 +333,7 @@ class ProvisioningFlow:
             )
 
         if outcome.status == STATUS_SUCCEEDED and outcome.credentials:
-            return self._finish_succeeded(attempt, outcome)
+            return await self._finish_succeeded(attempt, outcome)
 
         return self._fail(
             attempt, outcome.error_code or err.CHANNEL_PROVISIONING_FAILED
@@ -365,7 +383,7 @@ class ProvisioningFlow:
             return False
         return True
 
-    def _finish_succeeded(
+    async def _finish_succeeded(
         self, attempt: ChannelProvisioningRecord, outcome: ProvisioningOutcome
     ) -> ProvisioningResult:
         credentials = dict(outcome.credentials or {})
@@ -403,18 +421,23 @@ class ProvisioningFlow:
             state_ref=None,
             error_code=None,
         )
+        self._remember_finished_instance(attempt.id, instance.id)
         self._clear_state(attempt)
         self._forget(attempt)
         if self._on_instance_ready is not None:
-            # 通知网关装配并连接；失败不影响"接入已成功"这一事实
+            # 接口返回前完成连接，确保调用方拿到已连接实例；连接失败不改变接入成功。
             try:
-                _schedule(self._on_instance_ready(instance))
+                await self._on_instance_ready(instance)
             except Exception:
                 logger.warning(
                     "Failed to notify channel gateway about new instance: %s",
                     instance.id,
                     exc_info=True,
                 )
+            # 连接会更新实例状态/世代，重取后才能返回最新记录。
+            refreshed = self._repository.get_instance(instance.id)
+            if refreshed is not None:
+                instance = refreshed
         return ProvisioningResult(
             attempt=self._view(_require(settled, attempt.id), instance_id=instance.id),
             instance=instance,
@@ -424,10 +447,18 @@ class ProvisioningFlow:
     # 取消
     # ==========================================================================
 
-    async def cancel(self, attempt_id: str) -> ProvisioningAttemptView:
+    async def cancel(self, attempt_id: str) -> ProvisioningResult:
+        lock = self._poll_locks.setdefault(attempt_id, asyncio.Lock())
+        async with lock:
+            return await self._cancel_locked(attempt_id)
+
+    async def _cancel_locked(self, attempt_id: str) -> ProvisioningResult:
         attempt = self._require_attempt(attempt_id)
         if attempt.status != ProvisioningStatus.waiting.value:
-            return self._view(attempt)
+            return ProvisioningResult(
+                attempt=self._view(attempt),
+                instance=self._load_finished_instance(attempt.id),
+            )
         cancelled = self._repository.update_provisioning(
             attempt.id,
             status=ProvisioningStatus.cancelled.value,
@@ -435,7 +466,9 @@ class ProvisioningFlow:
         )
         self._clear_state(attempt)
         self._forget(attempt)
-        return self._view(_require(cancelled, attempt.id))
+        return ProvisioningResult(
+            attempt=self._view(_require(cancelled, attempt.id)), instance=None
+        )
 
     # ==========================================================================
     # 内部
@@ -530,6 +563,18 @@ class ProvisioningFlow:
         self._inflight.pop((attempt.channel, attempt.owner_ref), None)
         self._last_poll_at.pop(attempt.id, None)
 
+    def _remember_finished_instance(self, attempt_id: str, instance_id: str) -> None:
+        self._finished_instance_ids[attempt_id] = instance_id
+        while len(self._finished_instance_ids) > FINISHED_INSTANCE_CACHE_MAX:
+            oldest = next(iter(self._finished_instance_ids))
+            self._finished_instance_ids.pop(oldest, None)
+
+    def _load_finished_instance(self, attempt_id: str) -> ChannelInstanceRecord | None:
+        instance_id = self._finished_instance_ids.get(attempt_id)
+        if instance_id is None:
+            return None
+        return self._repository.get_instance(instance_id)
+
     def _view(
         self, attempt: ChannelProvisioningRecord, *, instance_id: str | None = None
     ) -> ProvisioningAttemptView:
@@ -568,26 +613,6 @@ def _default_driver_factory(channel: str) -> ProvisioningDriver:
     if driver_cls is None:
         raise err.channel_adapter_unknown(channel=channel)
     return driver_cls()
-
-
-def _schedule(coro: Coroutine[Any, Any, None]) -> None:
-    """在事件循环内调度通知；没有运行中的循环时退化为直接丢弃（只记日志）。"""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:  # pragma: no cover - 同步调用场景
-        coro.close()
-        logger.warning("No running loop to notify channel gateway about new instance")
-        return
-    task: asyncio.Task[None] = loop.create_task(coro)
-    task.add_done_callback(_log_task_failure)
-
-
-def _log_task_failure(task: Any) -> None:
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.warning("Channel instance-ready hook failed", exc_info=exc)
 
 
 __all__ = [

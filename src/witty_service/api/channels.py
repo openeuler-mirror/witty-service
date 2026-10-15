@@ -170,9 +170,7 @@ async def get_provisioning(
 ) -> ProvisionResponse:
     result = await services.get_channel_provisioning().poll(attempt_id)
     instance = (
-        None
-        if result.instance is None
-        else _to_response(services, result.instance)
+        None if result.instance is None else _to_response(services, result.instance)
     )
     attempt = result.attempt
     return ProvisionResponse(
@@ -192,7 +190,11 @@ async def cancel_provisioning(
     attempt_id: str,
     services: ServiceContainer = Depends(get_services),
 ) -> ProvisionResponse:
-    attempt = await services.get_channel_provisioning().cancel(attempt_id)
+    result = await services.get_channel_provisioning().cancel(attempt_id)
+    instance = (
+        None if result.instance is None else _to_response(services, result.instance)
+    )
+    attempt = result.attempt
     return ProvisionResponse(
         attempt_id=attempt.attempt_id,
         channel=attempt.channel,
@@ -201,6 +203,7 @@ async def cancel_provisioning(
         expires_at=attempt.expires_at,
         poll_interval_ms=attempt.poll_interval_ms,
         error_code=attempt.error_code,
+        instance=instance,
     )
 
 
@@ -280,7 +283,9 @@ async def delete_instance(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/instances/{instance_id}/reconnect", response_model=ChannelInstanceResponse)
+@router.post(
+    "/instances/{instance_id}/reconnect", response_model=ChannelInstanceResponse
+)
 async def reconnect_instance(
     instance_id: str,
     services: ServiceContainer = Depends(get_services),

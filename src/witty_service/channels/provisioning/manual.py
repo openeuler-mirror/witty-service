@@ -76,6 +76,10 @@ class ManualCredentialBinder:
                     instance.id,
                     exc_info=True,
                 )
+            # 连接会更新实例状态/世代，重取后才能返回最新记录。
+            refreshed = self._repository.get_instance(instance.id)
+            if refreshed is not None:
+                instance = refreshed
         return instance
 
 
