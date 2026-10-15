@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import fields
 from datetime import UTC, datetime, timedelta
@@ -245,10 +246,134 @@ async def test_poll_succeeded_persists_credentials_and_creates_instance(
     assert store.resolve(store.ref_for_provisioning(view.attempt_id)) is None
     assert stored.status == STATUS_SUCCEEDED
     # 编排衔接到实例装配
-    import asyncio
-
-    await asyncio.sleep(0)
     assert ready == [instance.id]
+
+
+@pytest.mark.asyncio
+async def test_poll_succeeded_returns_post_connect_instance_state(
+    repository: ChannelRepository, store: ChannelCredentialStore
+) -> None:
+    """poll 返回前先执行连接钩子，响应必须反映连接后的实例状态。"""
+    driver = FakeDriver(
+        outcomes=[
+            ProvisioningOutcome(
+                status=STATUS_SUCCEEDED,
+                credentials={"bot_id": "bot-12345678", "secret": "s3cr3t"},
+            )
+        ]
+    )
+
+    async def _connect(instance) -> None:  # type: ignore[no-untyped-def]
+        repository.update_instance(
+            instance.id, status="connected", bump_generation=True
+        )
+
+    flow = ProvisioningFlow(
+        repository=repository,
+        store=store,
+        driver_factory=lambda _channel: driver,
+        on_instance_ready=_connect,
+    )
+    view = await flow.begin(channel="wecom_bot", owner_ref="owner-1")
+    result = await flow.poll(view.attempt_id)
+
+    assert result.instance is not None
+    assert result.instance.status == "connected"
+    assert result.instance.generation == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_poll_reuses_inflight_success_result(
+    repository: ChannelRepository, store: ChannelCredentialStore
+) -> None:
+    driver = FakeDriver(
+        outcomes=[
+            ProvisioningOutcome(
+                status=STATUS_SUCCEEDED,
+                credentials={"bot_id": "bot-12345678", "secret": "s3cr3t"},
+            )
+        ]
+    )
+    hook_started = asyncio.Event()
+    release_hook = asyncio.Event()
+
+    async def _connect(instance) -> None:  # type: ignore[no-untyped-def]
+        hook_started.set()
+        await release_hook.wait()
+        repository.update_instance(
+            instance.id, status="connected", bump_generation=True
+        )
+
+    flow = ProvisioningFlow(
+        repository=repository,
+        store=store,
+        driver_factory=lambda _channel: driver,
+        on_instance_ready=_connect,
+    )
+    view = await flow.begin(channel="wecom_bot", owner_ref="owner-1")
+
+    first_task = asyncio.create_task(flow.poll(view.attempt_id))
+    await hook_started.wait()
+    second_task = asyncio.create_task(flow.poll(view.attempt_id))
+    await asyncio.sleep(0)
+    assert not second_task.done()
+
+    release_hook.set()
+    first, second = await asyncio.gather(first_task, second_task)
+
+    assert first.instance is not None
+    assert second.instance is not None
+    assert first.instance.status == "connected"
+    assert second.instance.status == "connected"
+    assert first.instance.id == second.instance.id
+    assert len(driver.poll_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_success_returns_instance(
+    repository: ChannelRepository, store: ChannelCredentialStore
+) -> None:
+    driver = FakeDriver(
+        outcomes=[
+            ProvisioningOutcome(
+                status=STATUS_SUCCEEDED,
+                credentials={"bot_id": "bot-12345678", "secret": "s3cr3t"},
+            )
+        ]
+    )
+    flow = _flow(repository, store, driver)
+    view = await flow.begin(channel="wecom_bot", owner_ref="owner-1")
+    succeeded = await flow.poll(view.attempt_id)
+
+    cancelled = await flow.cancel(view.attempt_id)
+
+    assert succeeded.instance is not None
+    assert cancelled.attempt.status == STATUS_SUCCEEDED
+    assert cancelled.instance is not None
+    assert cancelled.instance.id == succeeded.instance.id
+
+
+@pytest.mark.asyncio
+async def test_manual_bind_returns_post_connect_instance_state(
+    repository: ChannelRepository, store: ChannelCredentialStore
+) -> None:
+    """手填接入同样在返回前刷新连接后的实例状态。"""
+
+    async def _connect(instance) -> None:  # type: ignore[no-untyped-def]
+        repository.update_instance(
+            instance.id, status="connected", bump_generation=True
+        )
+
+    binder = ManualCredentialBinder(
+        repository=repository, store=store, on_instance_ready=_connect
+    )
+    instance = await binder.bind(
+        channel="wecom_bot",
+        credentials={"bot_id": "bot-12345678", "secret": "s3cr3t"},
+    )
+
+    assert instance.status == "connected"
+    assert instance.generation == 2
 
 
 @pytest.mark.asyncio
@@ -287,10 +412,13 @@ async def test_poll_after_terminal_state_is_read_only(
     )
     flow = _flow(repository, store, driver)
     view = await flow.begin(channel="wecom_bot", owner_ref="owner-1")
-    await flow.poll(view.attempt_id)
+    first = await flow.poll(view.attempt_id)
 
     again = await flow.poll(view.attempt_id)
 
+    assert first.instance is not None
+    assert again.instance is not None
+    assert again.instance.id == first.instance.id
     assert again.attempt.status == STATUS_SUCCEEDED
     assert len(driver.poll_calls) == 1
 
@@ -560,7 +688,7 @@ async def test_cancel_stops_polling(
 
     cancelled = await flow.cancel(view.attempt_id)
 
-    assert cancelled.status == "cancelled"
+    assert cancelled.attempt.status == "cancelled"
     stored = repository.get_provisioning(view.attempt_id)
     assert stored is not None
     assert stored.state_ref is None

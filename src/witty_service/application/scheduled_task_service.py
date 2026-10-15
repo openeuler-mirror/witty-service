@@ -81,6 +81,44 @@ class TaskListOverview:
 
 BUILTIN_TEMPLATES: tuple[ScheduledTaskTemplate, ...] = (
     ScheduledTaskTemplate(
+        key="unattended_ops_inspection",
+        name="无人值守系统巡检",
+        description=(
+            "每天定时按资源、磁盘、进程、服务、日志、安全分层巡检 Linux 主机，"
+            "输出带状态分级的巡检日报到工作区；巡检项、阈值、触发时间与执行智能体均可按需调整。"
+        ),
+        schedule_type="cron",
+        cron_expr="0 7 * * *",
+        interval_seconds=None,
+        timezone="Asia/Shanghai",
+        content=(
+            "请以 Linux 系统管理员的身份执行一次无人值守巡检，按分层巡检项采集现状、"
+            "识别异常，并输出巡检日报：\n"
+            "1. 系统概况：`hostname`、`uname -r`、`uptime -p`、`timedatectl`（校时是否正常）；\n"
+            "2. CPU 与负载：`nproc`、`uptime`、`top -bn1 | head -15`，"
+            "比较 load average 与 CPU 核数，关注负载是否长期高于核数；\n"
+            "3. 内存与交换：`free -h`，关注 available 内存与 swap 占用；\n"
+            "4. 磁盘与文件系统：`df -h`（空间）、`df -i`（inode），"
+            "并检查是否有分区被只读挂载；\n"
+            "5. 内核与硬件异常：`dmesg -T | tail -100`，检索 OOM-killer、I/O error、MCE 等关键字；\n"
+            "6. 进程健康：`ps -eo pid,ppid,stat,pcpu,pmem,comm --sort=-pcpu | head -10`"
+            "（内存占用同理按 `-pmem` 排序），检查是否有僵尸进程（STAT 含 Z）或异常高占用进程；\n"
+            "7. 服务与端口：`systemctl --failed` 查看失败单元，`ss -tulnp` 核对关键服务端口是否在监听；\n"
+            "8. 日志与安全：`journalctl -p err --since '24 hours ago' --no-pager` 汇总错误日志，"
+            "`lastb | head` 与 `last` 查看近期登录失败与异常来源。\n"
+            "巡检一律使用只读命令，不改变系统状态；命令或工具缺失时跳过并注明。\n"
+            "对每项给出状态判定：❌异常 / ⚠️警告 / ✅正常。参考基线（可按本机环境调整）："
+            "负载持续高于核数、内存/inode/磁盘使用率 > 80%、存在失败服务或只读挂载、"
+            "出现 OOM/I/O 错误或错误日志，均判为异常或警告。\n"
+            "最后生成 Markdown 巡检日报写入工作区 `ops-reports` 目录（文件名含日期），"
+            "结构包含：巡检概况（主机/内核/时间/时区）、分项结果与状态、异常明细、"
+            "按优先级排序的处理建议；若目录中已有上次报告，补充关键指标的环比变化。\n"
+            "可按实际环境增删巡检项、调整阈值、触发时间（间隔 / 每天 / 每周 / 自定义 cron）"
+            "与时区，并更换执行智能体。"
+        ),
+        workspace_folder="ops-reports",
+    ),
+    ScheduledTaskTemplate(
         key="daily_ai_news",
         name="每日 AI 新闻推送",
         description="每天汇总 AI 领域的重要动态，侧重 AI coding 与具身智能进展。",
@@ -92,20 +130,6 @@ BUILTIN_TEMPLATES: tuple[ScheduledTaskTemplate, ...] = (
             "请推送今天的 AI 领域重要动态：关注 AI coding 与具身智能方向，"
             "筛选 3-5 条值得关注的信息，逐条给出要点摘要与来源链接，"
             "并说明每条动态对我的实际影响。"
-        ),
-        workspace_folder=None,
-    ),
-    ScheduledTaskTemplate(
-        key="daily_english_words",
-        name="每日 5 个英语单词",
-        description="每天推荐 5 个高频实用英语单词，包含词义、音标、例句与记忆提示。",
-        schedule_type="cron",
-        cron_expr="0 8 * * *",
-        interval_seconds=None,
-        timezone="Asia/Shanghai",
-        content=(
-            "请推荐今天要学习的 5 个高频实用英语单词：每个单词给出词义、音标、"
-            "一条地道例句以及一个记忆提示，最后用一句话串联复习这 5 个单词。"
         ),
         workspace_folder=None,
     ),
