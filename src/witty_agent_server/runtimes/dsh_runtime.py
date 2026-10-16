@@ -18,6 +18,7 @@ from witty_agent_server.runtimes.runtime_base import (
 )
 from witty_agent_server.runtimes.stream_errors import (
     normalize_dsh_client_error,
+    normalize_dsh_output_truncated,
     normalize_dsh_turn_error,
 )
 from witty_agent_server.runtimes.usage import (
@@ -211,6 +212,12 @@ class DshRuntime(RuntimeBase):
             yield {
                 "type": TurnEventType.STREAM_ERROR,
                 "payload": normalize_dsh_turn_error(error),
+            }
+        elif kind == "max-tokens":
+            # 单轮输出触达 maxTokens 上限而截断，此处显式透出失败。
+            yield {
+                "type": TurnEventType.STREAM_ERROR,
+                "payload": normalize_dsh_output_truncated(),
             }
         yield {"type": TurnEventType.TURN_COMPLETED, "payload": {"reason": kind}}
 

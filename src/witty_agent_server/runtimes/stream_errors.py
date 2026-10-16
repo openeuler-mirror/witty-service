@@ -56,6 +56,7 @@ class StreamErrorCode(StrEnum):
     UPSTREAM_REQUEST = "UPSTREAM_REQUEST"
     UPSTREAM_SERVER = "UPSTREAM_SERVER"
     UPSTREAM_TIMEOUT = "UPSTREAM_TIMEOUT"
+    UPSTREAM_OUTPUT_TRUNCATED = "UPSTREAM_OUTPUT_TRUNCATED"
     TRANSPORT_CLOSED = "TRANSPORT_CLOSED"
     TRANSPORT_ERROR = "TRANSPORT_ERROR"
     RUNTIME_PROTOCOL_ERROR = "RUNTIME_PROTOCOL_ERROR"
@@ -452,6 +453,26 @@ def normalize_dsh_turn_error(error: Mapping[str, Any]) -> dict[str, Any]:
         source="upstream",
         retryable=_is_retryable_code(code),
         detail={"provider_code": code_str, "status_code": status_code},
+    )
+
+
+def normalize_dsh_output_truncated() -> dict[str, Any]:
+    """dsh turn-end ``reason.kind == "max-tokens"`` → 统一载荷。
+
+    单轮模型输出触达 ``maxTokens`` 上限而截断：若截断发生在工具调用参数生成
+    过程中（如 ``write`` 的 ``content``），该工具调用不完整、不会执行，表现为
+    “卡在某个工具”其实什么都没发生。属上游输出上限条件（非瞬态、配置相关），
+    不可重试；显式透出以免静默失败。
+    """
+    return normalize_stream_error(
+        code=StreamErrorCode.UPSTREAM_OUTPUT_TRUNCATED,
+        message=(
+            "model output reached the max tokens limit; the turn was truncated "
+            "and any tool call in it was not executed"
+        ),
+        source="upstream",
+        retryable=False,
+        detail={"reason": "max-tokens"},
     )
 
 

@@ -117,6 +117,7 @@ STREAM_ERROR_TEXTS: dict[str, str] = {
     "UPSTREAM_QUOTA_EXCEEDED": "模型配额已用尽，请检查账户余额或套餐配额。",
     "UPSTREAM_TIMEOUT": "模型服务响应超时，请稍后重试。",
     "UPSTREAM_SERVER": "模型服务暂时不可用，请稍后重试。",
+    "UPSTREAM_OUTPUT_TRUNCATED": "模型单轮输出达到上限被截断，本次结果不完整，请重试。",
     "TRANSPORT_CLOSED": "运行时连接已断开，请稍后重试。",
     "TRANSPORT_ERROR": "运行时连接异常，请稍后重试。",
 }
