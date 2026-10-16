@@ -186,7 +186,7 @@ class CreateModelRequest(BaseModel):
     api_base_url: str | None = None
     compatibility: str | None = None  # 暂时移除正则验证，便于调试
     enabled: bool = True
-    max_tokens: int = 4096
+    max_tokens: int = 32768
     temperature: float = 0.7
     is_default: bool = False
 

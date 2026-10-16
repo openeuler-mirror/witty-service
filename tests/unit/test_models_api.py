@@ -57,7 +57,7 @@ def test_create_model_uses_provider_default_api_base_url() -> None:
         api_base_url="https://api.openai.com/v1",
         compatibility=None,
         enabled=True,
-        max_tokens=4096,
+        max_tokens=32768,
         temperature=0.7,
         is_default=False,
     )

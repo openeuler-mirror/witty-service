@@ -580,6 +580,26 @@ def test_turn_end_error_yields_turn_completed_and_stream_error() -> None:
     ]
 
 
+def test_turn_end_max_tokens_yields_turn_completed_and_stream_error() -> None:
+    """单轮输出被 maxTokens 截断：显式透出 stream.error，不再静默收尾。"""
+    raw = _notification("s1", "turn/end", {"turn": 1, "reason": {"kind": "max-tokens"}})
+
+    events = list(DshRuntime._map_dsh_event(raw, session_id="s1"))
+
+    assert events[0]["type"] == "stream.error"
+    assert events[0]["payload"] == {
+        "code": "UPSTREAM_OUTPUT_TRUNCATED",
+        "message": (
+            "model output reached the max tokens limit; the turn was truncated "
+            "and any tool call in it was not executed"
+        ),
+        "source": "upstream",
+        "retryable": False,
+        "detail": {"reason": "max-tokens"},
+    }
+    assert events[1] == {"type": "turn.completed", "payload": {"reason": "max-tokens"}}
+
+
 @pytest.mark.parametrize(
     "event_type",
     [
