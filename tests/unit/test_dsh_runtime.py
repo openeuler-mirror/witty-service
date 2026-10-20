@@ -71,6 +71,16 @@ def _chunk(session_id: str, chunk: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _stream(session_id: str, frame: dict[str, Any]) -> dict[str, Any]:
+    """0.2.x：bridge 插件经 ``witty.assistant.stream`` 转发的进程内 frame。"""
+    return _notification(
+        session_id,
+        "",
+        {"frame": frame},
+        method="witty.assistant.stream",
+    )
+
+
 def _replay(
     notifications: list[dict[str, Any]],
     *,
@@ -166,6 +176,69 @@ def test_text_delta_maps_to_message_delta() -> None:
     events = list(DshRuntime._map_dsh_event(raw, session_id="s1"))
 
     assert events == [{"type": "message.delta", "payload": {"delta": "你好"}}]
+
+
+def test_assistant_stream_text_delta_maps_to_message_delta() -> None:
+    """0.2.x bridge：witty.assistant.stream 的 chunk frame 恢复 token 级增量。"""
+    raw = _stream(
+        "s1",
+        {
+            "type": "chunk",
+            "index": 3,
+            "chunk": {"type": "text-delta", "index": 0, "text": "流式"},
+        },
+    )
+
+    events = list(DshRuntime._map_dsh_event(raw, session_id="s1"))
+
+    assert events == [{"type": "message.delta", "payload": {"delta": "流式"}}]
+
+
+def test_assistant_stream_reasoning_delta_maps_to_thinking_delta() -> None:
+    raw = _stream(
+        "s1",
+        {
+            "type": "chunk",
+            "index": 1,
+            "chunk": {"type": "reasoning-delta", "index": 0, "text": "think"},
+        },
+    )
+
+    events = list(DshRuntime._map_dsh_event(raw, session_id="s1"))
+
+    assert events == [{"type": "thinking.delta", "payload": {"delta": "think"}}]
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        {"type": "start", "attemptId": "s1:1", "revision": 1, "turn": 1, "step": 1},
+        {
+            "type": "end",
+            "attemptId": "s1:1",
+            "revision": 2,
+            "index": 0,
+            "outcome": {"kind": "committed"},
+        },
+        {"type": "chunk", "index": 0},
+        {},
+    ],
+)
+def test_assistant_stream_boundary_and_incomplete_frames_yield_nothing(
+    frame: dict[str, Any],
+) -> None:
+    raw = _stream("s1", frame)
+
+    assert list(DshRuntime._map_dsh_event(raw, session_id="s1")) == []
+
+
+def test_assistant_stream_filters_other_sessions() -> None:
+    raw = _stream(
+        "s1-sub-1",
+        {"type": "chunk", "chunk": {"type": "text-delta", "text": "子"}},
+    )
+
+    assert list(DshRuntime._map_dsh_event(raw, session_id="s1")) == []
 
 
 def test_reasoning_delta_maps_to_thinking_delta() -> None:
@@ -971,6 +1044,70 @@ def test_run_turn_completed_fallback_uses_accumulated_deltas() -> None:
         "turn.completed",
     ]
     assert events[3]["payload"] == {"text": "ABCD"}
+
+
+def test_run_turn_emits_token_deltas_from_assistant_stream_frames() -> None:
+    """0.2.x 真实链路：bridge frame 与 durable assistant/message 混流。"""
+    notifications = [
+        _notification("s1", "turn/start", {"turn": 1}),
+        _stream(
+            "s1",
+            {"type": "start", "attemptId": "s1:1", "revision": 1, "turn": 1, "step": 1},
+        ),
+        _stream(
+            "s1",
+            {
+                "type": "chunk",
+                "index": 1,
+                "chunk": {"type": "text-delta", "index": 0, "text": "你"},
+            },
+        ),
+        _stream(
+            "s1",
+            {
+                "type": "chunk",
+                "index": 2,
+                "chunk": {"type": "text-delta", "index": 0, "text": "好"},
+            },
+        ),
+        _stream(
+            "s1",
+            {
+                "type": "end",
+                "attemptId": "s1:1",
+                "revision": 3,
+                "index": 3,
+                "outcome": {"kind": "committed"},
+            },
+        ),
+        _notification(
+            "s1",
+            "assistant/message",
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "你好"}],
+                }
+            },
+        ),
+        _notification("s1", "turn/end", {"turn": 1, "reason": {"kind": "completed"}}),
+    ]
+    client = _ReplayClient(notifications)
+
+    events = _run_turn_with(client, session_key="s1")
+
+    assert _event_types(events) == [
+        "message.started",
+        "message.delta",
+        "message.delta",
+        "message.completed",
+        "turn.completed",
+    ]
+    assert [e["payload"]["delta"] for e in _of_type(events, "message.delta")] == [
+        "你",
+        "好",
+    ]
+    assert events[3]["payload"] == {"text": "你好"}
 
 
 def test_run_turn_synthesizes_message_started_when_missing() -> None:

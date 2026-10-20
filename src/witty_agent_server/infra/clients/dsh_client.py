@@ -27,6 +27,24 @@ logger = logging.getLogger(__name__)
 _DEFAULT_PROVIDER = "deepseek-official"
 _DEFAULT_MODEL = "deepseek-v4-flash"
 
+# dsh 0.2.x 通过 profile patch（SDK ``patches`` → ``--patch``）配置 llm-pi-ai。
+# patch 的 config 是整体替换，生成前会合并 profile 用户层已有的同 entry 配置。
+_PI_AI_PATCH_ENTRY_ID = "llm-pi-ai"
+_PI_AI_PATCH_ENTRY_NAME = "@deepseek-ai/dsh-llm-pi-ai"
+_PI_AI_PATCH_FILENAME = "dsh-pi-ai.patch.yml"
+
+# 必须与 DeepSeekHarnessConfig.profile 的默认值一致（测试锁定）。
+_DSH_PROFILE_NAME = "sdk"
+
+# 0.2.x 的 token 流只在进程内发布，SDK 不转发；随包分发静态 patch，
+# 把 agent/assistant-stream 转成 witty.assistant.stream notification。
+_ASSISTANT_STREAM_PATCH = (
+    Path(__file__).resolve().parent / "dsh_plugins" / "witty-assistant-stream.patch.yml"
+)
+_ASSISTANT_STREAM_BRIDGE_SCRIPT = _ASSISTANT_STREAM_PATCH.with_name(
+    "assistant-stream-bridge.mjs"
+)
+
 
 @dataclass(frozen=True)
 class DshModelConfig:
@@ -46,6 +64,7 @@ class DshModelConfig:
     # None 表示走 deepseek-official 原生路径（DEEPSEEK_* env）。
     provider_route: dict[str, Any] | None = None
 
+
 # 消费轮询间隔：SDK ``next()`` 无超时，循环用非阻塞 ``drain()`` + sleep
 # 轮询，保证软 abort 在通知停滞期也至多一个周期内生效。
 _ABORT_POLL_INTERVAL_SECONDS = 0.05
@@ -58,6 +77,119 @@ class DshClientError(RuntimeError):
         super().__init__(message)
         self.reason = reason
         self.message = message
+
+
+class _DshPatchLoader(yaml.SafeLoader):
+    """dsh patch YAML loader：!!js 表达式保留为不可合并的占位符。"""
+
+
+class _JsExpression(str):
+    """dsh !!js 表达式占位符。"""
+
+
+def _construct_js_expression(loader: yaml.SafeLoader, node: yaml.Node) -> _JsExpression:
+    if isinstance(node, yaml.ScalarNode):
+        return _JsExpression(loader.construct_scalar(node))
+    return _JsExpression("")
+
+
+_DshPatchLoader.add_constructor("tag:yaml.org,2002:js", _construct_js_expression)
+
+
+def _require_assistant_stream_patch() -> Path:
+    """校验随包分发的 bridge 资源存在，返回静态 patch 路径。"""
+    missing = [
+        str(path)
+        for path in (_ASSISTANT_STREAM_PATCH, _ASSISTANT_STREAM_BRIDGE_SCRIPT)
+        if not path.is_file()
+    ]
+    if missing:
+        raise DshClientError(
+            reason="config-invalid",
+            message=(
+                f"dsh assistant-stream bridge assets are missing: {', '.join(missing)}"
+            ),
+        )
+    return _ASSISTANT_STREAM_PATCH
+
+
+def _ensure_no_js_expression(value: Any) -> None:
+    """拒绝把 !!js 表达式并入生成的 patch，避免静默改写成字符串。"""
+    if isinstance(value, _JsExpression):
+        raise DshClientError(
+            reason="config-invalid",
+            message=(
+                "dsh llm-pi-ai profile config contains a !!js expression; "
+                "refusing to merge it into the generated patch"
+            ),
+        )
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _ensure_no_js_expression(key)
+            _ensure_no_js_expression(item)
+    elif isinstance(value, list):
+        for item in value:
+            _ensure_no_js_expression(item)
+
+
+def _load_dsh_yaml(text: str) -> Any:
+    """解析 dsh profile YAML；``_DshPatchLoader`` 是 ``yaml.SafeLoader`` 子类。
+
+    该子类只额外把 ``!!js`` 标量保留为 ``_JsExpression(str)`` 占位符，不会
+    构造任意对象。bandit 的 B506 只按 ``yaml.load`` 符号名判定，识别不了
+    “SafeLoader 子类”这个安全前提，故按行豁免并在这里集中说明。
+    """
+    return yaml.load(text, Loader=_DshPatchLoader)  # nosec B506
+
+
+def _load_existing_llm_pi_ai_config(dsh_home: Path) -> dict[str, Any]:
+    """读取旧 settings.yaml 与 profile 用户层的 llm-pi-ai config。
+
+    0.2.x 改用 profile patch；按旧文件、cordis.yml、cordis.patch.yml 的顺序
+    合并，后者覆盖前者。providers 最终仍由当前路由替换。
+    """
+    config: dict[str, Any] = {}
+    legacy_path = dsh_home / "settings.yaml"
+    if legacy_path.is_file():
+        try:
+            document = _load_dsh_yaml(legacy_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            logger.warning(
+                "dsh cannot read legacy settings.yaml at %s; ignoring",
+                legacy_path,
+                exc_info=True,
+            )
+        else:
+            legacy = (
+                document.get(_PI_AI_PATCH_ENTRY_ID)
+                if isinstance(document, dict)
+                else None
+            )
+            if isinstance(legacy, dict):
+                config.update(legacy)
+
+    profile_dir = dsh_home / "profiles" / _DSH_PROFILE_NAME
+    for filename in ("cordis.yml", "cordis.patch.yml"):
+        path = profile_dir / filename
+        if not path.is_file():
+            continue
+        try:
+            entries = _load_dsh_yaml(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            raise DshClientError(
+                reason="config-invalid",
+                message=f"dsh cannot read profile config {path}: {exc}",
+            ) from exc
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("id") != _PI_AI_PATCH_ENTRY_ID:
+                continue
+            candidate = entry.get("config")
+            if isinstance(candidate, dict):
+                config.update(candidate)
+    _ensure_no_js_expression(config)
+    return dict(config)
 
 
 def _map_error_reason(exc: BaseException) -> str:
@@ -108,7 +240,8 @@ class DshClient(ClientBase):
     """DeepSeek Harness（dsh）SDK 传输层客户端。
 
     包装 ``DeepSeekHarness`` 实现 ``ClientBase`` 契约，仅做传输与协议守卫
-    （inbox receipt / 软 abort / 轮次终止判定）。
+    （inbox receipt / 软 abort / 轮次终止判定）。本类独占 SDK 默认通知
+    队列：无订阅通知由后台线程丢弃，调用方不要再用 ``next_notification()``。
 
     线程模型：``_harness`` 的获取/替换（detach / stop）与活动引用计数由
     ``_harness_lock`` 串行化，配置更新不会杀死在途 turn；其余共享状态
@@ -124,6 +257,8 @@ class DshClient(ClientBase):
         self._harness_lock = threading.Lock()
         self._active_harness_refs: dict[int, int] = {}
         self._retired_harnesses: dict[int, DeepSeekHarness] = {}
+        # harness id → 无订阅通知丢弃线程（见 stream_turn）。
+        self._notification_drains: dict[int, threading.Thread] = {}
         self._workspace_dir: str | None = None
         self._dsh_home: str | None = None
         # 模型配置成组持有（已归一化：provider/model 恒非 None）。
@@ -177,17 +312,15 @@ class DshClient(ClientBase):
         self.apply_model_config(DshModelConfig())
 
     def ensure_harness(self) -> DeepSeekHarness:
-        """按当前配置懒建 harness（不 start；start 由 lifecycle 触发）。
+        """按当前配置懒建 harness（不 start）。
 
-        持 ``_harness_lock`` 防并发 ensure 各建 harness，导致已 start 的子进程泄漏。
-        非 deepseek 路由（``provider_route`` 非空）先物化 per-agent
-        ``<dsh_home>/settings.yaml``，并把 api_key 经 ``api_key_env`` 注入子进程
-        env；deepseek-official 走原生路径（api_key/base_url → DEEPSEEK_* env）。
+        provider_route 非空时物化 pi-ai patch；否则清理残留 patch。
         """
         with self._harness_lock:
             if self._harness is None:
                 cfg = self._model_config
                 env: dict[str, str] = {}
+                patches = [str(_require_assistant_stream_patch())]
                 api_key = cfg.api_key
                 base_url = cfg.base_url
                 if cfg.provider_route is not None:
@@ -197,12 +330,13 @@ class DshClient(ClientBase):
                             message=(
                                 "dsh provider route requires dsh_home "
                                 "(agent workspace); cannot materialize "
-                                "llm-pi-ai settings"
+                                "llm-pi-ai patch"
                             ),
                         )
-                    self._materialize_pi_ai_settings(
+                    patch_path = self._materialize_pi_ai_route(
                         Path(self._dsh_home), cfg.provider_route
                     )
+                    patches.append(str(patch_path))
                     api_key_env = cfg.provider_route.get("api_key_env")
                     if api_key_env and api_key:
                         env[api_key_env] = api_key
@@ -211,9 +345,8 @@ class DshClient(ClientBase):
                     api_key = None
                     base_url = None
                 elif self._dsh_home:
-                    # 路由切回 deepseek 原生路径：清除残留的 pi-ai 路由注册，
-                    # 避免 settings.yaml 留下不再使用的 provider 条目。
-                    self._clear_pi_ai_providers(Path(self._dsh_home))
+                    # 切回原生路径：清掉残留 patch，避免误挂旧 provider。
+                    self._clear_pi_ai_route(Path(self._dsh_home))
                 self._harness = DeepSeekHarness(
                     DeepSeekHarnessConfig(
                         cwd=self._workspace_dir,
@@ -224,101 +357,60 @@ class DshClient(ClientBase):
                         api_key=api_key,
                         base_url=base_url,
                         env=env,
+                        patches=tuple(patches),
                     )
                 )
             return self._harness
 
-    def _materialize_pi_ai_settings(
-        self, dsh_home: Path, route: dict[str, Any]
-    ) -> None:
-        """把当前 pi-ai provider 路由写入 ``<dsh_home>/settings.yaml``。
-
-        dsh 启动时由 dsh-settings-file 插件读取（llm-pi-ai 插件据此注册
-        provider 路由，initialize 的 provider 才能命中 adapter）。只替换
-        ``llm-pi-ai.providers`` 子树，其余顶层配置节与同级键尽力保留；写失败
-        抛 ``DshClientError``，不静默。
-        """
+    def _materialize_pi_ai_route(self, dsh_home: Path, route: dict[str, Any]) -> Path:
+        """写 llm-pi-ai provider patch；保留 profile 用户层其它配置键。"""
         cfg = self._model_config
-        profile: dict[str, Any] = {
-            # 显式声明模型（覆盖/补充 catalog 条目）：注册表模型名不受 catalog
-            # 目录收录与否限制。
+        provider_cfg: dict[str, Any] = {
+            # models 是替换该 provider 的 catalog 列表，不是追加。
             "models": [{"id": cfg.model, "name": cfg.model}]
         }
         api_key_env = route.get("api_key_env")
         if api_key_env and cfg.api_key:
-            profile["apiKeyEnv"] = api_key_env
+            provider_cfg["apiKeyEnv"] = api_key_env
         if route.get("base_url"):
-            profile["baseURL"] = route["base_url"]
+            provider_cfg["baseURL"] = route["base_url"]
         if route.get("api"):
-            profile["api"] = route["api"]
+            provider_cfg["api"] = route["api"]
 
-        settings_path = dsh_home / "settings.yaml"
-        document = self._load_settings_document(settings_path)
-        pi_ai = document.get("llm-pi-ai")
-        if not isinstance(pi_ai, dict):
-            pi_ai = {}
-        pi_ai["providers"] = {cfg.provider: profile}
-        document["llm-pi-ai"] = pi_ai
+        config = _load_existing_llm_pi_ai_config(dsh_home)
+        config["providers"] = {cfg.provider: provider_cfg}
+        patch: list[dict[str, Any]] = [
+            {
+                "id": _PI_AI_PATCH_ENTRY_ID,
+                "name": _PI_AI_PATCH_ENTRY_NAME,
+                "config": config,
+            }
+        ]
+        patch_path = dsh_home / _PI_AI_PATCH_FILENAME
         try:
             dsh_home.mkdir(parents=True, exist_ok=True)
-            settings_path.write_text(
-                yaml.safe_dump(document, sort_keys=True), encoding="utf-8"
+            patch_path.write_text(
+                yaml.safe_dump(patch, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
             )
         except OSError as exc:
             raise DshClientError(
                 reason="config-invalid",
-                message=f"dsh cannot write llm-pi-ai settings to {settings_path}: {exc}",
+                message=f"dsh cannot write llm-pi-ai patch to {patch_path}: {exc}",
             ) from exc
+        return patch_path
 
-    def _clear_pi_ai_providers(self, dsh_home: Path) -> None:
-        """删除 ``<dsh_home>/settings.yaml`` 的 ``llm-pi-ai.providers`` 子树。
-
-        路由切回 deepseek 原生路径时调用，清除残留的 provider 注册；文件
-        不存在或无该子树时为 no-op。清理失败只告警不阻断（残留非致命）。
-        """
-        settings_path = dsh_home / "settings.yaml"
-        if not settings_path.is_file():
-            return
-        document = self._load_settings_document(settings_path)
-        pi_ai = document.get("llm-pi-ai")
-        if not isinstance(pi_ai, dict) or "providers" not in pi_ai:
-            return
-        del pi_ai["providers"]
+    def _clear_pi_ai_route(self, dsh_home: Path) -> None:
+        """删除遗留的 pi-ai patch；删除失败仅告警。"""
+        patch_path = dsh_home / _PI_AI_PATCH_FILENAME
         try:
-            settings_path.write_text(
-                yaml.safe_dump(document, sort_keys=True), encoding="utf-8"
-            )
+            patch_path.unlink(missing_ok=True)
         except OSError:
             logger.warning(
-                "dsh cannot clear stale llm-pi-ai providers in %s; leaving as-is",
-                settings_path,
+                "dsh cannot remove stale llm-pi-ai patch %s; leaving as-is",
+                patch_path,
                 exc_info=True,
             )
-
-    @staticmethod
-    def _load_settings_document(settings_path: Path) -> dict[str, Any]:
-        """读取 settings.yaml 为 dict；缺失/不可读/非 dict 时告警并返回空文档。
-
-        非 dict 的合法 YAML（如崩溃截断残留）同样告警，避免静默丢弃其它
-        插件配置节。
-        """
-        if not settings_path.is_file():
-            return {}
-        try:
-            loaded = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
-            logger.warning(
-                "dsh cannot read existing settings.yaml at %s; overwriting",
-                settings_path,
-            )
-            return {}
-        if not isinstance(loaded, dict):
-            logger.warning(
-                "dsh settings.yaml at %s is not a mapping; overwriting",
-                settings_path,
-            )
-            return {}
-        return loaded
 
     def close_harness(self) -> None:
         """关闭并丢弃当前 harness 及待回收 harness（stop 时调用；尽力而为）。"""
@@ -403,6 +495,8 @@ class DshClient(ClientBase):
                 [{"type": "text", "text": message}],
                 notification_subscription=subscription,
             )
+            # prompt 成功后开始丢弃无订阅通知（abort 后订阅先关，dsh 仍会产帧）。
+            self._ensure_notification_drain(harness)
 
             received_receipt = False
             pending: deque[Notification] = deque()
@@ -468,6 +562,35 @@ class DshClient(ClientBase):
             self._active_harness_refs[hid] = self._active_harness_refs.get(hid, 0) + 1
             return harness
 
+    def _ensure_notification_drain(self, harness: DeepSeekHarness) -> None:
+        """每个 harness 一个后台线程，丢弃无订阅者接收的通知。
+
+        abort 后订阅先关，bridge 仍会继续产帧；不清理会无界增长。
+        """
+        harness_client = harness.client
+        if not hasattr(harness_client, "next_notification"):
+            return
+        hid = id(harness)
+        with self._harness_lock:
+            if hid in self._notification_drains:
+                return
+            thread = threading.Thread(
+                target=self._discard_unmatched_notifications,
+                args=(harness_client,),
+                name="dsh-unmatched-notifications",
+                daemon=True,
+            )
+            self._notification_drains[hid] = thread
+        thread.start()
+
+    @staticmethod
+    def _discard_unmatched_notifications(harness_client: Any) -> None:
+        while True:
+            try:
+                harness_client.next_notification()
+            except BaseException:
+                return
+
     def _release_harness(self, harness: DeepSeekHarness) -> None:
         """释放活动引用；若 harness 已待回收且无其他活动 turn，则关闭。"""
         should_close = False
@@ -499,8 +622,9 @@ class DshClient(ClientBase):
         if close_now is not None:
             self._close_harness_safely(close_now)
 
-    @staticmethod
-    def _close_harness_safely(harness: DeepSeekHarness) -> None:
+    def _close_harness_safely(self, harness: DeepSeekHarness) -> None:
+        with self._harness_lock:
+            self._notification_drains.pop(id(harness), None)
         try:
             harness.close()
         except Exception:
@@ -516,13 +640,11 @@ class DshClient(ClientBase):
         return session_id
 
     def _delete_session_files(self, dsh_session_id: str) -> None:
-        """尽力而为删除 <dsh_home> 下该 session 的全部落盘文件。
+        """尽力删除 ``<dsh_home>`` 下该 session 的落盘文件。
 
-        0.1.2rc1 真机落盘为嵌套布局：``<dsh_home>/sessions/<workspace-slug>/<sid>/...``
-        与 ``<dsh_home>/storages/session_projcache/sessions/<sid>.json``。删除只扫描这两个
-        已知落盘子树，按精确边界匹配（``name == sid`` 或 ``name.startswith(sid + ".")``）删
-        除 session 目录/文件，。仅在本次删除确实清空了某目录时才向上清理空祖先；symlink 一律不跟随，
-        避免越界删除 home 之外的目录/文件。``dsh_home`` 未配置时仅清映射（维持原语义）。
+        落盘为嵌套布局：``sessions/<workspace-slug>/<sid>/...`` 与
+        ``storages/session_projcache/sessions/<sid>.json``。只扫描这两个子树，
+        精确匹配 session id；仅清理本次删空的祖先目录，symlink 不跟随。
         """
         if not self._dsh_home:
             return

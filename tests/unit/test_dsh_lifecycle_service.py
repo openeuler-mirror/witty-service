@@ -247,7 +247,9 @@ def test_update_config_model_config_none_route_clears(
     svc, client = _make_lifecycle(monkeypatch, tmp_path, harness=None)
     svc.update_config(
         agent_id="a1",
-        model_config=DshModelConfig(provider="glm", provider_route={"api_key_env": "E"}),
+        model_config=DshModelConfig(
+            provider="glm", provider_route={"api_key_env": "E"}
+        ),
     )
 
     svc.update_config(
@@ -304,7 +306,7 @@ def test_start_server_dir_creation_failure_raises(
 def test_start_server_dsh_client_error_converts_to_lifecycle_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """settings 物化失败（DshClientError）转 DshLifecycleError：
+    """pi-ai patch 物化失败（DshClientError）转 DshLifecycleError：
     agent 状态可置 FAILED、错误可映射，不直冒 HTTP 层。"""
     svc, client = _make_lifecycle(monkeypatch, tmp_path, harness=None)
     svc.update_config(
@@ -315,12 +317,12 @@ def test_start_server_dsh_client_error_converts_to_lifecycle_error(
             provider_route={"api_key_env": "WITTY_DSH_PROVIDER_API_KEY"},
         ),
     )
-    # settings.yaml 位置被目录占位 → 物化写失败 → DshClientError
-    settings_path = (
-        tmp_path / "dsh-instances" / "a1" / "settings.yaml"
+    # patch 文件位置被目录占位 → 物化写失败 → DshClientError
+    patch_path = (
+        tmp_path / "dsh-instances" / "a1" / dsh_client_module._PI_AI_PATCH_FILENAME
     )
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.mkdir()
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    patch_path.mkdir()
 
     with pytest.raises(DshLifecycleError) as exc:
         svc.start_server()

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
+import queue
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
-from deepseek_harness import DeepSeekHarness, Notification
+import yaml
+from deepseek_harness import DeepSeekHarness, DeepSeekHarnessConfig, Notification
 from deepseek_harness.errors import (
     JsonRpcError,
     SdkProtocolError,
@@ -666,9 +669,13 @@ def test_apply_model_config_full_group_replaces_no_half_update() -> None:
     assert client._model_config.provider_route is None  # 旧路由被清除
 
 
-def test_ensure_harness_builds_from_config_and_reuses_instance() -> None:
+def test_ensure_harness_builds_from_config_and_reuses_instance(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "dsh-ws"
+    dsh_home = tmp_path / "dsh-home"
     client = DshClient()
-    client.update_paths(workspace_dir="/tmp/dsh-ws", dsh_home="/tmp/dsh-home")
+    client.update_paths(workspace_dir=str(workspace_dir), dsh_home=str(dsh_home))
     client.apply_model_config(
         DshModelConfig(
             provider="custom-endpoint",
@@ -682,11 +689,249 @@ def test_ensure_harness_builds_from_config_and_reuses_instance() -> None:
     harness = client.ensure_harness()
 
     assert isinstance(harness, DeepSeekHarness)
-    assert harness.config.cwd == "/tmp/dsh-ws"
-    assert harness.config.dsh_home == "/tmp/dsh-home"
+    assert harness.config.cwd == str(workspace_dir)
+    assert harness.config.dsh_home == str(dsh_home)
     assert harness.config.provider == "custom-endpoint"
     assert harness.config.model == "custom-model"
     assert harness.config.api_key == "sk-test"
     assert harness.config.base_url == "https://example.internal/v1"
     assert harness.config.max_tokens == 4096
+    assert harness.config.patches == (str(dsh_client_module._ASSISTANT_STREAM_PATCH),)
     assert client.ensure_harness() is harness
+
+
+def test_ensure_harness_materializes_pi_ai_patch(tmp_path: Path) -> None:
+    dsh_home = tmp_path / "home"
+    client = DshClient()
+    client.update_paths(workspace_dir=str(tmp_path / "ws"), dsh_home=str(dsh_home))
+    client.apply_model_config(
+        DshModelConfig(
+            provider="moonshotai-cn",
+            model="kimi-k2",
+            api_key="sk-kimi",
+            provider_route={
+                "api_key_env": _ROUTE_ENV,
+                "base_url": "https://api.moonshot.cn/v1",
+                "api": "openai-completions",
+            },
+        )
+    )
+
+    harness = client.ensure_harness()
+
+    patch_path = dsh_home / dsh_client_module._PI_AI_PATCH_FILENAME
+    assert harness.config.patches == (
+        str(dsh_client_module._ASSISTANT_STREAM_PATCH),
+        str(patch_path),
+    )
+    assert harness.config.env == {_ROUTE_ENV: "sk-kimi"}
+    assert harness.config.api_key is None  # 凭据只经 env 注入，不落 config
+    assert yaml.safe_load(patch_path.read_text(encoding="utf-8")) == [
+        {
+            "id": "llm-pi-ai",
+            "name": "@deepseek-ai/dsh-llm-pi-ai",
+            "config": {
+                "providers": {
+                    "moonshotai-cn": {
+                        "models": [{"id": "kimi-k2", "name": "kimi-k2"}],
+                        "apiKeyEnv": _ROUTE_ENV,
+                        "baseURL": "https://api.moonshot.cn/v1",
+                        "api": "openai-completions",
+                    }
+                }
+            },
+        }
+    ]
+
+
+def test_pi_ai_patch_preserves_legacy_settings_config(tmp_path: Path) -> None:
+    """0.1.x 的 settings.yaml llm-pi-ai 同级键在升级后保留。"""
+    dsh_home = tmp_path / "home"
+    dsh_home.mkdir()
+    (dsh_home / "settings.yaml").write_text(
+        yaml.safe_dump(
+            {"llm-pi-ai": {"defaultMaxTokens": 777, "headers": {"X-Test": "1"}}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    client = DshClient()
+    client.update_paths(workspace_dir=str(tmp_path / "ws"), dsh_home=str(dsh_home))
+    client.apply_model_config(
+        DshModelConfig(
+            provider="moonshotai-cn",
+            model="kimi-k2",
+            provider_route={"api_key_env": _ROUTE_ENV},
+        )
+    )
+
+    client.ensure_harness()
+
+    patch = yaml.safe_load(
+        (dsh_home / dsh_client_module._PI_AI_PATCH_FILENAME).read_text(encoding="utf-8")
+    )
+    config = patch[0]["config"]
+    assert config["defaultMaxTokens"] == 777
+    assert config["headers"] == {"X-Test": "1"}
+    assert config["providers"] == {
+        "moonshotai-cn": {"models": [{"id": "kimi-k2", "name": "kimi-k2"}]}
+    }
+
+
+def test_pi_ai_patch_preserves_profile_user_config(tmp_path: Path) -> None:
+    """合并 profile 用户层 llm-pi-ai 的其它键；providers 仍按当前路由替换。"""
+    dsh_home = tmp_path / "home"
+    dsh_home.mkdir()
+    (dsh_home / "settings.yaml").write_text(
+        yaml.safe_dump({"llm-pi-ai": {"defaultMaxTokens": 777}}, sort_keys=False),
+        encoding="utf-8",
+    )
+    profile = dsh_home / "profiles" / dsh_client_module._DSH_PROFILE_NAME
+    profile.mkdir(parents=True)
+    (profile / "cordis.patch.yml").write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "id": "llm-pi-ai",
+                    "config": {
+                        "defaultMaxTokens": 1234,
+                        "providers": {"old": {"apiKeyEnv": "OLD"}},
+                    },
+                }
+            ],
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    client = DshClient()
+    client.update_paths(workspace_dir=str(tmp_path / "ws"), dsh_home=str(dsh_home))
+    client.apply_model_config(
+        DshModelConfig(
+            provider="moonshotai-cn",
+            model="kimi-k2",
+            provider_route={"api_key_env": _ROUTE_ENV},
+        )
+    )
+
+    client.ensure_harness()
+
+    patch = yaml.safe_load(
+        (dsh_home / dsh_client_module._PI_AI_PATCH_FILENAME).read_text(encoding="utf-8")
+    )
+    config = patch[0]["config"]
+    assert config["defaultMaxTokens"] == 1234
+    assert config["providers"] == {
+        "moonshotai-cn": {"models": [{"id": "kimi-k2", "name": "kimi-k2"}]}
+    }
+
+
+def test_pi_ai_patch_rejects_profile_js_expression(tmp_path: Path) -> None:
+    """profile 配置含 !!js 时拒绝合并，避免静默改写成字符串。"""
+    dsh_home = tmp_path / "home"
+    profile = dsh_home / "profiles" / dsh_client_module._DSH_PROFILE_NAME
+    profile.mkdir(parents=True)
+    (profile / "cordis.patch.yml").write_text(
+        '- id: llm-pi-ai\n  config:\n    defaultMaxTokens: !!js "1 + 1"\n',
+        encoding="utf-8",
+    )
+    client = DshClient()
+    client.update_paths(workspace_dir=str(tmp_path / "ws"), dsh_home=str(dsh_home))
+    client.apply_model_config(
+        DshModelConfig(
+            provider="moonshotai-cn",
+            model="kimi-k2",
+            provider_route={"api_key_env": _ROUTE_ENV},
+        )
+    )
+
+    with pytest.raises(DshClientError) as exc:
+        client.ensure_harness()
+
+    assert "!!js" in str(exc.value)
+
+
+def test_ensure_harness_clears_stale_patch_on_deepseek_route(tmp_path: Path) -> None:
+    dsh_home = tmp_path / "home"
+    dsh_home.mkdir(parents=True)
+    patch_path = dsh_home / dsh_client_module._PI_AI_PATCH_FILENAME
+    patch_path.write_text("[]", encoding="utf-8")
+
+    client = DshClient()
+    client.update_paths(workspace_dir=str(tmp_path / "ws"), dsh_home=str(dsh_home))
+    client.apply_model_config(
+        DshModelConfig(provider="deepseek-official", model="deepseek-v4-flash")
+    )
+
+    harness = client.ensure_harness()
+
+    assert harness.config.patches == (str(dsh_client_module._ASSISTANT_STREAM_PATCH),)
+    assert not patch_path.exists()
+
+
+def test_ensure_harness_provider_route_without_dsh_home_raises() -> None:
+    client = DshClient()
+    client.apply_model_config(
+        DshModelConfig(
+            provider="moonshotai-cn",
+            model="kimi-k2",
+            api_key="sk-kimi",
+            provider_route={"api_key_env": _ROUTE_ENV},
+        )
+    )
+
+    with pytest.raises(DshClientError) as exc:
+        client.ensure_harness()
+
+    assert exc.value.reason == "config-invalid"
+
+
+def test_ensure_harness_without_dsh_home_keeps_static_bridge_patch() -> None:
+    """无 dsh_home 时仍下发静态 bridge patch；失败留给 SDK 启动时报。"""
+    client = DshClient()
+
+    harness = client.ensure_harness()
+
+    assert harness.config.patches == (str(dsh_client_module._ASSISTANT_STREAM_PATCH),)
+
+
+def test_dsh_profile_name_matches_sdk_default() -> None:
+    assert DeepSeekHarnessConfig().profile == dsh_client_module._DSH_PROFILE_NAME
+
+
+class _BlockingNotificationClient:
+    def __init__(self) -> None:
+        self.notifications: queue.Queue[object] = queue.Queue()
+
+    def next_notification(self) -> object:
+        item = self.notifications.get()
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+class _HarnessWithClient:
+    def __init__(self, client: _BlockingNotificationClient) -> None:
+        self.client = client
+
+
+def test_unmatched_notification_drain_discards_queue() -> None:
+    """无订阅通知被后台线程丢弃；同一 harness 不重复起线程。"""
+    client = DshClient()
+    fake_client = _BlockingNotificationClient()
+    harness = _HarnessWithClient(fake_client)
+
+    client._ensure_notification_drain(harness)  # type: ignore[arg-type]
+    client._ensure_notification_drain(harness)  # type: ignore[arg-type]
+    assert len(client._notification_drains) == 1
+
+    for _ in range(100):
+        fake_client.notifications.put(object())
+    deadline = time.monotonic() + 1.0
+    while fake_client.notifications.qsize() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert fake_client.notifications.qsize() == 0
+    thread = client._notification_drains[id(harness)]
+    fake_client.notifications.put(RuntimeError("closed"))
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()

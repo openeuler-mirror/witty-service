@@ -17,6 +17,7 @@ from witty_service.application.runtime_config import (
     UnsupportedModelProviderError,
 )
 
+
 def _model_info(
     provider: str | None, name: str = "m", api_base_url: str | None = None
 ) -> dict[str, Any]:
@@ -72,3 +73,60 @@ def test_dsh_config_rejects_unknown_provider() -> None:
             agent_key="p",
             gateway_port=1,
         )
+
+
+def test_dsh_deepseek_official_base_url_normalized_to_none() -> None:
+    """deepseek 官方域 base_url 归一为 None（0.2.x 自带 /anthropic 端点）。"""
+    for official in (
+        "https://api.deepseek.com",
+        "https://api.deepseek.com/v1",
+        "https://api.deepseek.com/anthropic",
+    ):
+        payload = DshConfig().build_start_payload(
+            model_id="model-1",
+            model_info=_model_info("deepseek", api_base_url=official),
+            agent_key="p",
+            gateway_port=1,
+        )
+        assert payload["dsh"]["base_url"] is None, official
+
+
+def test_dsh_deepseek_custom_base_url_passthrough() -> None:
+    """deepseek 非官方域（自建代理）base_url 原样透传。"""
+    payload = DshConfig().build_start_payload(
+        model_id="model-1",
+        model_info=_model_info(
+            "deepseek", api_base_url="https://deepseek-proxy.internal/v1"
+        ),
+        agent_key="p",
+        gateway_port=1,
+    )
+    assert payload["dsh"]["base_url"] == "https://deepseek-proxy.internal/v1"
+
+
+def test_dsh_deepseek_official_host_custom_path_passthrough() -> None:
+    """官方域下的自定义路径不按官方端点归一，原样透传。"""
+    payload = DshConfig().build_start_payload(
+        model_id="model-1",
+        model_info=_model_info(
+            "deepseek", api_base_url="https://api.deepseek.com/proxy/v1"
+        ),
+        agent_key="p",
+        gateway_port=1,
+    )
+    assert payload["dsh"]["base_url"] == "https://api.deepseek.com/proxy/v1"
+
+
+def test_dsh_catalog_route_carries_provider_route() -> None:
+    """catalog provider（kimi）→ pi-ai 路由：provider id 归一 + provider_route。"""
+    payload = DshConfig().build_start_payload(
+        model_id="model-1",
+        model_info=_model_info("kimi", name="kimi-k2"),
+        agent_key="p",
+        gateway_port=1,
+    )
+    assert payload["dsh"]["provider"] == "moonshotai-cn"
+    assert payload["dsh"]["base_url"] is None
+    assert payload["dsh"]["provider_route"] == {
+        "api_key_env": "WITTY_DSH_PROVIDER_API_KEY"
+    }

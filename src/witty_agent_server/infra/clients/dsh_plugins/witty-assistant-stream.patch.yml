@@ -1,0 +1,5 @@
+# Static dsh profile patch: relay process-local token frames to the SDK client.
+# The relative name resolves against this patch file's directory.
+- insert:
+  - id: witty-assistant-stream-bridge
+    name: ./assistant-stream-bridge.mjs
