@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, NamedTuple, Protocol
+from urllib.parse import urlparse
 
 
 class UnsupportedModelProviderError(ValueError):
@@ -21,14 +22,14 @@ class _DshRoute(NamedTuple):
 
 # 模型注册表 provider（deepseek/openai/...）与 dsh harness 的路由 id 命名空间
 # 不同，归一化与路由集中在此：
-# - deepseek → deepseek-official：dsh 原生路径，凭据经 DEEPSEEK_* env，
-#   无需 settings 物化。
+# - deepseek → deepseek-official：dsh 原生路径，凭据经 DEEPSEEK_* env。
+#   官方域 base_url 不下发（见 _normalize_dsh_deepseek_base_url）。
 # - catalog 路由（openai/anthropic/google/kimi→moonshotai-cn）：用 dsh 内置
 #   pi-ai 目录的原生协议与端点，仅在用户显式覆盖 api_base_url 时下发 baseURL。
 # - openai-compat 路由（glm/minimax/ollama/azure/xai/custom）：协议恒为
 #   openai-completions，baseURL 取注册表值。
 # 非 deepseek 路由的参数经 ``dsh.provider_route`` 下发，由 agent-server 写入
-# per-agent ``<dsh_home>/settings.yaml`` 并注入凭据 env。
+# per-agent profile patch（0.2.x：``<dsh_home>/dsh-pi-ai.patch.yml``）并注入凭据 env。
 _DSH_DEEPSEEK_ROUTE: str = "deepseek-official"
 
 # 注册表 vendor 名 → pi-ai catalog 路由 id。
@@ -246,6 +247,33 @@ class DshConfig(RuntimeConfig):
         return False
 
 
+# deepseek-official 0.2.x 使用 Messages 协议并自带 /anthropic 端点；注册表
+# 的官方域 base_url 是 chat-completions 形态，命中时不下发，回落到默认端点。
+# 自定义/代理端点仍原样透传。
+_DSH_DEEPSEEK_OFFICIAL_HOSTS: frozenset[str] = frozenset({"api.deepseek.com"})
+_DSH_DEEPSEEK_COMPAT_PATHS: frozenset[str] = frozenset({"", "/v1", "/anthropic"})
+
+
+def _normalize_dsh_deepseek_base_url(base_url: str | None) -> str | None:
+    """deepseek 原生路由的 base_url 归一：官方域回落适配器默认（None）。"""
+    if not base_url:
+        return None
+    try:
+        parsed = urlparse(base_url)
+        port = parsed.port
+    except ValueError:
+        return base_url
+    if (
+        parsed.hostname in _DSH_DEEPSEEK_OFFICIAL_HOSTS
+        and port is None
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path.rstrip("/") in _DSH_DEEPSEEK_COMPAT_PATHS
+    ):
+        return None
+    return base_url
+
+
 def _resolve_dsh_route(
     *, model_id: str | None, model_info: dict[str, Any]
 ) -> _DshRoute:
@@ -266,7 +294,7 @@ def _resolve_dsh_route(
     if provider == "deepseek":
         return _DshRoute(
             provider=_DSH_DEEPSEEK_ROUTE,
-            base_url=model_info.get("api_base_url"),
+            base_url=_normalize_dsh_deepseek_base_url(model_info.get("api_base_url")),
             provider_route=None,
         )
 

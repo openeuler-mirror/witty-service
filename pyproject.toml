@@ -47,7 +47,7 @@ dependencies = [
   "docker>=7.0",
   "apscheduler>=3.11,<4",
   # dsh runtime（developer preview：锁精确版本，升级需独立评估兼容性）
-  "deepseek-harness-sdk==0.1.2rc1",
+  "deepseek-harness-sdk==0.2.1rc2",
 ]
 
 [project.optional-dependencies]
@@ -106,7 +106,9 @@ packages = [
     "witty_agent_server.logger",
 ]
 package-dir = {"witty_service" = "src/witty_service", "witty_agent_server" = "src/witty_agent_server"}
-package-data = {"witty_service.data" = ["*.tar.gz", "preset_agents/**/*"]}
+[tool.setuptools.package-data]
+"witty_service.data" = ["*.tar.gz", "preset_agents/**/*"]
+"witty_agent_server.infra.clients" = ["dsh_plugins/*.mjs", "dsh_plugins/*.yml"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

@@ -282,7 +282,7 @@ class ModelORM(Base):
     api_base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     compatibility: Mapped[str | None] = mapped_column(String(16), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=4096)
+    max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=32768)
     temperature: Mapped[float] = mapped_column(Integer, nullable=False, default=7)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -724,4 +724,3 @@ class ChannelAccessPolicyORM(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
     )
-

@@ -146,12 +146,22 @@ class DshRuntime(RuntimeBase):
           为 ``None`` 时不做过滤；
         - ``tool_names_by_call_id`` 由 ``tool/call`` 事件就地填充，供
           ``tool/result``（source 仅含 callId）回填工具名。
+
+        0.2.x 的逐 token 增量由 profile patch 转发为
+        ``witty.assistant.stream`` notification（durable 事件只有
+        ``assistant/message``），两者映射到同一组增量事件。
         """
-        if raw.get("method") != "session.event":
-            # session.status（轮终止判定）等非 session.event 通知不映射。
-            return
+        method = raw.get("method")
         payload = raw.get("payload")
         if not isinstance(payload, dict):
+            return
+        if method == "witty.assistant.stream":
+            if session_id is not None and payload.get("sessionId") != session_id:
+                return
+            yield from DshRuntime._map_assistant_stream_frame(payload.get("frame"))
+            return
+        if method != "session.event":
+            # session.status（轮终止判定）等非 session.event 通知不映射。
             return
         if session_id is not None and payload.get("sessionId") != session_id:
             return
@@ -220,6 +230,21 @@ class DshRuntime(RuntimeBase):
                 "payload": normalize_dsh_output_truncated(),
             }
         yield {"type": TurnEventType.TURN_COMPLETED, "payload": {"reason": kind}}
+
+    @staticmethod
+    def _map_assistant_stream_frame(
+        frame: Any,
+    ) -> Iterator[RuntimeTurnEvent]:
+        """映射 ``witty.assistant.stream`` 的单个 frame；只处理 chunk。
+
+        ``start`` / ``end`` 由 ``turn/start`` / ``assistant/message`` 覆盖，
+        chunk 载荷复用 ``_map_assistant_chunk``。
+        """
+        if not isinstance(frame, dict) or frame.get("type") != "chunk":
+            return
+        chunk = frame.get("chunk")
+        if isinstance(chunk, dict):
+            yield from DshRuntime._map_assistant_chunk({"chunk": chunk})
 
     @staticmethod
     def _map_assistant_chunk(data: Mapping[str, Any]) -> Iterator[RuntimeTurnEvent]:

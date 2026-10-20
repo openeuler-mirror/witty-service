@@ -1705,7 +1705,7 @@ class SqliteRepository:
         api_base_url: str | None = None,
         compatibility: str | None = None,
         enabled: bool = True,
-        max_tokens: int = 4096,
+        max_tokens: int = 32768,
         temperature: float = 0.7,
         is_default: bool = False,
     ) -> ModelRecord:
@@ -1749,7 +1749,7 @@ class SqliteRepository:
         api_base_url: str | None = None,
         compatibility: str | None = None,
         enabled: bool = True,
-        max_tokens: int = 4096,
+        max_tokens: int = 32768,
         temperature: float = 0.7,
         is_default: bool = False,
     ) -> ModelRecord:

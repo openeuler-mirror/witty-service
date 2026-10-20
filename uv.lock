@@ -480,25 +480,26 @@ wheels = [
 
 [[package]]
 name = "deepseek-harness-runtime-bin"
-version = "0.1.2rc1"
+version = "0.2.1rc2"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
 wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/33/91/be83a7f28b3f09c128913a6f331d3c7b35dd60b2a59e76ab3efe58b43db5/deepseek_harness_runtime_bin-0.1.2rc1-py3-none-macosx_14_0_arm64.whl", hash = "sha256:2cac2256cdebfda726c3378e24f4be31c0847aece7f2a7eb5a8523559f6b5894" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/95/63/56e9467299c01274143db7c5b122d5f6a5b5bfeb1d19d7f4f55f8d5716b3/deepseek_harness_runtime_bin-0.1.2rc1-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:5052ca9fea2304e28d82a71012a32e7d2399322e1884a065cb08cf5bc57f017f" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/46/e3/7fdfffff5a5925e52d9726b6e90d489af87090847db54814aa3b14334cb3/deepseek_harness_runtime_bin-0.1.2rc1-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:670d8af06845cc2fc16738f1b030375321f3f8268837152aa3100e14a7b9887d" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/e7/63/16b5733796e85f5df2d5985f0c78fdf582cd002f687d7e985f16d19d9cb3/deepseek_harness_runtime_bin-0.1.2rc1-py3-none-win_amd64.whl", hash = "sha256:390bd8cd5f8700fc609c58e1ccb78091d5c8c6e11c21656e284e0f68da0e148f" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/10/99/723905c63929056e05494e8a659bc8eb9adf671ee6712fb4316930b97ac8/deepseek_harness_runtime_bin-0.2.1rc2-py3-none-macosx_14_0_arm64.whl", hash = "sha256:96a173abd14141d5328a78791b69729cbfe22fa3e9daf1dc2600d0daa4d6bb28" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/7b/b5/8bd76d1247955ba1f502bd684f9307352a879d703475b547cb6934495b6e/deepseek_harness_runtime_bin-0.2.1rc2-py3-none-macosx_14_0_x86_64.whl", hash = "sha256:80614eee24916ce97d692baf8aed3ba146ed00fc2155d266cb0ede98d9354139" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/2e/36/dd6d86ab8e4dd4ec2b3ed09ccb3bb28864d86c4e1c31189f7753bd0c07c6/deepseek_harness_runtime_bin-0.2.1rc2-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:71ed869e3e9a0e3ea398521730889d2d7e154767834165f1553755818e3f2a78" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/01/f3/1f7b9ea37ece210a5e432089bd63d048b2c45acc910561ec5e730c46a532/deepseek_harness_runtime_bin-0.2.1rc2-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:0a0a4eb85a22cd9339972e6a5ced77a27ec791353a5b220e3e10b8cdbbdeca39" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/bc/95/8164c49a5d3430add58db8aeba6546cd05c9ab7ddd2ea3e1acf174448d86/deepseek_harness_runtime_bin-0.2.1rc2-py3-none-win_amd64.whl", hash = "sha256:d38c18f5117859feedaaa791a0eea37b8644bc187118e7e6f3afa231a5381cb7" },
 ]
 
 [[package]]
 name = "deepseek-harness-sdk"
-version = "0.1.2rc1"
+version = "0.2.1rc2"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
 dependencies = [
     { name = "deepseek-harness-runtime-bin" },
     { name = "pydantic" },
 ]
 wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/d7/38/0220769bc89ca29318a8f09c30390095aaa071ae2116f677e8398763390e/deepseek_harness_sdk-0.1.2rc1-py3-none-any.whl", hash = "sha256:24689eec01e95233feb75ca08a0fe748b491e71682f80d2c04e6f9485f20488a" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/d4/da/97d6b092e5221e13c8560d50d1e5f5c9eb8ad64a75f40196bf340572dd15/deepseek_harness_sdk-0.2.1rc2-py3-none-any.whl", hash = "sha256:30fc72c67f20ff4b46c6952087ea596fc70c2692001aa372185a24f9866bdc46" },
 ]
 
 [[package]]
@@ -1741,7 +1742,7 @@ requires-dist = [
     { name = "apscheduler", specifier = ">=3.11,<4" },
     { name = "bandit", marker = "extra == 'dev'", specifier = ">=1.9" },
     { name = "cryptography", specifier = ">=42.0.0" },
-    { name = "deepseek-harness-sdk", specifier = "==0.1.2rc1" },
+    { name = "deepseek-harness-sdk", specifier = "==0.2.1rc2" },
     { name = "docker", specifier = ">=7.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "gitpython", specifier = ">=3.1.40" },

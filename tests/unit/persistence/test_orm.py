@@ -527,7 +527,7 @@ def test_model_orm_defaults(session: Session) -> None:
     fetched = session.get(ModelORM, "m-1")
     assert fetched.api_base_url is None
     assert fetched.enabled is True
-    assert fetched.max_tokens == 4096
+    assert fetched.max_tokens == 32768
     # 注意源代码把 temperature 声明为 Integer 而非 Float,默认 7
     assert fetched.temperature == 7
     assert fetched.is_default is False

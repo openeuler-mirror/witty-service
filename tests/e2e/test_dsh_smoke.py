@@ -5,6 +5,9 @@
 WS 发消息 → 收到 ``message.started`` / ``message.delta`` / ``message.completed``
 → 工具事件（若本轮触发）→ ``turn.completed``。
 
+dsh 0.2.x 的 durable 事件不再含 token 级 ``assistant/chunk``；进程内 frame 由
+profile patch 转发为 ``witty.assistant.stream``，本测试同时约束增量与终值。
+
 需要真实 LLM 凭证：未设置 ``DEEPSEEK_API_KEY`` 时整模块跳过
 （本地 env / CI secret 注入）。api_key/base_url 由 dsh 子进程继承调用方
 环境（SDK ``DeepSeekHarnessConfig`` 默认继承 env），无需显式下发。
@@ -149,13 +152,16 @@ def test_dsh_smoke_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
             # 4. 校验统一事件序列。
             _assert_turn_sequence(events)
             seen = [e.get("type") for e in events]
+            # 0.2.x 的逐 token 增量经 witty.assistant.stream bridge 恢复；缺了它
+            # 说明 profile patch 未挂载或进程内事件名已变更，必须显式失败。
             assert "message.delta" in seen, (
-                f"missing streaming message.delta; events={seen}"
+                f"missing token-level message.delta; events={seen}"
             )
             tool_types = [t for t in seen if t.startswith("tool.")]
             print(
                 "dsh smoke turn ok:",
                 f"events={len(events)}",
+                f"delta_count={seen.count('message.delta')}",
                 f"tool_events={tool_types}",
             )
         finally:
