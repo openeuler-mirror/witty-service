@@ -405,12 +405,48 @@ class ChannelRepository:
             row = session.get(ChannelRouteORM, route_id)
             return None if row is None else self._to_route_record(row)
 
+    def get_route_by_key(
+        self,
+        *,
+        instance_id: str,
+        conversation_type: str,
+        platform_user_id: str,
+    ) -> ChannelRouteRecord | None:
+        """按键读取路由；不存在时返回 None，**不创建**。"""
+        with self._session_factory() as session:
+            row = self._find_route_row(
+                session, instance_id, conversation_type, platform_user_id
+            )
+            return None if row is None else self._to_route_record(row)
+
     def list_routes_for_instance(self, instance_id: str) -> list[ChannelRouteRecord]:
         with self._session_factory() as session:
             rows = (
                 session.query(ChannelRouteORM)
                 .filter(ChannelRouteORM.channel_instance_id == instance_id)
                 .order_by(ChannelRouteORM.created_at.asc())
+                .all()
+            )
+            return [self._to_route_record(row) for row in rows]
+
+    def list_route_senders(
+        self,
+        instance_id: str,
+        *,
+        conversation_type: str,
+        limit: int,
+    ) -> list[ChannelRouteRecord]:
+        """候选收件人：非空用户标识，按首次接入时间倒序。"""
+        with self._session_factory() as session:
+            rows = (
+                session.query(ChannelRouteORM)
+                .filter(
+                    ChannelRouteORM.channel_instance_id == instance_id,
+                    ChannelRouteORM.conversation_type == conversation_type,
+                    ChannelRouteORM.platform_user_id != "",
+                )
+                .order_by(ChannelRouteORM.created_at.desc())
+                .limit(limit)
                 .all()
             )
             return [self._to_route_record(row) for row in rows]
@@ -532,7 +568,9 @@ class ChannelRepository:
         with self._session_factory() as session:
             query = session.query(ChannelDeliveryORM)
             if instance_id is not None:
-                query = query.filter(ChannelDeliveryORM.channel_instance_id == instance_id)
+                query = query.filter(
+                    ChannelDeliveryORM.channel_instance_id == instance_id
+                )
             if route_id is not None:
                 query = query.filter(ChannelDeliveryORM.route_id == route_id)
             if turn_id is not None:
@@ -650,7 +688,9 @@ class ChannelRepository:
         )
 
     @staticmethod
-    def _to_provisioning_record(row: ChannelProvisioningORM) -> ChannelProvisioningRecord:
+    def _to_provisioning_record(
+        row: ChannelProvisioningORM,
+    ) -> ChannelProvisioningRecord:
         return ChannelProvisioningRecord(
             id=row.id,
             channel=row.channel,

@@ -812,7 +812,12 @@ class SessionRouter:
         # 失败这次同样计进额度：平台可能已经受理（uncertain），宁可提前少发一条
         turn.non_final_sent += 1
         self._record_delivery(
-            runtime, state, turn, result=result, segment_index=0, phase="placeholder"
+            runtime,
+            state.route_record_id,
+            turn,
+            result=result,
+            segment_index=0,
+            phase="placeholder",
         )
         if result.delivered:
             # 平台回执不一定带消息标识（企微 `aibot_send_msg` 的回执就没有 msgid）：
@@ -861,7 +866,12 @@ class SessionRouter:
             )
             turn.non_final_sent += 1
         self._record_delivery(
-            runtime, state, None, result=result, segment_index=0, phase="deferred"
+            runtime,
+            state.route_record_id,
+            None,
+            result=result,
+            segment_index=0,
+            phase="deferred",
         )
         logger.info(
             "Channel turn exceeded stall window; switched to deferred delivery: "
@@ -928,7 +938,7 @@ class SessionRouter:
             result = await runtime.adapter.send_text(state.route, action.text)
         self._record_delivery(
             runtime,
-            state,
+            state.route_record_id,
             turn,
             result=result,
             segment_index=action.index,
@@ -970,7 +980,7 @@ class SessionRouter:
     ) -> DeliveryResult:
         """连通性测试等"非回合"出站的公共入口（框架设计 §9）。
 
-        只发送调用方给定的固定文案：**不提交回合、不写会话历史、不改绑定**；
+        只发送调用方给定的固定文案：**不提交回合、不写会话历史、不建路由**；
         投递仍按三态归档一条记录（`turn_id` 为空），便于排障。
         """
         runtime = self._instances.get(instance_id)
@@ -982,11 +992,16 @@ class SessionRouter:
             raise err.channel_instance_offline(
                 instance_id=instance_id, status=record.status
             )
-        state = self._state_for(route)
+        existing = self._repository.get_route_by_key(
+            instance_id=instance_id,
+            conversation_type=route.conversation_type,
+            platform_user_id=route.platform_user_id,
+        )
+        route_id = existing.id if existing is not None else None
         result = await runtime.adapter.send_text(route, text)
         self._record_delivery(
             runtime,
-            state,
+            route_id,
             None,
             result=result,
             segment_index=0,
@@ -1036,7 +1051,7 @@ class SessionRouter:
     def _record_delivery(
         self,
         runtime: ChannelInstanceRuntime,
-        state: RouteState,
+        route_id: str | None,
         turn: TurnContext | None,
         *,
         result: DeliveryResult,
@@ -1046,7 +1061,7 @@ class SessionRouter:
         try:
             self._repository.record_delivery(
                 instance_id=runtime.instance_id,
-                route_id=state.route_record_id,
+                route_id=route_id,
                 session_id=turn.session_id if turn is not None else None,
                 turn_id=turn.turn_id if turn is not None else None,
                 certainty=result.certainty,

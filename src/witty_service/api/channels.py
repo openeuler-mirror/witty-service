@@ -1,6 +1,6 @@
 """IM Channel REST 接口（框架设计 §9）。
 
-十三条端点：渠道目录、扫码接入三个、实例六个、连通性测试一个、准入策略两个。
+十四条端点：渠道目录、扫码接入三个、实例六个、候选收件人一个、连通性测试一个、准入策略两个。
 
 三条纪律：
 
@@ -24,6 +24,8 @@ from witty_service.api.channel_schemas import (
     ChannelCatalogItemResponse,
     ChannelCredentialFieldResponse,
     ChannelInstanceResponse,
+    ChannelKnownSenderResponse,
+    ChannelKnownSendersResponse,
     ChannelTestRequest,
     ChannelTestResponse,
     CreateChannelInstanceRequest,
@@ -298,6 +300,36 @@ async def reconnect_instance(
     await gateway.reconnect_instance(instance_id)
     record = _instance_or_404(services, instance_id)
     return _to_response(services, record)
+
+
+@router.get(
+    "/instances/{instance_id}/known-senders",
+    response_model=ChannelKnownSendersResponse,
+)
+def list_known_senders(
+    instance_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    services: ServiceContainer = Depends(get_services),
+) -> ChannelKnownSendersResponse:
+    """连通性测试的候选收件人：该实例产生过会话路由的私聊用户。
+
+    按首次接入时间倒序；空用户标识不返回。MVP 只返回 direct。
+    """
+    _instance_or_404(services, instance_id)
+    routes = services.channel_repository.list_route_senders(
+        instance_id,
+        conversation_type=CONVERSATION_TYPE_DIRECT,
+        limit=limit,
+    )
+    return ChannelKnownSendersResponse(
+        senders=[
+            ChannelKnownSenderResponse(
+                conversation_type=route.conversation_type,
+                platform_user_id=route.platform_user_id,
+            )
+            for route in routes
+        ]
+    )
 
 
 @router.post("/instances/{instance_id}/test", response_model=ChannelTestResponse)

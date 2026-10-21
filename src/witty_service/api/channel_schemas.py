@@ -105,6 +105,19 @@ class UpdateChannelInstanceRequest(BaseModel):
     display_name: str | None = None
 
 
+class ChannelKnownSenderResponse(BaseModel):
+    """会话路由中的一个平台用户。"""
+
+    conversation_type: str
+    platform_user_id: str
+
+
+class ChannelKnownSendersResponse(BaseModel):
+    """连通性测试的候选收件人（MVP 仅私聊）。"""
+
+    senders: list[ChannelKnownSenderResponse] = Field(default_factory=list)
+
+
 class ChannelTestRequest(BaseModel):
     platform_user_id: str
     conversation_type: str = CONVERSATION_TYPE_DIRECT
@@ -161,7 +174,9 @@ def to_instance_response(
     )
 
 
-def to_policy_entry(record: ChannelAccessPolicyRecord | None) -> AccessPolicyEntrySchema:
+def to_policy_entry(
+    record: ChannelAccessPolicyRecord | None,
+) -> AccessPolicyEntrySchema:
     """缺失的行按默认值返回：**缺失即"放开"**，与判定层的语义一致。"""
     if record is None:
         return AccessPolicyEntrySchema()
@@ -179,6 +194,8 @@ __all__ = [
     "ChannelCatalogItemResponse",
     "ChannelCredentialFieldResponse",
     "ChannelInstanceResponse",
+    "ChannelKnownSenderResponse",
+    "ChannelKnownSendersResponse",
     "ChannelTestRequest",
     "ChannelTestResponse",
     "CreateChannelInstanceRequest",

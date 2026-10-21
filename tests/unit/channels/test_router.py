@@ -167,6 +167,41 @@ async def test_control_text_does_not_submit_a_turn(tmp_path) -> None:
     assert env.gateway.turns == []
 
 
+@pytest.mark.asyncio
+async def test_control_text_does_not_create_route(tmp_path) -> None:
+    """临时测试目标不写路由表，否则 known-senders 会被测试输入污染。"""
+    env = _build_env(tmp_path)
+    result = await env.router.send_control_text(
+        instance_id=env.instance_id,
+        route=env.route("never-messaged"),
+        text=cmd.CONNECTIVITY_TEST_TEXT,
+    )
+
+    assert result.delivered
+    assert env.repository.list_routes_for_instance(env.instance_id) == []
+    deliveries = env.repository.list_deliveries(instance_id=env.instance_id)
+    assert [delivery.route_id for delivery in deliveries] == [None]
+
+
+@pytest.mark.asyncio
+async def test_control_text_records_the_existing_route(tmp_path) -> None:
+    """已存在的路由仍要挂到投递记录上，便于排障。"""
+    env = _build_env(tmp_path)
+    route = env.route()
+    record = env.repository.get_or_create_route(
+        instance_id=env.instance_id,
+        conversation_type=route.conversation_type,
+        platform_user_id=route.platform_user_id,
+    )
+
+    await env.router.send_control_text(
+        instance_id=env.instance_id, route=route, text=cmd.CONNECTIVITY_TEST_TEXT
+    )
+
+    deliveries = env.repository.list_deliveries(instance_id=env.instance_id)
+    assert [delivery.route_id for delivery in deliveries] == [record.id]
+
+
 # ==============================================================================
 # 基本链路
 # ==============================================================================

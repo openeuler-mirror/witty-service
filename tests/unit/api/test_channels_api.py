@@ -576,6 +576,70 @@ def test_connectivity_test_rejects_unknown_conversation_type(
     assert response.json()["error"]["code"] == "CHANNEL_CREDENTIALS_INVALID"
 
 
+def test_known_senders_are_listed_for_connectivity_test(tmp_path, monkeypatch) -> None:
+    """无路由时返回空列表；有路由时按首次接入时间倒序，且只返回私聊。"""
+    env = _build(tmp_path, monkeypatch)
+    instance = env.create_instance()
+    instance_id = instance["id"]
+
+    # 无路由时返回空列表，前端回退到手动输入
+    empty = env.client.get(
+        f"/channels/instances/{instance_id}/known-senders", headers=AUTH
+    )
+    assert empty.status_code == 200
+    assert empty.json()["senders"] == []
+
+    repository = env.services.channel_repository
+    for conversation_type, user in (
+        ("direct", "u-early"),
+        ("direct", "u-late"),
+        ("group", "u-late"),
+        ("direct", ""),
+    ):
+        repository.get_or_create_route(
+            instance_id=instance_id,
+            conversation_type=conversation_type,
+            platform_user_id=user,
+        )
+
+    body = env.client.get(
+        f"/channels/instances/{instance_id}/known-senders", headers=AUTH
+    ).json()
+    assert [sender["platform_user_id"] for sender in body["senders"]] == [
+        "u-late",
+        "u-early",
+    ]
+    assert all(sender["conversation_type"] == "direct" for sender in body["senders"])
+
+
+def test_known_senders_respects_limit(tmp_path, monkeypatch) -> None:
+    env = _build(tmp_path, monkeypatch)
+    instance = env.create_instance()
+    instance_id = instance["id"]
+
+    repository = env.services.channel_repository
+    for user in ("u-1", "u-2", "u-3"):
+        repository.get_or_create_route(
+            instance_id=instance_id,
+            conversation_type="direct",
+            platform_user_id=user,
+        )
+
+    body = env.client.get(
+        f"/channels/instances/{instance_id}/known-senders",
+        params={"limit": 1},
+        headers=AUTH,
+    ).json()
+    assert [sender["platform_user_id"] for sender in body["senders"]] == ["u-3"]
+
+
+def test_known_senders_requires_an_existing_instance(tmp_path, monkeypatch) -> None:
+    env = _build(tmp_path, monkeypatch)
+    response = env.client.get("/channels/instances/nope/known-senders", headers=AUTH)
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "CHANNEL_INSTANCE_NOT_FOUND"
+
+
 # ==============================================================================
 # 准入策略
 # ==============================================================================
