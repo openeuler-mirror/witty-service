@@ -30,7 +30,9 @@ class DummyRuntime(RuntimeBase):
         raise NotImplementedError
 
     def answer_question(self, *, request_id: str, answers: list[list[str]]) -> bool:
-        self.answer_question_calls.append({"request_id": request_id, "answers": answers})
+        self.answer_question_calls.append(
+            {"request_id": request_id, "answers": answers}
+        )
         if self._raise_on_answer is not None:
             raise self._raise_on_answer
         return self._answer_question_result
@@ -44,6 +46,7 @@ class DummyRuntime(RuntimeBase):
 
 class UnsupportedRuntime(RuntimeBase):
     """未覆盖 answer_question / reject_question 的 runtime，默认抛 NotImplementedError。"""
+
     runtime_type: Any = "unsupported-runtime"
 
     def _map_events(self, raw: dict[str, Any]) -> Any:
@@ -107,12 +110,12 @@ def test_handle_runtime_event_forwards_runtime_identity_change() -> None:
         session_service=DummySessionService(),
         agent_service=DummyAgentService(),
         identity_store=identity_store,
-        runtime_type="openclaw",
+        runtime_type="opencode",
     )
     identity = identity_store.bind(
         agent_id="agent-1",
         session_id="session-1",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_key="agent:1:session:key-1",
         runtime_session_id=None,
     )
@@ -121,7 +124,7 @@ def test_handle_runtime_event_forwards_runtime_identity_change() -> None:
         orchestrator._handle_runtime_event(
             agent_id="agent-1",
             session_id="session-1",
-            runtime_type="openclaw",
+            runtime_type="opencode",
             identity=identity,
             event={
                 "type": "session.runtime.changed",
@@ -134,7 +137,7 @@ def test_handle_runtime_event_forwards_runtime_identity_change() -> None:
     assert events[0]["type"] == "session.runtime.changed"
     assert events[0]["agent_id"] == "agent-1"
     assert events[0]["session_id"] == "session-1"
-    assert events[0]["runtime_type"] == "openclaw"
+    assert events[0]["runtime_type"] == "opencode"
     assert events[0]["payload"] == {
         "runtime_session_id": "runtime-session-1",
         "runtime_session_key": "agent:1:session:key-1",

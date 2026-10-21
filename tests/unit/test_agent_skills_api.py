@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -37,7 +37,7 @@ def _installed_record(**overrides: object) -> SimpleNamespace:
         "source_type": "git",
         "repo_id": "repo-1",
         "skill_name": "terminal-helper",
-        "installed_at": datetime(2026, 6, 3, 10, 0, tzinfo=timezone.utc),
+        "installed_at": datetime(2026, 6, 3, 10, 0, tzinfo=UTC),
         "relative_path": "skills/terminal-helper/SKILL.md",
         "metadata": {"title": "Terminal Helper"},
         "skill_source": "git",
@@ -58,7 +58,9 @@ def _services() -> MagicMock:
 async def test_install_agent_skill_returns_installed_record(monkeypatch, tmp_path):
     services = _services()
     manager = MagicMock()
-    installed_file_path = str(tmp_path / "workspace-agent-1/skills/terminal-helper/SKILL.md")
+    installed_file_path = str(
+        tmp_path / "workspace-agent-1/skills/terminal-helper/SKILL.md"
+    )
     manager.install_agent_skill = AsyncMock(
         return_value={"ok": True, "filePath": installed_file_path}
     )
@@ -102,9 +104,9 @@ async def test_install_agent_skill_returns_installed_record(monkeypatch, tmp_pat
         skill_name="terminal-helper",
         source_path="/tmp/terminal-helper",
     )
-    assert services.repository.upsert_installed_agent_skill.call_args.kwargs["relative_path"] == (
-        installed_file_path
-    )
+    assert services.repository.upsert_installed_agent_skill.call_args.kwargs[
+        "relative_path"
+    ] == (installed_file_path)
 
 
 @pytest.mark.asyncio
@@ -127,14 +129,19 @@ async def test_install_agent_skill_raises_not_found_when_skill_missing(monkeypat
         )
 
     assert exc_info.value.code == "SKILL_NOT_FOUND"
-    assert exc_info.value.details == {"skill_name": "terminal-helper", "skill_id": "skill-1"}
+    assert exc_info.value.details == {
+        "skill_name": "terminal-helper",
+        "skill_id": "skill-1",
+    }
 
 
 @pytest.mark.asyncio
 async def test_install_agent_skill_supports_wittyhub(monkeypatch, tmp_path):
     services = _services()
     manager = MagicMock()
-    installed_file_path = str(tmp_path / "workspace-agent-1/skills/vmcore-analysis/SKILL.md")
+    installed_file_path = str(
+        tmp_path / "workspace-agent-1/skills/vmcore-analysis/SKILL.md"
+    )
     manager.install_agent_skill = AsyncMock(
         return_value={"ok": True, "filePath": installed_file_path}
     )
@@ -328,7 +335,9 @@ async def test_uninstall_agent_skill_supports_wittyhub(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_uninstall_agent_skill_passes_runtime_source_for_builtin(monkeypatch, tmp_path):
+async def test_uninstall_agent_skill_passes_runtime_source_for_builtin(
+    monkeypatch, tmp_path
+):
     services = _services()
     manager = MagicMock()
     manager.uninstall_agent_skill = AsyncMock(return_value=None)
@@ -337,7 +346,7 @@ async def test_uninstall_agent_skill_passes_runtime_source_for_builtin(monkeypat
     services.repository.get_installed_agent_skill.return_value = _installed_record(
         source_type="builtin",
         skill_name="browser-automation",
-        skill_source="openclaw-extra",
+        skill_source="opencode-extra",
         relative_path=str(skill_file_path),
     )
 
@@ -356,7 +365,7 @@ async def test_uninstall_agent_skill_passes_runtime_source_for_builtin(monkeypat
         skill_name="browser-automation",
         source_type="builtin",
         source_path=str(skill_file_path.parent),
-        runtime_source="openclaw-extra",
+        runtime_source="opencode-extra",
     )
 
 

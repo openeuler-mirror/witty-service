@@ -5,7 +5,6 @@ from witty_service.config import get_settings
 
 AGENT_CONFIG_DIR_NAME = "agent-config"
 AGENT_SPEC_FILE_NAME = "agent-spec.yaml"
-OPENCLAW_TEMPLATE_FILE_NAME = "openclaw-template.json"
 
 
 def resolve_workspace_root(path: str | None = None) -> Path:
@@ -27,8 +26,6 @@ class RuntimeWorkspaceResolver:
         return self._project_root
 
     def get_runtime_root(self, runtime: RuntimeType) -> Path:
-        if runtime == "openclaw":
-            return self._project_root
         return self._project_root / runtime
 
     def get_agent_spec_path(self, runtime: RuntimeType) -> Path:

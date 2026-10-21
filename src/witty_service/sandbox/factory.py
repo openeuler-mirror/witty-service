@@ -4,11 +4,11 @@ from collections.abc import Callable
 
 from witty_service.config import get_settings
 from witty_service.domain.errors import DomainError
-from witty_service.sandbox.base import SANDBOX_NOT_SUPPORTED
-from witty_service.sandbox.base import SandboxBackend
-from witty_service.sandbox.base import sandbox_start_failed
+from witty_service.sandbox.base import (
+    SANDBOX_NOT_SUPPORTED,
+    SandboxBackend,
+)
 from witty_service.sandbox.docker import DockerSandboxBackend
-from witty_service.sandbox.e2b import E2BSandboxBackend
 from witty_service.sandbox.local_process import LocalProcessSandboxBackend
 
 SandboxBackendFactory = Callable[[], SandboxBackend]
@@ -41,7 +41,6 @@ def _create_local_process_backend() -> LocalProcessSandboxBackend:
 
 _SANDBOX_BACKEND_FACTORIES: dict[str, SandboxBackendFactory] = {
     "docker": _create_docker_backend,
-    "e2b": E2BSandboxBackend,
     "local_process": _create_local_process_backend,
 }
 
@@ -63,6 +62,3 @@ def create_sandbox_backend(sandbox_type: str) -> SandboxBackend:
             },
         ) from exc
     return factory()
-
-
-

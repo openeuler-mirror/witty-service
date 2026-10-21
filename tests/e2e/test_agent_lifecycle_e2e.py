@@ -29,7 +29,7 @@ async def test_pause_resume_flow(monkeypatch):
             json={
                 "name": "test-agent",
                 "sandbox_type": "local_process",
-                "adapter_type": "openclaw",
+                "adapter_type": "opencode",
                 "idle_timeout_seconds": 3600,
             },
             headers=AUTH_HEADERS,
@@ -87,7 +87,7 @@ async def test_delete_resume_flow(monkeypatch):
             json={
                 "name": "test-agent",
                 "sandbox_type": "local_process",
-                "adapter_type": "openclaw",
+                "adapter_type": "opencode",
                 "idle_timeout_seconds": 3600,
             },
             headers=AUTH_HEADERS,

@@ -617,7 +617,7 @@ def test_agent_service_start_without_opencode_config_does_not_call_update_config
 
 
 # ---------------------------------------------------------------------------
-# agent service error conversion (symmetric with OpenClaw)
+# agent service error conversion
 # ---------------------------------------------------------------------------
 
 

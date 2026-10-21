@@ -107,7 +107,7 @@ class AgentIdNotConfiguredError(AgentServiceError):
     def __init__(self, *, agent_id: str, configured_ids: list[str]) -> None:
         super().__init__(
             code="AGENT_ID_NOT_CONFIGURED",
-            message="agent id is not configured in openclaw agents.list",
+            message="agent id is not configured",
             status_code=400,
             details={"agent_id": agent_id, "configured_ids": configured_ids},
         )
@@ -117,7 +117,7 @@ class AgentDefaultNotConfiguredError(AgentServiceError):
     def __init__(self) -> None:
         super().__init__(
             code="AGENT_DEFAULT_NOT_CONFIGURED",
-            message="default agent is not configured in openclaw agents.list",
+            message="default agent is not configured",
             status_code=500,
         )
 
@@ -134,16 +134,6 @@ class AgentContextMismatchError(AgentServiceError):
                 "requested_agent_id": requested_agent_id,
                 "current_agent_id": current_agent_id,
             },
-        )
-
-
-class OpenClawAgentNotFoundError(AgentServiceError):
-    def __init__(self, *, agent_id: str) -> None:
-        super().__init__(
-            code="OPENCLAW_AGENT_NOT_FOUND",
-            message="openclaw gateway did not load configured agent",
-            status_code=500,
-            details={"agent_id": agent_id},
         )
 
 

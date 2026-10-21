@@ -29,14 +29,6 @@ Witty Service 统一配置管理
     WITTY_DOCKER_STOP_TIMEOUT      Docker容器停止超时时间(秒) (默认: 10)
     WITTY_DOCKER_IMAGE             Docker镜像名称 (默认: ghcr.io/openwitty/witty-agent-server)
 
-    # OpenClaw Gateway配置
-    OPENCLAW_GATEWAY_IDLE_TIMEOUT            网关空闲超时时间(秒) (默认: 1200)
-    OPENCLAW_GATEWAY_LIFECYCLE_END_DRAIN_TIMEOUT  生命周期结束排水超时时间(秒) (默认: 60)
-    OPENCLAW_STATE_DIR               状态目录 (可选)
-
-    # OpenClaw配置
-    OPENCLAW_CONFIG_PATH            OpenClaw配置文件路径 (默认: ~/.openclaw/openclaw.json)
-
     # Witty Insight 配置
     WITTY_INSIGHT_ENABLED          是否启用 insight 集成 (默认: true)
     WITTY_INSIGHT_BASE_URL         insight API 地址 (默认: http://127.0.0.1:7396)
@@ -215,36 +207,6 @@ class DockerSettings:
 
 
 # ==============================================================================
-# OpenClaw Gateway 配置
-# ==============================================================================
-
-
-@dataclass(frozen=True)
-class OpenClawGatewaySettings:
-    """OpenClaw Gateway 网关配置
-
-    环境变量:
-        OPENCLAW_GATEWAY_IDLE_TIMEOUT: 网关空闲超时时间(秒), 默认 1200 (20分钟)
-        OPENCLAW_GATEWAY_LIFECYCLE_END_DRAIN_TIMEOUT: 生命周期结束排水超时时间(秒), 默认 60
-        OPENCLAW_STATE_DIR: 网关状态存储目录, 默认 ~/.openclaw
-    """
-
-    idle_timeout: float = 1200.0
-    lifecycle_end_drain_timeout: float = 60.0
-    state_dir: str | None = None
-
-    @classmethod
-    def from_env(cls) -> "OpenClawGatewaySettings":
-        return cls(
-            idle_timeout=float(os.getenv("OPENCLAW_GATEWAY_IDLE_TIMEOUT", "1200")),
-            lifecycle_end_drain_timeout=float(
-                os.getenv("OPENCLAW_GATEWAY_LIFECYCLE_END_DRAIN_TIMEOUT", "60")
-            ),
-            state_dir=os.getenv("OPENCLAW_STATE_DIR"),
-        )
-
-
-# ==============================================================================
 # 工作空间配置
 # ==============================================================================
 
@@ -284,32 +246,6 @@ class WorkspaceSettings:
     def root_path(self) -> Path:
         """获取工作空间根目录 (Path 对象)"""
         return Path(self.root).expanduser()
-
-
-# ==============================================================================
-# OpenClaw 配置
-# ==============================================================================
-
-
-@dataclass(frozen=True)
-class OpenClawSettings:
-    """OpenClaw 通用配置
-
-    环境变量:
-        OPENCLAW_CONFIG_PATH: OpenClaw 配置文件路径, 默认 ~/.openclaw/openclaw.json
-    """
-
-    config_path: str = "~/.openclaw/openclaw.json"
-
-    @classmethod
-    def from_env(cls) -> "OpenClawSettings":
-        return cls(
-            config_path=os.getenv("OPENCLAW_CONFIG_PATH", "~/.openclaw/openclaw.json"),
-        )
-
-    def config_path_resolved(self) -> Path:
-        """获取配置文件路径 (Path 对象)"""
-        return Path(self.config_path).expanduser().resolve(strict=False)
 
 
 # ==============================================================================
@@ -384,17 +320,17 @@ class RuntimeSettings:
     ``supported`` 声明该镜像/部署能支持哪些 runtime 类型，供外界调度参考。
 
     环境变量:
-        WITTY_RUNTIME_DEFAULT: 当前实例运行的 runtime 类型, 默认 openclaw
-        WITTY_RUNTIME_SUPPORTED: 镜像支持的所有 runtime 类型, 默认 openclaw,opencode,dsh
+        WITTY_RUNTIME_DEFAULT: 当前实例运行的 runtime 类型, 默认 opencode
+        WITTY_RUNTIME_SUPPORTED: 镜像支持的所有 runtime 类型, 默认 opencode
     """
 
-    default_type: str = "openclaw"
-    supported: tuple[str, ...] = ("openclaw", "opencode", "dsh")
+    default_type: str = "opencode"
+    supported: tuple[str, ...] = ("opencode",)
 
     @classmethod
     def from_env(cls) -> "RuntimeSettings":
-        default_type = os.getenv("WITTY_RUNTIME_DEFAULT", "openclaw")
-        raw_supported = os.getenv("WITTY_RUNTIME_SUPPORTED", "openclaw,opencode,dsh")
+        default_type = os.getenv("WITTY_RUNTIME_DEFAULT", "opencode")
+        raw_supported = os.getenv("WITTY_RUNTIME_SUPPORTED", "opencode")
         supported = tuple(
             item.strip() for item in raw_supported.split(",") if item.strip()
         )
@@ -526,9 +462,7 @@ class Settings:
     database: DatabaseSettings
     logging: LoggingSettings
     docker: DockerSettings
-    openclaw_gateway: OpenClawGatewaySettings
     workspace: WorkspaceSettings
-    openclaw: OpenClawSettings
     insight: InsightSettings
     opencode: OpenCodeSettings
     runtime: RuntimeSettings
@@ -545,9 +479,7 @@ class Settings:
             database=DatabaseSettings.from_env(),
             logging=LoggingSettings.from_env(),
             docker=DockerSettings.from_env(),
-            openclaw_gateway=OpenClawGatewaySettings.from_env(),
             workspace=WorkspaceSettings.from_env(),
-            openclaw=OpenClawSettings.from_env(),
             insight=InsightSettings.from_env(),
             opencode=OpenCodeSettings.from_env(),
             runtime=RuntimeSettings.from_env(),

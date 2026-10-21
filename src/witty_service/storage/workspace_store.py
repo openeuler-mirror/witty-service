@@ -5,12 +5,11 @@ from pathlib import Path
 
 from witty_service.workspace_paths import (
     agent_workspace_path,
-    openclaw_profile_home,
     validate_agent_id,
 )
 
 #: runtime 实例隔离目录名（与 witty_agent_server 侧创建逻辑保持一致）。
-RUNTIME_INSTANCE_DIR_NAMES = ("opencode-instances", "dsh-instances")
+RUNTIME_INSTANCE_DIR_NAMES = ("opencode-instances",)
 
 
 class WorkspaceStore:
@@ -47,7 +46,7 @@ class WorkspaceStore:
             shutil.rmtree(agent_root)
 
     def cleanup_runtime_instances(self, agent_id: str) -> None:
-        """删除 runtime 实例隔离目录（opencode-instances / dsh-instances）。
+        """删除 runtime 实例隔离目录（opencode-instances）。
 
         这些目录由沙箱内的 witty-agent-server 创建（XDG data/state/cache 等），
         agent 删除后同样属于泄漏，一并由 witty-service 侧回收。
@@ -57,20 +56,6 @@ class WorkspaceStore:
             instance_dir = self.base_dir / name / agent_id
             if instance_dir.exists():
                 shutil.rmtree(instance_dir)
-
-    @staticmethod
-    def cleanup_openclaw_profile(agent_id: str) -> None:
-        """删除 openclaw profile 主目录（``~/.openclaw-<agent_id>``）。
-
-        正常删除路径由 agent-server ``/agent/stop?wipe=true``（``uninstall --all``）
-        完成卸载；本方法兜底覆盖两类残留：runtime 停止失败、以及沙箱已死
-        （pause 后删除）时 uninstall 从未执行的情况。非 openclaw agent 的
-        profile 目录不存在，调用为无副作用 no-op。
-        """
-        validate_agent_id(agent_id)
-        profile_home = openclaw_profile_home(agent_id)
-        if profile_home.exists():
-            shutil.rmtree(profile_home, ignore_errors=True)
 
     def _agent_workspace_path(self, agent_id: str) -> Path:
         # 路径推导与校验均委托给唯一事实来源 agent_workspace_path（含 validate_agent_id）。

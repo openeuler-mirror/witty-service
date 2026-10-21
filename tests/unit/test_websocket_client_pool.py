@@ -13,7 +13,7 @@ def test_get_client_creates_new_client():
     endpoint = AdaptorEndpoint(
         base_url="ws://localhost:8080",
         session_id="session-1",
-        sandbox_type="openclaw",
+        sandbox_type="opencode",
     )
     factory = MagicMock(return_value=MagicMock())
 
@@ -28,7 +28,7 @@ def test_get_client_returns_same_client_for_same_agent():
     endpoint = AdaptorEndpoint(
         base_url="ws://localhost:8080",
         session_id="session-1",
-        sandbox_type="openclaw",
+        sandbox_type="opencode",
     )
     mock_client = MagicMock()
     factory = MagicMock(return_value=mock_client)
@@ -45,7 +45,7 @@ def test_remove_client():
     endpoint = AdaptorEndpoint(
         base_url="ws://localhost:8080",
         session_id="session-1",
-        sandbox_type="openclaw",
+        sandbox_type="opencode",
     )
     mock_client = AsyncMock()
     factory = MagicMock(return_value=mock_client)
@@ -62,7 +62,7 @@ async def test_close_all_closes_all_clients():
     endpoint = AdaptorEndpoint(
         base_url="ws://localhost:8080",
         session_id="session-1",
-        sandbox_type="openclaw",
+        sandbox_type="opencode",
     )
     mock_client1 = AsyncMock()
     mock_client2 = AsyncMock()

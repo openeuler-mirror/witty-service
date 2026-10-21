@@ -67,7 +67,7 @@ RUN npm config set registry "${NPM_REGISTRY}" --location=global \
     && npm config set fetch-retries 5 --location=global \
     && npm config set fetch-retry-maxtimeout 120000 --location=global \
     && npm config set fetch-timeout 300000 --location=global \
-    && npm install -g wittyhub openclaw@2026.6.5 \
+    && npm install -g wittyhub \
         opencode-ai@1.17.20 @ai-sdk/openai-compatible @ai-sdk/anthropic \
     && npm cache clean --force
 

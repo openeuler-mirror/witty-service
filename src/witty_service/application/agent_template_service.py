@@ -121,8 +121,12 @@ def validate_model(
     return model
 
 
+#: 模板创建 agent 时的默认空闲超时（秒）。
+_DEFAULT_IDLE_TIMEOUT_SECONDS = 1200
+
+
 def _default_idle_timeout() -> int:
-    return int(get_settings().openclaw_gateway.idle_timeout)
+    return _DEFAULT_IDLE_TIMEOUT_SECONDS
 
 
 class AgentTemplateService:

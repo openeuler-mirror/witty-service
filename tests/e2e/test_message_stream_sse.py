@@ -424,7 +424,7 @@ def test_message_stream_endpoint_ends_after_completed(monkeypatch):
         AgentCreateRequest(
             name="demo",
             sandbox_type="local_process",
-            adapter_type="openclaw",
+            adapter_type="opencode",
             idle_timeout_seconds=300,
         )
     )
@@ -436,7 +436,7 @@ def test_message_stream_endpoint_ends_after_completed(monkeypatch):
             InboundEvent(
                 type="message.delta",
                 session_id=session.id,
-                runtime_type="openclaw",
+                runtime_type="opencode",
                 event_id="evt-1",
                 ts_ms=100,
                 payload={"delta": "hel"},
@@ -444,7 +444,7 @@ def test_message_stream_endpoint_ends_after_completed(monkeypatch):
             InboundEvent(
                 type="message.completed",
                 session_id=session.id,
-                runtime_type="openclaw",
+                runtime_type="opencode",
                 event_id="evt-2",
                 ts_ms=200,
                 payload={},
@@ -452,7 +452,7 @@ def test_message_stream_endpoint_ends_after_completed(monkeypatch):
             InboundEvent(
                 type="message.delta",
                 session_id=session.id,
-                runtime_type="openclaw",
+                runtime_type="opencode",
                 event_id="evt-3",
                 ts_ms=300,
                 payload={"delta": "ignored"},
@@ -493,7 +493,7 @@ def test_message_stream_endpoint_ends_after_completed(monkeypatch):
         "event": {
             "type": "message.delta",
             "session_id": "session-1",
-            "runtime_type": "openclaw",
+            "runtime_type": "opencode",
             "event_id": "evt-1",
             "ts_ms": 100,
             "payload": {"delta": "hel"},
@@ -504,7 +504,7 @@ def test_message_stream_endpoint_ends_after_completed(monkeypatch):
         "event": {
             "type": "message.completed",
             "session_id": "session-1",
-            "runtime_type": "openclaw",
+            "runtime_type": "opencode",
             "event_id": "evt-2",
             "ts_ms": 200,
             "payload": {},

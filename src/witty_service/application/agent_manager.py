@@ -39,7 +39,7 @@ def _log_prefix(agent_id: str | None = None, session_id: str | None = None) -> s
 def redact_start_payload(payload: Any) -> Any:
     """递归脱敏 `/agent/start` payload 中的敏感字段（如 ``api_key``），用于日志打印。
 
-    各 runtime 子对象（model / dsh / opencode / openclaw ...）可能内嵌凭据，
+    各 runtime 子对象（model / opencode ...）可能内嵌凭据，
     打印前统一遮蔽，避免密钥进日志。
     """
     if isinstance(payload, dict):
@@ -86,8 +86,6 @@ from witty_service.storage.runtime_backup import RuntimeBackupStore
 
 from .artifact_paths import normalize_artifact_event
 from .runtime_config import (
-    DshConfig,
-    OpenclawConfig,
     OpencodeConfig,
     RuntimeConfig,
     UnsupportedModelProviderError,
@@ -110,8 +108,8 @@ SKILL_UNINSTALL_RECORD_FAILED = "SKILL_UNINSTALL_RECORD_FAILED"
 SKILL_SYNC_FAILED = "SKILL_SYNC_FAILED"
 AGENT_SKILL_INSTALL_FAILED = "AGENT_SKILL_INSTALL_FAILED"
 AGENT_SKILL_UNINSTALL_FAILED = "AGENT_SKILL_UNINSTALL_FAILED"
-# 模型与 runtime 不兼容（如 dsh 不支持的 provider）：创建期前置校验即失败，
-# 前端可直接以 message 提示用户换模型或换 runtime，而非笼统的创建失败。
+# 模型与 runtime 不兼容（provider 不支持 / 端点缺失）：创建期前置校验即失败，
+# 前端可直接以 message 提示用户换模型，而非笼统的创建失败。
 UNSUPPORTED_MODEL_PROVIDER = "UNSUPPORTED_MODEL_PROVIDER"
 
 SKILL_INSTALL_TIMEOUT_SECONDS = 180.0
@@ -455,8 +453,6 @@ _stream_registry = SessionStreamRegistry()
 class AgentManager:
     _RUNTIME_CONFIGS: ClassVar[dict[str, RuntimeConfig]] = {
         "opencode": OpencodeConfig(),
-        "openclaw": OpenclawConfig(),
-        "dsh": DshConfig(),
     }
 
     def __init__(
@@ -527,7 +523,7 @@ class AgentManager:
     ) -> int | None:
         """选定 runtime 的网关端口：优先复用上一次的取值，真被占用时才换新的。
 
-        没有网关端口的 runtime（dsh）返回 None——调用方据此跳过端口分配与落库，
+        没有网关端口的 runtime 返回 None——调用方据此跳过端口分配与落库，
         不在 metadata 里留下一个没有任何进程监听的端口号。
         """
         if not self._get_runtime_config(adapter_type).uses_gateway_port():
@@ -968,8 +964,8 @@ class AgentManager:
                 "agent_delete",
                 lambda: self._repository.delete_agent(agent_id),
             )
-            # 失败的 create 也可能已产生磁盘产物（openclaw profile、opencode
-            # instances 等），与 delete 路径同样做磁盘兜底，防止泄漏。
+            # 失败的 create 也可能已产生磁盘产物（opencode instances 等），
+            # 与 delete 路径同样做磁盘兜底，防止泄漏。
             self._collect_error(
                 cleanup_errors,
                 "agent_disk_cleanup",
@@ -1070,8 +1066,8 @@ class AgentManager:
         client: httpx.Client | None = None
         try:
             # 调用 witty-agent-server /agent/stop 优雅停止运行时。
-            # pause 语义：不传 wipe（默认 false），只停进程、保留 profile 目录
-            # （openclaw 插件与会话状态），resume 时免 ~17s 的 npm 插件重装。
+            # pause 语义：不传 wipe（默认 false），只停进程、保留运行时目录，
+            # resume 时无需重新安装插件。
             client = httpx.Client(
                 base_url=sandbox_state.adapter_base_url,
                 timeout=self.PAUSE_RUNTIME_TIMEOUT_SECONDS,
@@ -1206,7 +1202,7 @@ class AgentManager:
         backend 在收敛之后决定（``start(port=...)``）；网关端口在本方法内、``start()``
         返回之后再决定，顺序与前者一致。
 
-        返回 runtime 该用的 gateway_port；没有网关端口的 runtime（dsh）返回 None。
+        返回 runtime 该用的 gateway_port；没有网关端口的 runtime 返回 None。
         """
         agent_id = agent.id
         prefix = _log_prefix(agent_id=agent_id)
@@ -2474,15 +2470,7 @@ class AgentManager:
 
         cleanup_errors: list[dict[str, str]] = []
 
-        # 1. 备份运行时（暂注释，避免占用空间）
-        # if sandbox_state is not None:
-        #     self._collect_error(
-        #         cleanup_errors,
-        #         "runtime_backup",
-        #         lambda: self._backup_runtime(agent_id, agent.adapter_type),
-        #     )
-
-        # 2. 停止运行时
+        # 1. 停止运行时
         if agent.status in {AgentStatus.running, AgentStatus.paused}:
             try:
                 await self._stop_runtime(agent_id)
@@ -2496,7 +2484,7 @@ class AgentManager:
             except Exception as exc:
                 cleanup_errors.append(self._cleanup_error("sandbox_cleanup", exc))
 
-        # 3.5 清理磁盘：workspace 与 runtime 实例目录（opencode/dsh-instances）。
+        # 3.5 清理磁盘：workspace 与 runtime 实例目录（opencode-instances）。
         # 失败只记 warning 不阻断删除——磁盘残留可事后回收，但 DB 记录必须删掉，
         # 否则 agent 永远删不掉（见 _is_tolerable_cleanup_error）。
         self._collect_error(
@@ -2577,11 +2565,9 @@ class AgentManager:
         )
 
     def _cleanup_agent_disk(self, agent_id: str) -> None:
-        """删除 agent 的全部磁盘产物：workspace、runtime 实例目录与
-        openclaw profile 主目录（``/agent/stop?wipe=true`` 失败时的兜底）。"""
+        """删除 agent 的全部磁盘产物：workspace 与 runtime 实例目录。"""
         self._workspace_store.cleanup_workspace(agent_id)
         self._workspace_store.cleanup_runtime_instances(agent_id)
-        self._workspace_store.cleanup_openclaw_profile(agent_id)
 
     def _create_agent_record(
         self,
@@ -2951,7 +2937,7 @@ class AgentManager:
         return stat[0] == "Z"
 
     def _backup_runtime(
-        self, agent_id: str, runtime_type: str = "openclaw"
+        self, agent_id: str, runtime_type: str = "opencode"
     ) -> Path | None:
         """备份运行时文件"""
         backup_store = RuntimeBackupStore()

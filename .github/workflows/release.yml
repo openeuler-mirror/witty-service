@@ -174,19 +174,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GH_TOKEN }}
 
-      - name: Build and push OpenClaw target to GHCR
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          target: openclaw
-          push: true
-          tags: |
-            ghcr.io/${{ steps.repo.outputs.owner }}/witty-agent-server:${{ needs.release.outputs.version }}-openclaw
-            ghcr.io/${{ steps.repo.outputs.owner }}/witty-agent-server:openclaw
-            ghcr.io/${{ steps.repo.outputs.owner }}/witty-agent-server:latest
-          platforms: linux/amd64,linux/arm64
-
       - name: Build and push OpenCode target to GHCR
         uses: docker/build-push-action@v6
         with:
@@ -197,4 +184,5 @@ jobs:
           tags: |
             ghcr.io/${{ steps.repo.outputs.owner }}/witty-agent-server:${{ needs.release.outputs.version }}-opencode
             ghcr.io/${{ steps.repo.outputs.owner }}/witty-agent-server:opencode
+            ghcr.io/${{ steps.repo.outputs.owner }}/witty-agent-server:latest
           platforms: linux/amd64,linux/arm64

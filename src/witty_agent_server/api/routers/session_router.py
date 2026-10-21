@@ -3,46 +3,29 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-from witty_agent_server.adapters.openclaw_adapter import create_openclaw_runtime
-from witty_agent_server.adapters.runtime_registry import RuntimeRegistry
+
 from witty_agent_server.application.models.errors import ErrorResponse
 from witty_agent_server.application.models.session import SessionCreateRequest
 from witty_agent_server.application.services.agent import (
     AgentService,
     AgentServiceError,
 )
-from witty_agent_server.application.services.session_state_sync_service import (
-    SessionStateSyncService,
-)
 from witty_agent_server.application.services.session import (
     SessionNotFoundServiceError,
     SessionService,
     SessionServiceError,
 )
-from witty_agent_server.infra.persistence.in_memory import InMemorySessionRepository
-from witty_agent_server.infra.clients.openclaw_gateway_client import (
-    OpenClawGatewayClient,
+from witty_agent_server.application.services.session_state_sync_service import (
+    SessionStateSyncService,
 )
 
 
-def build_default_session_service(
-    *,
-    gateway_client: OpenClawGatewayClient | None = None,
-) -> SessionService:
-    service = SessionService(
-        runtime_registry=RuntimeRegistry(),
-        repository=InMemorySessionRepository(),
-    )
-    service.register_runtime(create_openclaw_runtime(client=gateway_client))
-    return service
-
-
 def create_session_router(
-    session_service: SessionService | None = None,
+    session_service: SessionService,
     state_sync_service: SessionStateSyncService | None = None,
     agent_service: AgentService | None = None,
 ) -> APIRouter:
-    service = session_service or build_default_session_service()
+    service = session_service
     resolved_state_sync = state_sync_service or SessionStateSyncService()
     router = APIRouter(prefix="/agents/{agent_id}/sessions")
 
@@ -75,8 +58,7 @@ def create_session_router(
             return service.delete_session(agent_id=agent_id, session_id=session_id)
         except SessionServiceError as exc:
             return _map_session_error(request=request, exc=exc)
-        
-        
+
     @router.post("/{session_id}/abort", response_model=None)
     def abort_session(
         agent_id: str, session_id: str, request: Request

@@ -373,10 +373,9 @@ def test_init_creates_runs_root(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
     c = BackportCvekitClient(runs_root=runs)
     assert c._runs_root == runs.expanduser().resolve()
-    assert not hasattr(c, "_openclaw_config_path")
 
 
-def test_init_does_not_read_openclaw_settings(
+def test_init_does_not_read_global_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def fail_if_called() -> None:
@@ -655,7 +654,9 @@ def test_check_row_cleans_temp_run_dir(
             yaml.safe_dump({"commits": [{"row_id": "1", "status": "success"}]}),
             encoding="utf-8",
         )
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="", stderr=""
+        )
 
     monkeypatch.setattr(BackportCvekitClient, "_run_cvekit", fake_run)
     out = client.check_row(base_report_path=str(base), row={"row_id": "1"})
@@ -1748,7 +1749,6 @@ class TestTargetConfigLayoutYaml:
         )
         assert "target_config_layout" not in captured_config
         assert "target_config_layout_opts" not in captured_config
-
 
     def test_continue_report_writes_layout_to_config(
         self,

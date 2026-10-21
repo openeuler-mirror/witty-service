@@ -1077,7 +1077,7 @@ async def disable_mcp_server(
     server_id: str,
     services: ServiceContainer = Depends(get_services),
 ) -> McpServerResponse:
-    """为指定 Agent 卸载 MCP Server，执行 openclaw mcp unset 从 runtime 移除配置。"""
+    """为指定 Agent 卸载 MCP Server，从 runtime 移除对应 MCP 配置。"""
     agent = services.repository.get_agent(agent_id)
     if agent is None:
         raise agent_not_found(agent_id=agent_id)

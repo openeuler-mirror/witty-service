@@ -4,7 +4,7 @@
 
     POST /agents/{agent_id}/sessions {"session_id": <旧 id>, "restore": true}
 
-把历史会话重填回 agent server 的内存缓存。opencode / dsh 走的是
+把历史会话重填回 agent server 的内存缓存。opencode 走的是
 `SessionServiceBase.create_session`，它此前**完全忽略** restore：每次都生成一个新
 session_id 并新建一个运行时会话，HTTP 200 让上层记成"恢复成功"，但调用方拿着旧 id
 提交时就报 SESSION_NOT_FOUND —— 表现为"重启后所有既存会话都发不出消息"。
@@ -20,8 +20,8 @@ from witty_agent_server.application.services.session.errors import (
     InvalidSessionConfigError,
     SessionNotFoundServiceError,
 )
-from witty_agent_server.application.services.session.openclaw_session_service import (
-    OpenClawSessionService,
+from witty_agent_server.application.services.session.opencode_session_service import (
+    OpenCodeSessionService,
 )
 from witty_agent_server.infra.persistence.in_memory import InMemorySessionRepository
 
@@ -139,12 +139,12 @@ def test_restore_is_idempotent_for_the_same_agent() -> None:
     assert runtime.created == []
 
 
-def test_openclaw_reuses_the_base_create_session() -> None:
-    """OpenClaw 的那份 create_session 覆写已删除：两处逐字重复的代码会各自漂移。
+def test_opencode_reuses_the_base_create_session() -> None:
+    """OpenCode 直接继承基类 create_session：两处逐字重复的代码会各自漂移。
 
     断言"还是同一个函数对象"而不是"行为一致"——重新抄一份实现就会让这条用例变红。
     """
-    assert OpenClawSessionService.create_session is SessionServiceBase.create_session
+    assert OpenCodeSessionService.create_session is SessionServiceBase.create_session
 
 
 def test_restore_reuses_the_session_id_and_skips_runtime_creation() -> None:
@@ -162,10 +162,10 @@ def test_restore_reuses_the_session_id_and_skips_runtime_creation() -> None:
     assert service.get_session(agent_id="main", session_id=OLD_SESSION_ID) is not None
 
 
-def test_openclaw_service_restores_the_same_way() -> None:
-    """删掉覆写之后，OpenClaw 走的就是基类实现：恢复路径必须完全一样。"""
+def test_opencode_service_restores_the_same_way() -> None:
+    """OpenCode 走的就是基类实现：恢复路径必须完全一样。"""
     runtime = _FakeRuntime()
-    service = OpenClawSessionService(
+    service = OpenCodeSessionService(
         runtime_registry=RuntimeRegistry(), repository=InMemorySessionRepository()
     )
     service.register_runtime(runtime)  # type: ignore[arg-type]

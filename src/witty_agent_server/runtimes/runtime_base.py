@@ -18,8 +18,7 @@ from witty_agent_server.runtimes.usage import normalize_usage_payload
 logger = logging.getLogger(__name__)
 
 
-# "dsh"：DshRuntime 事件映射 + RuntimeFactory.create_dsh_bundle 装配均已就绪。
-RuntimeType = Literal["openclaw", "opencode", "dsh"]
+RuntimeType = Literal["opencode"]
 
 # 会产出 ``artifact.*`` 事件的工具名（统一由 ``_on_artifact_event`` 检测）。
 WRITE_TOOL_NAME = "write"

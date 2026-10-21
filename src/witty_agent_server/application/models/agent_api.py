@@ -15,16 +15,8 @@ class AgentCommonConfig(BaseModel):
     subagents: list[dict[str, Any]] = Field(default_factory=list)
 
 
-class OpenClawRuntimeConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    model: str
-
-
 class AgentRuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-    openclaw: OpenClawRuntimeConfig | None = None
 
 
 class AgentStartRequest(BaseModel):

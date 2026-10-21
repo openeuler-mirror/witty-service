@@ -9,17 +9,15 @@ from witty_service.sandbox.base import (
     sandbox_stop_failed,
 )
 from witty_service.sandbox.docker import DockerSandboxBackend
-from witty_service.sandbox.e2b import E2BSandboxBackend
 from witty_service.sandbox.factory import create_sandbox_backend
 from witty_service.sandbox.local_process import LocalProcessSandboxBackend
 
 __all__ = [
-    "AdapterEndpoint",
-    "DockerSandboxBackend",
-    "E2BSandboxBackend",
-    "LocalProcessSandboxBackend",
     "SANDBOX_NOT_SUPPORTED",
     "SANDBOX_STOP_FAILED",
+    "AdapterEndpoint",
+    "DockerSandboxBackend",
+    "LocalProcessSandboxBackend",
     "SandboxBackend",
     "SandboxHandle",
     "SandboxStatus",
