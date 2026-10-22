@@ -64,6 +64,7 @@ def list_agent_templates(
                 mcp_count=len(template.mcp),
                 mcp_servers=[server.name for server in template.mcp],
                 default_prompt=template.prompt.default,
+                default_prompts=list(template.prompt.examples),
                 source_commit=source_commit,
             )
         )

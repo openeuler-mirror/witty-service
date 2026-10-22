@@ -37,6 +37,11 @@ prompt:
   # 默认使用提问（用户体验）：随 GET /agent-templates 的 default_prompt 暴露，
   # 由前端渲染成用户可直接发送的默认问题（后端不往 AGENTS.md 注入任何引导内容）。
   default: 帮我做一次集群健康巡检：节点、工作负载、存储、网络四层，列出异常对象并给出处置建议和影响面评估。
+  # 示例提问：对应 GET /agent-templates 的 default_prompts，仅供前端展示，不写入 AGENTS.md。
+  examples:
+    - 帮我做一次集群健康巡检：检查节点状态、工作负载副本和集群网络，列出异常对象并给出处置建议。
+    - 我的 K8s 集群里有个 Pod 一直 CrashLoopBackOff，帮我定位是镜像、配置还是资源限制导致的。
+    - 我要把一个节点下线做维护，帮我给出 drain 的安全操作步骤、容量评估和回滚方案。
 
 skills:
   - name: agent-tools

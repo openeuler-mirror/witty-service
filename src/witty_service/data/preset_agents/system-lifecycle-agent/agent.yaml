@@ -40,6 +40,11 @@ prompt:
   # 默认使用提问（用户体验）：随 GET /agent-templates 的 default_prompt 暴露，
   # 由前端渲染成用户可直接发送的默认问题（后端不往 AGENTS.md 注入任何引导内容）。
   default: 帮我做一次系统巡检：资源水位、存储、网络、内核参数，给出风险清单和后续处理建议。
+  # 示例提问：对应 GET /agent-templates 的 default_prompts，仅供前端展示，不写入 AGENTS.md。
+  examples:
+    - 帮我检查磁盘和 LVM 使用情况，评估是否需要扩容，并给出带快照的扩容步骤和回滚方案。
+    - 帮我排查这台机器的网络问题：连通性、bond/VLAN 和防火墙规则，定位断连原因。
+    - 我要升级这批机器上的软件包和内核，帮我给出「备份→基线记录→执行→验证→回滚」的完整方案。
 
 skills:
   - name: agent-tools
