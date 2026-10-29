@@ -40,7 +40,6 @@ class TurnEventType(StrEnum):
     ARTIFACT_DELTA = "artifact.delta"
     ARTIFACT_COMPLETED = "artifact.completed"
     SESSION_USAGE = "session.usage"
-    SESSION_RUNTIME_CHANGED = "session.runtime.changed"
     STREAM_ERROR = "stream.error"
     QUESTION_ASKED = "question.asked"
     QUESTION_REPLIED = "question.replied"
