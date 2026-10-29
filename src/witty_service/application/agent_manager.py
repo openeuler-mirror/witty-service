@@ -75,6 +75,8 @@ from witty_service.persistence.repositories import AgentRecord, SessionRecord
 from witty_service.sandbox.base import (
     SANDBOX_NOT_FOUND,
     SandboxHandle,
+    SandboxStatus,
+    sandbox_stop_failed,
 )
 from witty_service.sandbox.docker import DockerSandboxBackend
 
@@ -82,7 +84,6 @@ from witty_service.sandbox.docker import DockerSandboxBackend
 # 件事（这个 pid 是不是还活着），分成两套实现迟早会漂移。
 from witty_service.sandbox.local_process import read_proc_stat
 from witty_service.sandbox.ports import find_free_port, port_is_bindable
-from witty_service.storage.runtime_backup import RuntimeBackupStore
 
 from .artifact_paths import normalize_artifact_event
 from .runtime_config import (
@@ -99,7 +100,6 @@ AGENT_CREATE_FAILED = "AGENT_CREATE_FAILED"
 AGENT_PAUSE_FAILED = "AGENT_PAUSE_FAILED"
 AGENT_RESUME_FAILED = "AGENT_RESUME_FAILED"
 AGENT_DELETE_FAILED = "AGENT_DELETE_FAILED"
-RUNTIME_BACKUP_NOT_FOUND = "RUNTIME_BACKUP_NOT_FOUND"
 SANDBOX_NOT_READY = "SANDBOX_NOT_READY"
 RUNTIME_START_FAILED = "RUNTIME_START_FAILED"
 SKILL_NOT_FOUND = "SKILL_NOT_FOUND"
@@ -480,6 +480,25 @@ class AgentManager:
                 details={"adapter_type": adapter_type},
             )
         return config
+
+    def _ensure_agent_runtime_supported(self, agent: AgentRecord) -> None:
+        """退役 Runtime 的 Agent 不可恢复。
+
+        必须在重建/启动 Sandbox 之前失败：旧 ``openclaw``/``dsh`` Agent 的启动
+        只会得到没有意义的 Sandbox 与端口占用。此处也不改写数据库里的
+        ``adapter_type``，退役由用户显式删除完成。
+        """
+        try:
+            self._get_runtime_config(agent.adapter_type)
+        except DomainError as exc:
+            raise DomainError(
+                code=exc.code,
+                message=(
+                    f"Agent runtime '{agent.adapter_type}' is no longer supported. "
+                    "Delete this agent and recreate it with the opencode runtime."
+                ),
+                details={"agent_id": agent.id, "adapter_type": agent.adapter_type},
+            ) from exc
 
     def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]:
         """从仓库解析模型信息，不存在时返回空 dict."""
@@ -1090,20 +1109,14 @@ class AgentManager:
                 client.close()
 
     async def _resume_from_deleted(self, agent_id: str) -> AgentRecord:
-        """从 deleted 状态恢复（备份功能暂禁用）"""
+        """从 deleted 状态恢复。
+
+        本分支不再提供 Runtime 备份/恢复能力（旧的全局 ``~/.opencode`` 备份
+        语义既不可达也不正确），因此只能重建沙箱后重新启动 runtime。
+        """
         agent = self._get_agent(agent_id)
 
-        # 1. 检查备份（暂注释，备份功能已禁用）
-        # backup_store = RuntimeBackupStore()
-        # if not backup_store.backup_exists(agent_id, agent.adapter_type):
-        #     raise DomainError(
-        #         code=RUNTIME_BACKUP_NOT_FOUND,
-        #         message="Runtime backup not found.",
-        #         details={"agent_id": agent_id},
-        #     )
-        # backup_store.restore(agent_id, agent.adapter_type)
-
-        # 2. 重建沙箱（不依赖备份），端口沿用上一次的取值
+        # 1. 重建沙箱（不依赖备份），端口沿用上一次的取值
         gateway_port = await self._restart_sandbox(agent, health_attempts=30)
 
         # 3. 调用 /agent/start（使用完整的恢复 payload）
@@ -1404,6 +1417,9 @@ class AgentManager:
 
     async def resume_agent(self, agent_id: str) -> AgentRecord:
         agent = self._get_agent(agent_id)
+
+        # 单 runtime：退役 Runtime 的 Agent 在这里就拒绝，不进入任何 Sandbox 重建。
+        self._ensure_agent_runtime_supported(agent)
 
         if agent.status == AgentStatus.paused:
             self._ensure_transition(agent, AgentStatus.running)
@@ -2470,43 +2486,62 @@ class AgentManager:
 
         cleanup_errors: list[dict[str, str]] = []
 
-        # 1. 停止运行时
+        # 1. 停止运行时。失败本身不立刻中止：可能只是进程已经退出、HTTP 拒绝。
+        #    是否允许继续由第 3 步的执行体状态校验决定。
         if agent.status in {AgentStatus.running, AgentStatus.paused}:
             try:
                 await self._stop_runtime(agent_id)
             except Exception as exc:
                 cleanup_errors.append(self._cleanup_error("runtime_stop", exc))
 
-        # 3. 清理沙箱
+        # 2. 清理沙箱（停止并注销执行体）
         if sandbox_state is not None:
             try:
                 self._cleanup_sandbox(agent_id)
             except Exception as exc:
                 cleanup_errors.append(self._cleanup_error("sandbox_cleanup", exc))
 
-        # 3.5 清理磁盘：workspace 与 runtime 实例目录（opencode-instances）。
+            # 3. 磁盘清理前必须确认执行体真的退出：进程仍运行或状态无法确认时
+            #    保留目录等待重试，绝不删除可能仍在写入的数据。
+            self._collect_error(
+                cleanup_errors,
+                "sandbox_verify",
+                lambda: self._require_sandbox_stopped(sandbox_state.handle),
+            )
+
+        # 4. 前置阶段（停止 / 退出校验）失败即中止，不进入磁盘清理。
+        #    「停止请求失败但执行体已确认退出」属于可继续的场景：沙箱清理与状态校验
+        #    已经证明执行体不在了；反之沙箱状态无法确认时任何停止失败都必须阻断。
+        sandbox_verified = sandbox_state is not None and not any(
+            error["stage"] == "sandbox_verify" for error in cleanup_errors
+        )
+        blocking_errors = [
+            error
+            for error in cleanup_errors
+            if not self._is_tolerable_cleanup_error(error)
+            and not (error["stage"] == "runtime_stop" and sandbox_verified)
+        ]
+        if blocking_errors:
+            # 首条错误只作为 cause 展示；完整列表在 details.cleanup_errors 里。
+            raise DomainError(
+                code=AGENT_DELETE_FAILED,
+                message="Agent delete failed.",
+                details={
+                    "agent_id": agent_id,
+                    "cause": blocking_errors[0]["error"],
+                    "cleanup_errors": list(cleanup_errors),
+                },
+            )
+
+        # 5. 清理磁盘：workspace 与 runtime 实例目录（opencode-instances）。
         # 失败只记 warning 不阻断删除——磁盘残留可事后回收，但 DB 记录必须删掉，
-        # 否则 agent 永远删不掉（见 _is_tolerable_cleanup_error）。
+        # 否则 agent 永远删不掉（见 _is_tolerable_cleanup_error）。错误信息里带有
+        # 具体路径，便于人工回收。
         self._collect_error(
             cleanup_errors,
             "workspace_cleanup",
             lambda: self._cleanup_agent_disk(agent_id),
         )
-
-        # 4. 前置阶段失败即中止
-        blocking_errors = [
-            error
-            for error in cleanup_errors
-            if not self._is_tolerable_cleanup_error(error)
-        ]
-        if blocking_errors:
-            self._raise_operation_failed(
-                code=AGENT_DELETE_FAILED,
-                message="Agent delete failed.",
-                agent_id=agent_id,
-                cause=RuntimeError(blocking_errors[0]["error"]),
-                cleanup_errors=cleanup_errors,
-            )
         if cleanup_errors:
             logger.warning(
                 "[AgentManager] Ignoring tolerable cleanup errors: agent_id=%s errors=%s",
@@ -2514,7 +2549,7 @@ class AgentManager:
                 cleanup_errors,
             )
 
-        # 5. 不可逆阶段（放在最后）：更新状态并删除 agent 记录。
+        # 6. 不可逆阶段（放在最后）：更新状态并删除 agent 记录。
         try:
             self._repository.update_agent_status(agent_id, AgentStatus.deleted)
             logger.info("[AgentManager] Agent status updated to deleted in database")
@@ -2559,9 +2594,30 @@ class AgentManager:
         """
         if error.get("stage") == "workspace_cleanup":
             return True
-        return (
-            error.get("stage") == "sandbox_cleanup"
-            and error.get("code") == SANDBOX_NOT_FOUND
+        if error.get("stage") in {"sandbox_cleanup", "sandbox_verify"}:
+            return error.get("code") == SANDBOX_NOT_FOUND
+        return False
+
+    def _require_sandbox_stopped(self, handle: SandboxHandle) -> None:
+        """磁盘清理前的执行体退出校验。
+
+        ``status()`` 返回非 stopped 时（或查询本身失败时）一律视为"无法确认已退出"，
+        由调用方保留目录并让删除失败，等下一次重试。
+        """
+        status = self._sandbox_backend.status(handle)
+        if status == SandboxStatus.stopped:
+            return
+        raise sandbox_stop_failed(
+            sandbox_type=getattr(self._sandbox_backend, "sandbox_type", "unknown"),
+            message=(
+                "Sandbox is still running or its status cannot be confirmed; "
+                "refusing to delete agent data."
+            ),
+            details={
+                "sandbox_id": handle.sandbox_id,
+                "status": str(status),
+                "workspace_path": handle.workspace_path,
+            },
         )
 
     def _cleanup_agent_disk(self, agent_id: str) -> None:
@@ -2935,16 +2991,6 @@ class AgentManager:
             # /proc 在，但这个 pid 不在 = 确定已退出
             return True
         return stat[0] == "Z"
-
-    def _backup_runtime(
-        self, agent_id: str, runtime_type: str = "opencode"
-    ) -> Path | None:
-        """备份运行时文件"""
-        backup_store = RuntimeBackupStore()
-        try:
-            return backup_store.backup(agent_id, runtime_type)
-        except Exception:
-            return None
 
     def _cleanup_sandbox(self, agent_id: str) -> None:
         """清理沙箱"""

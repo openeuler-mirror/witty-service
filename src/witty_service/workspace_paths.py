@@ -50,6 +50,17 @@ def validate_agent_id(agent_id: str) -> None:
         raise ValueError(f"Invalid agent_id: {agent_id!r}")
 
 
+def agent_root_path(agent_id: str, *, root: Path | None = None) -> Path:
+    """返回 agent 的 witty 根目录 ``<root>/agent-workspaces/<agent_id>``。
+
+    与 ``agent_workspace_path`` 同为路径事实源，但**不解析符号链接**：删除场景
+    需要先按原始路径判定目录归属，避免 ``resolve()`` 跟随软链后删到根目录之外。
+    """
+    validate_agent_id(agent_id)
+    base = root if root is not None else workspace_root(resolve=False)
+    return base / "agent-workspaces" / agent_id
+
+
 def agent_workspace_path(agent_id: str, *, root: Path | None = None) -> Path:
     """返回 agent 的 witty workspace 路径。
 
@@ -58,6 +69,4 @@ def agent_workspace_path(agent_id: str, *, root: Path | None = None) -> Path:
     ``WorkspaceStore`` 创建、以及持久化的 ``agent.workspace_path`` 保持一致。
     未显式传入 ``root`` 时使用 ``workspace_root()``。
     """
-    validate_agent_id(agent_id)
-    base = root if root is not None else workspace_root()
-    return (base / "agent-workspaces" / agent_id / "workspace").resolve()
+    return (agent_root_path(agent_id, root=root) / "workspace").resolve()
