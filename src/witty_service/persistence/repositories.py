@@ -806,6 +806,7 @@ class SqliteRepository:
         status: str,
         context_initialized: bool = False,
         runtime_type: str | None = None,
+        runtime_session_id: str | None = None,
         runtime_session_key: str | None = None,
         created_at: datetime | None = None,
         remote_runtime_agent_id: str | None = None,
@@ -821,6 +822,7 @@ class SqliteRepository:
                     agent_id=agent_id,
                     remote_runtime_agent_id=remote_runtime_agent_id,
                     runtime_type=runtime_type,
+                    runtime_session_id=runtime_session_id,
                     runtime_session_key=runtime_session_key,
                     status=SessionStatus(status),
                     created_at=created_at or now,
@@ -830,6 +832,9 @@ class SqliteRepository:
             else:
                 existing.status = SessionStatus(status)
                 existing.runtime_type = runtime_type or existing.runtime_type
+                existing.runtime_session_id = (
+                    runtime_session_id or existing.runtime_session_id
+                )
                 existing.runtime_session_key = (
                     runtime_session_key or existing.runtime_session_key
                 )

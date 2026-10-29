@@ -181,6 +181,7 @@ class FakeRepository:
         status: str,
         context_initialized: bool = False,
         runtime_type: str | None = None,
+        runtime_session_id: str | None = None,
         runtime_session_key: str | None = None,
         created_at: datetime | None = None,
         remote_runtime_agent_id: str | None = None,
@@ -197,6 +198,7 @@ class FakeRepository:
                 created_at=created_at or now,
                 updated_at=now,
                 runtime_type=runtime_type,
+                runtime_session_id=runtime_session_id,
                 runtime_session_key=runtime_session_key,
             )
             self.sessions[session_id] = session
@@ -204,6 +206,17 @@ class FakeRepository:
             session.status = status
             session.updated_at = now
         return session
+
+    def find_session_by_runtime_identity(
+        self, runtime_type: str, runtime_session_id: str
+    ) -> SessionRecord | None:
+        for session in self.sessions.values():
+            if (
+                session.runtime_type == runtime_type
+                and session.runtime_session_id == runtime_session_id
+            ):
+                return session
+        return None
 
     def replace_installed_agent_skills_from_runtime(
         self, *, agent_id: str, skills: list[dict[str, Any]]

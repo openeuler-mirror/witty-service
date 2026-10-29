@@ -16,6 +16,7 @@ AGENT_NOT_FOUND = "AGENT_NOT_FOUND"
 INVALID_SESSION_METADATA = "INVALID_SESSION_METADATA"
 REGENERATE_TARGET_NOT_FOUND = "REGENERATE_TARGET_NOT_FOUND"
 SESSION_BUSY = "SESSION_BUSY"
+RUNTIME_SESSION_ID_CONFLICT = "RUNTIME_SESSION_ID_CONFLICT"
 
 
 class DomainError(Exception):
@@ -191,6 +192,30 @@ class SessionBusyError(DomainError):
         )
 
 
+class RuntimeSessionIdConflictError(DomainError):
+    """同一个 Runtime Session ID 被映射到两条 Witty Session（409）。"""
+
+    def __init__(
+        self,
+        *,
+        runtime_type: str,
+        runtime_session_id: str,
+        session_id: str,
+        existing_session_id: str,
+    ) -> None:
+        super().__init__(
+            code=RUNTIME_SESSION_ID_CONFLICT,
+            message="Runtime session id is already mapped to another session.",
+            status_code=409,
+            details={
+                "runtime_type": runtime_type,
+                "runtime_session_id": runtime_session_id,
+                "session_id": session_id,
+                "existing_session_id": existing_session_id,
+            },
+        )
+
+
 def insight_disabled() -> DomainError:
     return DomainError(
         code=INSIGHT_DISABLED,
@@ -290,3 +315,19 @@ def regenerate_target_not_found(*, session_id: str) -> RegenerateTargetNotFoundE
 def session_busy(*, session_id: str) -> SessionBusyError:
     """会话正在生成，统一 409。"""
     return SessionBusyError(session_id=session_id)
+
+
+def runtime_session_id_conflict(
+    *,
+    runtime_type: str,
+    runtime_session_id: str,
+    session_id: str,
+    existing_session_id: str,
+) -> RuntimeSessionIdConflictError:
+    """同一 Runtime Session ID 被映射到不同 Witty Session，统一 409。"""
+    return RuntimeSessionIdConflictError(
+        runtime_type=runtime_type,
+        runtime_session_id=runtime_session_id,
+        session_id=session_id,
+        existing_session_id=existing_session_id,
+    )

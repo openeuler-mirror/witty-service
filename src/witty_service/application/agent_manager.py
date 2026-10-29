@@ -1388,41 +1388,11 @@ class AgentManager:
             await adaptor_client.close()
 
         # 4. 恢复历史 session（witty-agent-server 可能因暂停期间重启导致 session 丢失）
-        historical_sessions = self._session_manager.list_sessions(agent_id)
-        if historical_sessions:
-            adaptor_client = self._get_adaptor_http_client(agent_id)
-            try:
-                restored_count = 0
-                failed_count = 0
-                for session in historical_sessions:
-                    try:
-                        await adaptor_client.post(
-                            f"/agents/{remote_runtime_agent_id}/sessions",
-                            json={"session_id": session.id, "restore": True},
-                            timeout=30.0,
-                        )
-                        restored_count += 1
-                    except httpx.HTTPStatusError as exc:
-                        if exc.response.status_code == 409:
-                            restored_count += 1
-                        else:
-                            failed_count += 1
-                            logger.warning(
-                                f"{prefix}Failed to restore historical session "
-                                f"during resume from paused: session_id=%s status=%s",
-                                session.id,
-                                exc.response.status_code,
-                            )
-                if restored_count > 0 or failed_count > 0:
-                    logger.info(
-                        f"{prefix}Historical sessions restored during resume from paused: "
-                        f"restored=%s failed=%s total=%s",
-                        restored_count,
-                        failed_count,
-                        len(historical_sessions),
-                    )
-            finally:
-                await adaptor_client.close()
+        await self._restore_historical_sessions(
+            agent_id=agent_id,
+            remote_runtime_agent_id=remote_runtime_agent_id,
+            log_context="resume from paused",
+        )
 
         # 5. 更新状态
         return self._repository.update_agent_status(agent_id, AgentStatus.running)
@@ -1522,45 +1492,116 @@ class AgentManager:
             await adaptor_client.close()
 
         # 5. 恢复历史 session（服务重启后 witty-agent-server 的 in-memory 存储已清空）
-        historical_sessions = self._session_manager.list_sessions(agent_id)
-        if historical_sessions:
-            adaptor_client = self._get_adaptor_http_client(agent_id)
-            try:
-                restored_count = 0
-                failed_count = 0
-                for session in historical_sessions:
-                    try:
-                        await adaptor_client.post(
-                            f"/agents/{remote_runtime_agent_id}/sessions",
-                            json={"session_id": session.id, "restore": True},
-                            timeout=30.0,
-                        )
-                        restored_count += 1
-                    except httpx.HTTPStatusError as exc:
-                        if exc.response.status_code == 409:
-                            # session 已存在（理论上不会，防御性处理）
-                            restored_count += 1
-                        else:
-                            failed_count += 1
-                            logger.warning(
-                                f"{prefix}Failed to restore historical session: "
-                                f"session_id=%s status=%s",
-                                session.id,
-                                exc.response.status_code,
-                            )
-                if restored_count > 0 or failed_count > 0:
-                    logger.info(
-                        f"{prefix}Historical sessions restored: "
-                        f"restored=%s failed=%s total=%s",
-                        restored_count,
-                        failed_count,
-                        len(historical_sessions),
-                    )
-            finally:
-                await adaptor_client.close()
+        await self._restore_historical_sessions(
+            agent_id=agent_id,
+            remote_runtime_agent_id=remote_runtime_agent_id,
+            log_context="service restart recovery",
+        )
 
         # 6. 更新状态（保持 running 状态，但更新时间戳）
         return self._repository.update_agent_status(agent_id, AgentStatus.running)
+
+    async def _restore_historical_sessions(
+        self,
+        *,
+        agent_id: str,
+        remote_runtime_agent_id: str,
+        log_context: str,
+    ) -> None:
+        """把 DB 里的历史会话重新填回 witty-agent-server。
+
+        身份语义只有一处：优先携带持久化的 runtime_session_id；agent server 侧若
+        通过 title 遗留回查补全了 ID，则立即回填 DB，后续恢复不再依赖 title。
+        """
+        historical_sessions = self._session_manager.list_sessions(agent_id)
+        if not historical_sessions:
+            return
+
+        prefix = _log_prefix(agent_id=agent_id)
+        adaptor_client = self._get_adaptor_http_client(agent_id)
+        restored_count = 0
+        failed_count = 0
+        try:
+            for session in historical_sessions:
+                payload: dict[str, Any] = {
+                    "session_id": session.id,
+                    "restore": True,
+                }
+                if session.runtime_session_id:
+                    payload["runtime_session_id"] = session.runtime_session_id
+                try:
+                    result = await adaptor_client.post(
+                        f"/agents/{remote_runtime_agent_id}/sessions",
+                        json=payload,
+                        timeout=30.0,
+                    )
+                except httpx.HTTPStatusError as exc:
+                    failed_count += 1
+                    logger.warning(
+                        f"{prefix}Failed to restore historical session during %s: "
+                        f"session_id=%s status=%s",
+                        log_context,
+                        session.id,
+                        exc.response.status_code,
+                    )
+                    continue
+                restored_count += 1
+                self._backfill_runtime_session_identity(
+                    session=session,
+                    result=result,
+                )
+        finally:
+            await adaptor_client.close()
+
+        logger.info(
+            f"{prefix}Historical sessions restored during %s: "
+            f"restored=%s failed=%s total=%s",
+            log_context,
+            restored_count,
+            failed_count,
+            len(historical_sessions),
+        )
+
+    def _backfill_runtime_session_identity(
+        self, *, session: SessionRecord, result: Any
+    ) -> None:
+        """agent server 通过 title 回查补出的身份立刻落库，避免下次再回查。"""
+        if not isinstance(result, dict):
+            return
+        runtime_session_id = result.get("runtime_session_id")
+        if not isinstance(runtime_session_id, str) or not runtime_session_id:
+            return
+        if runtime_session_id == session.runtime_session_id:
+            return
+        runtime_type = result.get("runtime_type") or session.runtime_type
+        runtime_session_key = (
+            result.get("runtime_session_key") or session.runtime_session_key
+        )
+        if not isinstance(runtime_type, str) or not runtime_type:
+            return
+        if not isinstance(runtime_session_key, str) or not runtime_session_key:
+            return
+        try:
+            self._session_manager.update_session_runtime_identity(
+                session_id=session.id,
+                runtime_type=runtime_type,
+                runtime_session_id=runtime_session_id,
+                runtime_session_key=runtime_session_key,
+            )
+        except DomainError:
+            self._logger.warning(
+                "Failed to backfill runtime session identity: session_id=%s "
+                "runtime_session_id=%s",
+                session.id,
+                runtime_session_id,
+                exc_info=True,
+            )
+            return
+        self._logger.info(
+            "Backfilled runtime session identity: session_id=%s runtime_session_id=%s",
+            session.id,
+            runtime_session_id,
+        )
 
     async def send_message(
         self,

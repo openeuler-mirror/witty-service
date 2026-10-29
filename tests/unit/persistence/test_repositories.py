@@ -151,6 +151,36 @@ def test_session_upsert_list_update_and_delete(repo: SqliteRepository) -> None:
     assert repo.get_session("session-1") is None
 
 
+def test_upsert_session_persists_and_preserves_runtime_session_id(
+    repo: SqliteRepository,
+) -> None:
+    _create_agent(repo)
+
+    created = repo.upsert_session(
+        session_id="session-1",
+        agent_id="agent-1",
+        status="idle",
+        runtime_type="opencode",
+        runtime_session_id="runtime-session-1",
+        runtime_session_key="agent:agent-1:session:session-1",
+        remote_runtime_agent_id="runtime-agent-1",
+    )
+    refreshed_without_id = repo.upsert_session(
+        session_id="session-1",
+        agent_id="agent-1",
+        status="running",
+        runtime_type="opencode",
+        remote_runtime_agent_id="runtime-agent-1",
+    )
+
+    assert created.runtime_session_id == "runtime-session-1"
+    assert refreshed_without_id.status == "running"
+    assert refreshed_without_id.runtime_session_id == "runtime-session-1"
+    assert refreshed_without_id.runtime_session_key == (
+        "agent:agent-1:session:session-1"
+    )
+
+
 def test_sandbox_state_round_trip_and_handle(repo: SqliteRepository) -> None:
     _create_agent(repo)
 

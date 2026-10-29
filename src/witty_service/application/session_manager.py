@@ -7,7 +7,12 @@ from typing import Protocol
 import httpx
 
 from witty_service.adapter.http_client import AdaptorHttpClient
-from witty_service.domain.errors import DomainError, agent_not_found, session_not_found
+from witty_service.domain.errors import (
+    DomainError,
+    agent_not_found,
+    runtime_session_id_conflict,
+    session_not_found,
+)
 from witty_service.domain.field_limits import validate_session_title
 from witty_service.persistence.repositories import AgentRecord, SessionRecord
 
@@ -32,10 +37,17 @@ class SessionRepository(Protocol):
         status: str,
         context_initialized: bool = False,
         runtime_type: str | None = None,
+        runtime_session_id: str | None = None,
         runtime_session_key: str | None = None,
         created_at: datetime | None = None,
         remote_runtime_agent_id: str | None = None,
     ) -> SessionRecord: ...
+
+    def find_session_by_runtime_identity(
+        self,
+        runtime_type: str,
+        runtime_session_id: str,
+    ) -> SessionRecord | None: ...
 
     def update_session_runtime_identity(
         self,
@@ -123,17 +135,24 @@ class SessionManager:
         status: str,
         context_initialized: bool = False,
         runtime_type: str | None = None,
+        runtime_session_id: str | None = None,
         runtime_session_key: str | None = None,
         created_at: datetime | None = None,
         remote_runtime_agent_id: str | None = None,
     ) -> SessionRecord:
         """直接在本地 repository 创建/更新 session"""
+        self._ensure_runtime_identity_not_reused(
+            session_id=session_id,
+            runtime_type=runtime_type,
+            runtime_session_id=runtime_session_id,
+        )
         return self._repository.upsert_session(
             session_id=session_id,
             agent_id=agent_id,
             status=status,
             context_initialized=context_initialized,
             runtime_type=runtime_type,
+            runtime_session_id=runtime_session_id,
             runtime_session_key=runtime_session_key,
             created_at=created_at,
             remote_runtime_agent_id=remote_runtime_agent_id,
@@ -147,6 +166,11 @@ class SessionManager:
         runtime_session_id: str,
         runtime_session_key: str,
     ) -> SessionRecord:
+        self._ensure_runtime_identity_not_reused(
+            session_id=session_id,
+            runtime_type=runtime_type,
+            runtime_session_id=runtime_session_id,
+        )
         return self._repository.update_session_runtime_identity(
             session_id=session_id,
             runtime_type=runtime_type,
@@ -196,12 +220,14 @@ class SessionManager:
         result = await adaptor_client.post(
             f"/agents/{resolved_runtime_agent_id}/sessions", json={}
         )
-        session = self._repository.upsert_session(
+        session = self.upsert_session(
             session_id=result["id"],
             agent_id=agent_id,
             status=result.get("status", "idle"),
             context_initialized=result.get("context_initialized", True),
             runtime_type=result.get("runtime_type"),
+            runtime_session_id=result.get("runtime_session_id"),
+            runtime_session_key=result.get("runtime_session_key"),
             created_at=datetime.fromisoformat(result["created_at"])
             if "created_at" in result
             else None,
@@ -225,12 +251,14 @@ class SessionManager:
         )
         sessions = []
         for item in result.get("sessions", []):
-            session = self._repository.upsert_session(
+            session = self.upsert_session(
                 session_id=item["id"],
                 agent_id=agent_id,
                 status=item.get("status", "idle"),
                 context_initialized=item.get("context_initialized", True),
                 runtime_type=item.get("runtime_type"),
+                runtime_session_id=item.get("runtime_session_id"),
+                runtime_session_key=item.get("runtime_session_key"),
                 created_at=datetime.fromisoformat(item["created_at"])
                 if "created_at" in item
                 else None,
@@ -267,12 +295,14 @@ class SessionManager:
                     session_id=session_id, agent_id=agent_id
                 ) from exc
             raise
-        return self._repository.upsert_session(
+        return self.upsert_session(
             session_id=result["id"],
             agent_id=agent_id,
             status=result.get("status", "idle"),
             context_initialized=result.get("context_initialized", True),
             runtime_type=result.get("runtime_type"),
+            runtime_session_id=result.get("runtime_session_id"),
+            runtime_session_key=result.get("runtime_session_key"),
             created_at=datetime.fromisoformat(result["created_at"])
             if "created_at" in result
             else None,
@@ -355,3 +385,31 @@ class SessionManager:
         if self._repository.get_agent(agent_id) is not None:
             return
         raise agent_not_found(agent_id=agent_id)
+
+    def _ensure_runtime_identity_not_reused(
+        self,
+        *,
+        session_id: str,
+        runtime_type: str | None,
+        runtime_session_id: str | None,
+    ) -> None:
+        """同一个 Runtime Session ID 只能映射到一条 Witty Session。
+
+        P1-A 阶段不加唯一索引（需要先确认存量数据），先在写入路径做冲突检查：
+        Runtime 侧身份被两条会话共享时，消息、历史与删除都会打到错误的对象上。
+        """
+        if not isinstance(runtime_type, str) or not runtime_type:
+            return
+        if not isinstance(runtime_session_id, str) or not runtime_session_id:
+            return
+        existing = self._repository.find_session_by_runtime_identity(
+            runtime_type, runtime_session_id
+        )
+        if existing is None or existing.id == session_id:
+            return
+        raise runtime_session_id_conflict(
+            runtime_type=runtime_type,
+            runtime_session_id=runtime_session_id,
+            session_id=session_id,
+            existing_session_id=existing.id,
+        )
