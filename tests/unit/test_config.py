@@ -186,3 +186,36 @@ def test_settings_from_env_includes_channel_settings(monkeypatch) -> None:
 
     assert settings.channel.queue_depth == 5
     assert settings.channel.enabled is True
+
+
+# =============================================================================
+# Runtime：单 runtime 事实不随环境变化
+# =============================================================================
+
+
+def test_runtime_constants_single_runtime_fact() -> None:
+    assert config_module.DEFAULT_RUNTIME_TYPE == "opencode"
+    assert config_module.SUPPORTED_RUNTIME_TYPES == ("opencode",)
+
+
+@pytest.mark.parametrize(
+    ("default_type", "supported"),
+    [
+        ("openclaw", "openclaw,dsh"),
+        ("dsh", "dsh"),
+        ("opencode", ""),
+        ("opencode", ",,,"),
+        ("unknown", "unknown,opencode"),
+    ],
+)
+def test_runtime_settings_ignore_legacy_environment(
+    monkeypatch, default_type: str, supported: str
+) -> None:
+    """旧 WITTY_RUNTIME_* 即使仍在环境中也不得改变单 runtime 事实。"""
+    monkeypatch.setenv("WITTY_RUNTIME_DEFAULT", default_type)
+    monkeypatch.setenv("WITTY_RUNTIME_SUPPORTED", supported)
+
+    settings = config_module.RuntimeSettings.from_env()
+
+    assert settings.default_type == "opencode"
+    assert settings.supported == ("opencode",)

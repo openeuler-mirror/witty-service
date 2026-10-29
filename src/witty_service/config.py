@@ -312,31 +312,35 @@ class OpenCodeSettings:
 # ==============================================================================
 
 
+#: 本仓库唯一装配的 Runtime 类型（单 runtime 事实源）。
+#:
+#: 装配（agent-server 组件树）、能力声明（``/server/capabilities``）和消息预检
+#: 都必须引用这里，不得再各自读取环境变量。历史遗留的
+#: ``WITTY_RUNTIME_DEFAULT`` / ``WITTY_RUNTIME_SUPPORTED`` 即使仍存在于
+#: 父进程环境中也不产生任何效果。
+DEFAULT_RUNTIME_TYPE = "opencode"
+
+#: 本镜像支持的全部 Runtime 类型（单 runtime 固定为一项）。
+SUPPORTED_RUNTIME_TYPES: tuple[str, ...] = (DEFAULT_RUNTIME_TYPE,)
+
+
 @dataclass(frozen=True)
 class RuntimeSettings:
-    """Runtime 调度配置。
+    """Runtime 事实配置。
 
-    每个 agent-server 实例运行 ``default_type`` 指定的单个 runtime
-    ``supported`` 声明该镜像/部署能支持哪些 runtime 类型，供外界调度参考。
-
-    环境变量:
-        WITTY_RUNTIME_DEFAULT: 当前实例运行的 runtime 类型, 默认 opencode
-        WITTY_RUNTIME_SUPPORTED: 镜像支持的所有 runtime 类型, 默认 opencode
+    单 runtime 收敛后这里不再承载可变配置：``default_type`` / ``supported``
+    直接引用模块级常量，``from_env`` 忽略任何遗留环境变量，保证装配、能力声明
+    和消息预检读到的是同一份事实。
     """
 
-    default_type: str = "opencode"
-    supported: tuple[str, ...] = ("opencode",)
+    default_type: str = DEFAULT_RUNTIME_TYPE
+    supported: tuple[str, ...] = SUPPORTED_RUNTIME_TYPES
 
     @classmethod
     def from_env(cls) -> "RuntimeSettings":
-        default_type = os.getenv("WITTY_RUNTIME_DEFAULT", "opencode")
-        raw_supported = os.getenv("WITTY_RUNTIME_SUPPORTED", "opencode")
-        supported = tuple(
-            item.strip() for item in raw_supported.split(",") if item.strip()
-        )
-        if not supported:
-            supported = (default_type,)
-        return cls(default_type=default_type, supported=supported)
+        # 刻意不读取 WITTY_RUNTIME_DEFAULT / WITTY_RUNTIME_SUPPORTED：
+        # 单 runtime 下这些变量只会让能力声明与实际装配不一致。
+        return cls()
 
 
 # ==============================================================================

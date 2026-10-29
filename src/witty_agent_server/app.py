@@ -21,7 +21,7 @@ from witty_agent_server.application.services.session_ws_orchestrator import (
 )
 from witty_agent_server.application.services.task_pool import TaskPool
 from witty_agent_server.logger.logging_config import configure_logging
-from witty_service.config import get_settings
+from witty_service.config import DEFAULT_RUNTIME_TYPE, SUPPORTED_RUNTIME_TYPES
 
 base_router = APIRouter()
 
@@ -43,8 +43,6 @@ def create_app(
     """
     configure_logging()
 
-    settings = get_settings()
-
     # 单 runtime 装配：一个 agent-server = 一份 OpenCode 组件树。
     assembly = create_opencode_bundle()
 
@@ -56,7 +54,7 @@ def create_app(
         session_service=resolved_session_service,
         agent_service=resolved_agent_service,
         state_sync_service=session_state_sync_service,
-        runtime_type="opencode",
+        runtime_type=DEFAULT_RUNTIME_TYPE,
     )
 
     task_pool = TaskPool(orchestrator=session_ws_orchestrator)
@@ -98,8 +96,8 @@ def create_app(
 
     @app.get("/server/capabilities")
     def capabilities() -> dict[str, list[str]]:
-        # supported: 镜像能力声明；当前实例实际运行 resolved_bundle.runtime_type
-        return {"supported_runtimes": list(settings.runtime.supported)}
+        # 与本实例装配共用同一事实（witty_service.config），不再读环境变量。
+        return {"supported_runtimes": list(SUPPORTED_RUNTIME_TYPES)}
 
     return app
 

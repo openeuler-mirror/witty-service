@@ -89,7 +89,9 @@ class OpencodeConfig(RuntimeConfig):
     memory_limit: str = "2048m"
 
     def build_env(self) -> dict[str, str]:
-        return {"WITTY_RUNTIME_DEFAULT": "opencode"}
+        # 单 runtime：不再向子进程传递 Runtime 选择变量。启动哪些 runtime 由
+        # agent-server 自身的固定装配决定，环境变量不能改变该事实。
+        return {}
 
     def build_start_payload(
         self,
