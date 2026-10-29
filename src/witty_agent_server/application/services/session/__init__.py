@@ -10,6 +10,8 @@ from witty_agent_server.application.services.session.errors import (
     RuntimeSessionAbortFailedError,
     RuntimeSessionCreateFailedError,
     RuntimeSessionDeleteFailedError,
+    RuntimeSessionIdentityConflictError,
+    RuntimeSessionNotFoundError,
     SessionNotFoundServiceError,
     SessionServiceError,
 )
@@ -28,6 +30,8 @@ __all__ = [
     "RuntimeSessionAbortFailedError",
     "RuntimeSessionCreateFailedError",
     "RuntimeSessionDeleteFailedError",
+    "RuntimeSessionIdentityConflictError",
+    "RuntimeSessionNotFoundError",
     "SessionNotFoundServiceError",
     "SessionRepositoryPort",
     "SessionService",

@@ -67,6 +67,28 @@ class RuntimeSessionCreateFailedError(SessionServiceError):
         )
 
 
+class RuntimeSessionNotFoundError(SessionServiceError):
+    """恢复会话时既没有持久化 ID，也无法按 title 找回 Runtime Session。"""
+
+    def __init__(self, message: str = "runtime session not found") -> None:
+        super().__init__(
+            code="RUNTIME_SESSION_NOT_FOUND",
+            message=message,
+            status_code=404,
+        )
+
+
+class RuntimeSessionIdentityConflictError(SessionServiceError):
+    """按 title 回查时命中多个 Runtime Session，无法确定唯一身份。"""
+
+    def __init__(self, message: str = "runtime session identity is ambiguous") -> None:
+        super().__init__(
+            code="RUNTIME_SESSION_IDENTITY_CONFLICT",
+            message=message,
+            status_code=409,
+        )
+
+
 class RuntimeSessionDeleteFailedError(SessionServiceError):
     def __init__(self, message: str = "runtime session delete failed") -> None:
         super().__init__(

@@ -199,7 +199,7 @@ class OpenCodeClient(ClientBase):
         response = self.http_client().post(f"/mcp/{name}/disconnect")
         self._raise_for_status(response, action="post_mcp_disconnect")
 
-    def create_session(self, *, session_key: str) -> None:
+    def create_session(self, *, session_key: str) -> str:
         response = self.http_client().post("/session", json={"title": session_key})
         self._raise_for_status(response, action="create_session")
         try:
@@ -210,8 +210,23 @@ class OpenCodeClient(ClientBase):
                 message="opencode create_session failed: invalid JSON response",
             ) from None
         session_id = body.get("id") if isinstance(body, dict) else None
-        if isinstance(session_id, str) and session_id:
-            self._session_map[session_key] = session_id
+        if not isinstance(session_id, str) or not session_id:
+            # 没有 id 就没有可持久化的身份映射；静默返回 None 会让上层存下一个
+            # 永远无法恢复的 Session，所以这里是明确的失败。
+            raise OpenCodeClientError(
+                status=502,
+                message="opencode create_session failed: response missing session id",
+            )
+        self._session_map[session_key] = session_id
+        return session_id
+
+    def bind_session(self, *, session_key: str, runtime_session_id: str) -> None:
+        """把持久化的 opencode session.id 放进内存映射（cache）。"""
+        self._session_map[session_key] = runtime_session_id
+
+    def find_session_id(self, *, session_key: str) -> str | None:
+        """按 title 反查 opencode session.id（仅旧数据回退）。"""
+        return self._lookup_session_id_by_title(session_key)
 
     def delete_session(self, *, session_key: str) -> None:
         session_id = self._resolve_session_id_or_lookup(session_key)
@@ -379,14 +394,25 @@ class OpenCodeClient(ClientBase):
         sessions = payload.get("sessions") if isinstance(payload, dict) else None
         if not isinstance(sessions, list):
             return None
+        matched_ids: list[str] = []
         for item in sessions:
             if not isinstance(item, dict):
                 continue
-            if item.get("title") == session_key:
-                raw_id = item.get("id")
-                if isinstance(raw_id, str) and raw_id:
-                    return raw_id
-        return None
+            if item.get("title") != session_key:
+                continue
+            raw_id = item.get("id")
+            if isinstance(raw_id, str) and raw_id:
+                matched_ids.append(raw_id)
+        if len(matched_ids) > 1:
+            # 同 title 多会话时随机挑一个会把消息/删除打到错误会话上，必须报错。
+            raise OpenCodeClientError(
+                status=409,
+                message=(
+                    f"cannot resolve opencode session id for session_key={session_key!r}; "
+                    f"title is ambiguous ({len(matched_ids)} sessions match)"
+                ),
+            )
+        return matched_ids[0] if matched_ids else None
 
     def resolve_session_id(self, session_key: str) -> str | None:
         """返回 session_key 对应的 opencode session.id（若有映射）。"""

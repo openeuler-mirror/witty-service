@@ -12,9 +12,7 @@ from witty_agent_server.infra.clients.opencode_client import (
 )
 
 
-def _client_with_transport(
-    handler, *, serve_port: int = 4096
-) -> OpenCodeClient:
+def _client_with_transport(handler, *, serve_port: int = 4096) -> OpenCodeClient:
     """构造一个 OpenCodeClient，并把长持有 httpx.Client 直接塞进去。
 
     `OpenCodeClient.http_client()` 现在返回长持有实例，因此测试不再 monkeypatch
@@ -137,6 +135,82 @@ def test_abort_session_uses_mapped_id() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_create_session_returns_runtime_session_id() -> None:
+    """创建会话必须把 opencode 原生 id 返回给上层持久化。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "opencode-sess-returned"})
+
+    client = _client_with_transport(handler)
+
+    assert client.create_session(session_key="k") == "opencode-sess-returned"
+    assert client.resolve_session_id("k") == "opencode-sess-returned"
+
+
+def test_create_session_without_id_in_response_raises() -> None:
+    """没有 id 就无法建立持久映射，必须报错而不是静默返回 None。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    client = _client_with_transport(handler)
+
+    with pytest.raises(OpenCodeClientError) as exc:
+        client.create_session(session_key="k")
+
+    assert exc.value.status == 502
+    assert client.resolve_session_id("k") is None
+
+
+def test_bind_session_populates_memory_cache() -> None:
+    """恢复时把持久化 id 绑定进 cache，后续操作不再查 title。"""
+    list_invoked = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal list_invoked
+        if request.method == "GET" and request.url.path == "/session":
+            list_invoked = True
+        return httpx.Response(204)
+
+    client = _client_with_transport(handler)
+    client.bind_session(session_key="k", runtime_session_id="oc-bound")
+
+    assert client.resolve_session_id("k") == "oc-bound"
+    client.abort_session(session_key="k")
+    assert not list_invoked
+
+
+def test_find_session_id_returns_legacy_match() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"id": "oc-legacy", "title": "legacy-key"}])
+
+    client = _client_with_transport(handler)
+
+    assert client.find_session_id(session_key="legacy-key") == "oc-legacy"
+    assert client.find_session_id(session_key="missing-key") is None
+
+
+def test_find_session_id_rejects_duplicate_titles() -> None:
+    """同 title 多会话时不能随机挑一个，必须明确报 409。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {"id": "oc-1", "title": "dup-key"},
+                {"id": "oc-2", "title": "dup-key"},
+            ],
+        )
+
+    client = _client_with_transport(handler)
+
+    with pytest.raises(OpenCodeClientError) as exc:
+        client.find_session_id(session_key="dup-key")
+
+    assert exc.value.status == 409
+    assert "ambiguous" in exc.value.message
+
+
 def test_delete_session_falls_back_to_list_lookup_by_title() -> None:
     """_session_map miss 时按 title 在 /session 列表里找回 id，再 DELETE。"""
     deleted_paths: list[str] = []
@@ -166,6 +240,7 @@ def test_delete_session_falls_back_to_list_lookup_by_title() -> None:
 
 def test_delete_session_list_without_title_falls_back_to_409() -> None:
     """list 响应不含 title 字段（schema 不一致）时回退到 409 而非误删。"""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == "/session":
             return httpx.Response(200, json=[{"id": "x"}])  # 无 title
@@ -270,6 +345,7 @@ def test_stream_client_does_not_affect_rpc_client() -> None:
 
 def test_stream_client_close_safety() -> None:
     """stream_client() 用 with 关闭后，RPC 调用仍可继续（验证独立生命周期）。"""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[{"id": "main"}])
 
@@ -455,5 +531,3 @@ def test_reject_question_raises_on_http_error() -> None:
         client.reject_question(request_id="q1")
 
     assert exc.value.status == 502
-
-
