@@ -74,6 +74,10 @@ class AgentTemplateInfoResponse(BaseModel):
         default=None,
         description="模板声明的默认使用提问（给用户直接用；未声明为 null）",
     )
+    default_prompts: list[str] = Field(
+        default_factory=list,
+        description="模板声明的多条示例提问（给用户直接用），供前端「试试这样问我」",
+    )
     source_commit: str | None = None
 
 

@@ -38,6 +38,11 @@ prompt:
   # 默认使用提问（用户体验）：随 GET /agent-templates 的 default_prompt 暴露，
   # 由前端渲染成用户可直接发送的默认问题（后端不往 AGENTS.md 注入任何引导内容）。
   default: 帮我排查这台机器最近的异常：先看 journalctl 和 dmesg 里的报错，再做一次异常日志统计，最后给出根因结论和修复命令。
+  # 示例提问：对应 GET /agent-templates 的 default_prompts，仅供前端展示，不写入 AGENTS.md。
+  examples:
+    - 帮我统计这台机器最近一天的异常日志，按错误模式归类并列出高频问题。
+    - 这台机器昨晚发生了 OOM，帮我从 dmesg 和 journalctl 定位是哪个进程、什么原因导致的。
+    - 帮我设计一份日志轮替方案，避免日志把磁盘写满，同时满足审计合规要求。
 
 skills:
   - name: agent-tools

@@ -15,15 +15,16 @@ from pydantic import BaseModel, Field, model_validator
 class AgentTemplatePrompt(BaseModel):
     """PROMPT 配置。
 
-    ``system`` 是给 agent 的角色/流程指令；``default`` 是给**用户**的默认使用提问，
-    随 ``GET /agent-templates`` 暴露（``default_prompt``），由前端渲染成用户可直接发送的
-    默认提问——后端不往 ``AGENTS.md`` 里注入任何引导内容。
+    ``system`` 是给 agent 的角色/流程指令；``default`` / ``examples`` 是给用户的
+    默认提问与示例提问，只随 ``GET /agent-templates`` 暴露（``default_prompt`` /
+    ``default_prompts``），不写入 ``AGENTS.md``。
     """
 
     system: str | None = None
     system_file: str | None = None
     workflow_file: str | None = None
     default: str | None = None
+    examples: list[str] = Field(default_factory=list)
 
 
 class AgentTemplateSkill(BaseModel):
@@ -139,11 +140,15 @@ class AgentTemplate(BaseModel):
             data = yaml.safe_load(f)
 
         if not isinstance(data, dict):
-            raise ValueError(f"Invalid agent.yaml: expected a dict, got {type(data).__name__}")
+            raise ValueError(
+                f"Invalid agent.yaml: expected a dict, got {type(data).__name__}"
+            )
 
         return cls(**data)
 
-    def resolve_skill_source_path(self, skill: AgentTemplateSkill, template_dir: Path) -> Path | None:
+    def resolve_skill_source_path(
+        self, skill: AgentTemplateSkill, template_dir: Path
+    ) -> Path | None:
         """解析 skill 的 source 路径（相对于 agent.yaml 所在目录）。"""
         if skill.source:
             return (template_dir / skill.source).resolve()
