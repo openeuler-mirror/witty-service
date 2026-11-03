@@ -210,6 +210,26 @@ class DockerSandboxBackend(SandboxBackend):
                 return handle
         return None
 
+    def find_handle_by_agent_id(
+        self, *, agent_id: str, workspace_path: str
+    ) -> SandboxHandle | None:
+        """按容器名回查执行体；容器不存在返回 None，查询失败向上抛。
+
+        与内存句柄的回查不同，这里必须区分"确定没有容器"和"查不到状态"：
+        后者由 ``_find_container_for_status`` 抛错，交给删除流程阻断。
+        """
+        handle = self._find_handle_by_agent_id(agent_id)
+        if handle is not None:
+            return handle
+        probe = SandboxHandle(
+            sandbox_id=f"lookup-{agent_id}",
+            agent_id=agent_id,
+            workspace_path=workspace_path,
+        )
+        if self._find_container_for_status(probe) is None:
+            return None
+        return probe
+
     def _try_find_container(self, container_name: str) -> Any | None:
         try:
             container = _with_retry(
@@ -329,10 +349,35 @@ class DockerSandboxBackend(SandboxBackend):
         except (NotFound, APIError):
             return None
 
+    def _find_container_for_status(self, sandbox_handle: SandboxHandle) -> Any | None:
+        """按容器名查真实容器；查不到返回 None，查询失败向上抛。
+
+        与 ``_try_find_container_by_name`` 的区别：这里不能把 API 错误吞成
+        "没有容器"——状态无法确认必须让调用方保留数据。
+        """
+        container_name = f"{self.CONTAINER_NAME_PREFIX}-{sandbox_handle.agent_id}"
+        try:
+            return _with_retry(
+                lambda: self._get_client().containers.get(container_name)
+            )
+        except NotFound:
+            return None
+        except Exception as exc:
+            raise self._sandbox_operation_failed(
+                operation="status",
+                sandbox_handle=sandbox_handle,
+                container=None,
+                error=exc,
+            ) from exc
+
     def status(self, handle: SandboxHandle | str, **kwargs: Any) -> SandboxStatus:
 
         sandbox_handle = self._resolve_handle(handle)
         container = self._containers.get(sandbox_handle.sandbox_id)
+        if container is None:
+            # 服务重启后内存句柄丢失时按容器名兜底查询：直接返回 stopped 会把仍在
+            # 运行的容器误判为已退出，进而让删除流程过早清理磁盘。
+            container = self._find_container_for_status(sandbox_handle)
         if container is None:
             return SandboxStatus.stopped
 

@@ -83,6 +83,17 @@ class SandboxBackend(ABC):
         """
         return None
 
+    def find_handle_by_agent_id(
+        self, *, agent_id: str, workspace_path: str
+    ) -> SandboxHandle | None:
+        """按 agent 身份回查仍在运行的执行体句柄。
+
+        DB 里没有 sandbox_state（创建中途）时用于删除前的安全检查。默认返回
+        None：只有能可靠证明身份的 backend 才覆盖，查不到即视为不存在。
+        """
+        del agent_id, workspace_path
+        return None
+
 
 def sandbox_not_supported(*, sandbox_type: str, operation: str) -> DomainError:
     return DomainError(

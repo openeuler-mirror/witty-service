@@ -281,6 +281,20 @@ class LocalProcessSandboxBackend(SandboxBackend):
             return SandboxStatus.running
         return SandboxStatus.stopped
 
+    def find_handle_by_agent_id(
+        self, *, agent_id: str, workspace_path: str
+    ) -> SandboxHandle | None:
+        """按 agent_id 回查本进程登记的执行体。
+
+        本地子进程的父进程就是 witty-service：服务重启后残留进程由启动时的
+        孤儿收敛负责，因此内存登记表就是本进程内唯一的身份来源。
+        """
+        del workspace_path
+        for handle in self._handles.values():
+            if handle.agent_id == agent_id:
+                return handle
+        return None
+
     def endpoint(self, handle: SandboxHandle | str, **kwargs: Any) -> AdapterEndpoint:
         sandbox_handle = self._resolve_handle(handle)
         base_url = str(sandbox_handle.metadata["base_url"])

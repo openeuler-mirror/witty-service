@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from witty_service.domain.errors import DomainError
-from witty_service.sandbox.base import SandboxStatus
+from witty_service.sandbox.base import SandboxHandle, SandboxStatus
 from witty_service.sandbox.factory import create_sandbox_backend
 
 
@@ -275,6 +275,50 @@ def test_docker_runtime_status_returns_stopped_when_no_container(
     backend._containers.pop(handle.sandbox_id, None)
 
     assert backend.status(handle) is SandboxStatus.stopped
+
+
+def test_docker_runtime_status_finds_container_by_name_after_handle_loss(
+    tmp_path: Path,
+) -> None:
+    """内存句柄丢失（服务重启）时必须按容器名查真实状态，不能直接当 stopped。"""
+    from witty_service.sandbox.docker import DockerSandboxBackend
+
+    container = FakeContainer(status="running")
+    client = FakeDockerClient(container)
+    backend = DockerSandboxBackend(client=client)
+    handle = backend.start(
+        agent_id="agent-reconnect",
+        workspace_path=_workspace_dir(tmp_path),
+        port=18101,
+        image_tag="test",
+    )
+    client.containers._get_containers["witty-sandbox-agent-reconnect"] = container
+    backend._containers.pop(handle.sandbox_id, None)
+
+    assert backend.status(handle) is SandboxStatus.running
+
+
+def test_docker_runtime_status_raises_when_name_lookup_fails(
+    tmp_path: Path,
+) -> None:
+    """按名回查失败时状态属于"无法确认"，必须报错而不是返回 stopped。"""
+    from witty_service.sandbox.docker import DockerSandboxBackend
+
+    container = FakeContainer()
+    client = FakeDockerClient(container)
+    client.containers = GetErrorContainers(container)  # type: ignore[assignment]
+    backend = DockerSandboxBackend(client=client)
+    handle = SandboxHandle(
+        sandbox_id="sandbox-lookup-error",
+        agent_id="agent-lookup-error",
+        workspace_path=str(tmp_path),
+        metadata={},
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        backend.status(handle)
+
+    assert exc_info.value.code == "SANDBOX_STOP_FAILED"
 
 
 def test_docker_runtime_status_raises_domain_error_when_docker_api_fails(
