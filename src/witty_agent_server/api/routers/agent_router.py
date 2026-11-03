@@ -53,9 +53,7 @@ def create_agent_router(
                 "model": body.get("model"),
                 "mcp_server_name": body.get("mcp_server_name"),
                 "mcp_server_config": body.get("mcp_server_config"),
-                "openclaw": body.get("openclaw"),
                 "opencode": body.get("opencode"),
-                "dsh": body.get("dsh"),
             }
             response = agent_service.start(
                 agent_id=id,
@@ -73,7 +71,7 @@ def create_agent_router(
         id: str | None = None,
         wipe: bool = False,
     ) -> dict[str, Any] | JSONResponse:
-        # wipe=true：delete 语义，完整卸载本地数据（如 openclaw profile 目录）；
+        # wipe=true：delete 语义，完整卸载本地数据；
         # 默认 false：pause 语义，只停进程、保留数据以便快速恢复。
         try:
             resolved_agent_id = _resolve_request_agent_id(
@@ -304,7 +302,7 @@ def create_agent_router(
         request: Request,
         id: str | None = None,
     ) -> dict[str, Any] | JSONResponse:
-        """卸载 MCP Server，执行 openclaw mcp unset 从 runtime 移除配置。"""
+        """卸载 MCP Server，执行 mcp unset 从 runtime 移除配置。"""
         try:
             body = await request.json()
             mcp_server_name = body.get("mcp_server_name")

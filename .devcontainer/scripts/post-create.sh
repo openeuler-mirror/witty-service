@@ -125,7 +125,6 @@ echo "Python:  $(python --version)"
 echo "Node:    $(node --version)"
 echo "npm:     $(npm --version)"
 echo "uv:      $(uv --version)"
-echo "openclaw: $(openclaw --version 2>&1 | head -1 || echo 'not found')"
 echo "pre-commit: $(pre-commit --version 2>/dev/null || echo 'not found')"
 
 # 12. Docker availability check.
@@ -139,7 +138,7 @@ fi
 # 13. Agent image status (do not auto-build — it takes too long).
 echo ""
 echo "--- Agent image status ---"
-for tag in openclaw opencode; do
+for tag in opencode; do
   if docker image inspect "witty-agent-server:${tag}" &>/dev/null 2>&1; then
     echo "  witty-agent-server:${tag} — present"
   else

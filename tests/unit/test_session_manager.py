@@ -95,7 +95,7 @@ class AdaptorClientStub:
                     "id": "remote-session-1",
                     "status": "idle",
                     "context_initialized": True,
-                    "runtime_type": "openclaw",
+                    "runtime_type": "opencode",
                     "created_at": "2026-01-01T00:00:00+00:00",
                 }
             ]
@@ -104,7 +104,7 @@ class AdaptorClientStub:
             "id": "remote-session-1",
             "status": "running",
             "context_initialized": True,
-            "runtime_type": "openclaw",
+            "runtime_type": "opencode",
         }
 
     async def list_agents(self):
@@ -117,7 +117,7 @@ class AdaptorClientStub:
                 "id": "remote-session-1",
                 "status": "idle",
                 "context_initialized": True,
-                "runtime_type": "openclaw",
+                "runtime_type": "opencode",
                 "created_at": "2026-01-01T00:00:00+00:00",
             }
         return {}
@@ -255,7 +255,7 @@ def test_upsert_session_delegates_all_fields() -> None:
         agent_id="agent-1",
         status="idle",
         context_initialized=True,
-        runtime_type="openclaw",
+        runtime_type="opencode",
         created_at=created_at,
         remote_runtime_agent_id="runtime-1",
     )
@@ -266,7 +266,7 @@ def test_upsert_session_delegates_all_fields() -> None:
         "agent_id": "agent-1",
         "status": "idle",
         "context_initialized": True,
-        "runtime_type": "openclaw",
+        "runtime_type": "opencode",
         "runtime_session_key": None,
         "created_at": created_at,
         "remote_runtime_agent_id": "runtime-1",
@@ -284,17 +284,17 @@ def test_update_session_runtime_identity_delegates_to_repository() -> None:
 
     session = manager.update_session_runtime_identity(
         session_id="session-1",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_id="runtime-session-1",
         runtime_session_key="agent:agent-1:session:session-1",
     )
 
-    assert session.runtime_type == "openclaw"
+    assert session.runtime_type == "opencode"
     assert session.runtime_session_id == "runtime-session-1"
     assert session.runtime_session_key == "agent:agent-1:session:session-1"
     assert repo.identity_updates[-1] == {
         "session_id": "session-1",
-        "runtime_type": "openclaw",
+        "runtime_type": "opencode",
         "runtime_session_id": "runtime-session-1",
         "runtime_session_key": "agent:agent-1:session:session-1",
     }

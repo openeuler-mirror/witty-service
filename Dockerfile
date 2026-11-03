@@ -35,7 +35,7 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# 安装 wittyhub（供 openclaw/opencode skill install/uninstall 使用）
+# 安装 wittyhub（供 opencode skill install/uninstall 使用）
 RUN npm install -g wittyhub \
     && npm cache clean --force
 
@@ -60,19 +60,7 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
 # 默认 ping_timeout=20s 会把消费端一时回不过神的长任务直接掐掉(1011)。
 CMD ["uvicorn", "witty_agent_server.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--ws-ping-interval", "20", "--ws-ping-timeout", "120"]
 
-# -------------------- Stage 4a: OpenClaw runtime --------------------
-FROM final-base AS openclaw
-
-USER root
-
-ENV OPENCLAW_VERSION=2026.6.5
-
-RUN npm install -g openclaw@${OPENCLAW_VERSION} \
-    && npm cache clean --force
-
-USER witty
-
-# -------------------- Stage 4b: OpenCode runtime --------------------
+# -------------------- Stage 4: OpenCode runtime --------------------
 FROM final-base AS opencode
 
 USER root

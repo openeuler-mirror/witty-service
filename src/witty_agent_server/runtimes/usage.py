@@ -10,14 +10,14 @@
 ----------
 - 表示**本轮**（跨 step 累计）增量，不是会话累计值；每轮只在终止事件之前下发
   一条（见 ``RuntimeBase.run_turn``）。
-- ``input_tokens`` 与 ``cache_*_tokens`` 互不重叠（dsh 口径）：
+- ``input_tokens`` 与 ``cache_*_tokens`` 互不重叠（DeepSeek 口径）：
   ``total_tokens = input + cache_read + cache_write + output``。
 - ``reasoning_tokens`` 是否已计入 ``output_tokens`` 取决于上游口径
-  （dsh 计入、opencode 单列），原样透传，仅用于展示细分。
+  （DeepSeek 计入、opencode 单列），原样透传，仅用于展示细分。
 - 上游给出总量时沿用；缺失时按上面的口径派生。
 
-三个 runtime 的上游形态各不相同（dsh camelCase、opencode
-``input/output/cache{read,write}/total`` + 同级 ``cost`` 标量、openclaw assistant
+上游形态各异（camelCase、opencode
+``input/output/cache{read,write}/total`` + 同级 ``cost`` 标量、assistant
 message 上的 ``input/output/cacheRead/cacheWrite/totalTokens`` + ``cost{...}``
 子对象），统一经 ``normalize_usage_payload`` 落到同一契约。
 """
@@ -37,8 +37,8 @@ _COUNT_FIELDS: tuple[str, ...] = (
 # 除 total_tokens 外的计数；reasoning 是 output 的细分，不参与 total 派生。
 _COUNTER_KEYS: tuple[str, ...] = (*_COUNT_FIELDS, "reasoning_tokens", "total_tokens")
 
-# 三种已见过的计数写法：snake_case / OpenAI 的 prompt|completion / dsh camelCase /
-# opencode 与 openclaw 的简写（``input``/``output``/``cacheRead``/``total``）。
+# 已见过的计数写法：snake_case / OpenAI 的 prompt|completion / camelCase /
+# 简写（``input``/``output``/``cacheRead``/``total``）。
 _ALIASES: dict[str, tuple[str, ...]] = {
     "input_tokens": ("input_tokens", "inputTokens", "prompt_tokens", "input"),
     "output_tokens": ("output_tokens", "outputTokens", "completion_tokens", "output"),
@@ -63,7 +63,7 @@ _ALIASES: dict[str, tuple[str, ...]] = {
         "reasoning",
     ),
     "total_tokens": ("total_tokens", "totalTokens", "total"),
-    # ``cost`` 本身可能不是数字（openclaw 的 cost 子对象），由 _is_number 过滤。
+    # ``cost`` 本身可能不是数字（为 cost 子对象），由 _is_number 过滤。
     "total_cost": (
         "total_cost",
         "totalCost",
@@ -73,8 +73,8 @@ _ALIASES: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# cache/cost 容器的子层只认本容器的简写键（opencode 的 ``cache.read``、
-# openclaw 的 ``cost.total``），否则 ``cache.read`` 会被当成主输入。
+# cache/cost 容器的子层只认本容器的简写键（opencode 的 ``cache.read``），
+# 否则 ``cache.read`` 会被当成主输入。
 _CACHE_ALIASES: dict[str, tuple[str, ...]] = {
     "cache_read_tokens": ("read", "read_tokens", "readTokens"),
     "cache_write_tokens": ("write", "write_tokens", "writeTokens"),

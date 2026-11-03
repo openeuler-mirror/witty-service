@@ -8,7 +8,6 @@ from witty_service.domain.errors import (
     AgentServiceError,
     InvalidAgentConfigError,
     InvalidAgentTransitionError,
-    OpenClawAgentNotFoundError,
 )
 
 __all__ = [
@@ -19,5 +18,4 @@ __all__ = [
     "AgentServiceError",
     "InvalidAgentConfigError",
     "InvalidAgentTransitionError",
-    "OpenClawAgentNotFoundError",
 ]

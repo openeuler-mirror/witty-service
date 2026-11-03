@@ -26,7 +26,6 @@ from witty_agent_server.runtimes.runtime_base import (
     supports_runtime_turn,
 )
 from witty_agent_server.runtimes.stream_errors import normalize_exception_error
-from witty_service.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -255,10 +254,15 @@ class SessionWSOrchestrator:
         session = self._require_session(agent_id=agent_id, session_id=session_id)
         runtime_type = session.get("runtime_type")
         if not self._is_supported_runtime(runtime_type):
+            # 历史 Session 可能来自已退役的 Runtime：明确拒绝，而不是继续找 runtime
+            # 再以 503 掩盖成"暂时不可用"。
             raise SessionWSOrchestratorError(
-                code="RUNTIME_UNAVAILABLE",
-                message="runtime unavailable",
-                status_code=503,
+                code="UNSUPPORTED_RUNTIME_TYPE",
+                message=(
+                    "session runtime is not supported: "
+                    f"{runtime_type!r}; this server only runs {self._runtime_type!r}"
+                ),
+                status_code=400,
             )
         self._require_runtime(runtime_type)
 
@@ -444,11 +448,12 @@ class SessionWSOrchestrator:
         return runtime
 
     def _is_supported_runtime(self, runtime_type: object) -> bool:
-        """判断 runtime_type 是否在 settings.runtime.supported 中。"""
-        settings = get_settings()
-        return (
-            isinstance(runtime_type, str) and runtime_type in settings.runtime.supported
-        )
+        """判断 session 的 runtime 是否就是本实例装配的 runtime。
+
+        单 runtime 下不能读环境变量（旧 ``WITTY_RUNTIME_SUPPORTED`` 会让真实
+        OpenCode 会话在预检中被判成不可用），只与本实例的 ``runtime_type`` 比较。
+        """
+        return isinstance(runtime_type, str) and runtime_type == self._runtime_type
 
     def _require_running_agent(self) -> None:
         if self._agent_service.agent.status != AgentStatus.RUNNING:

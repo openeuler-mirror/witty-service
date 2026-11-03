@@ -905,7 +905,7 @@ class SqliteRepository:
     def list_runtime_session_ids_by_agent_id(
         self,
         agent_id: str,
-        runtime_type: str = "openclaw",
+        runtime_type: str = "opencode",
     ) -> list[str]:
         with self._session_factory() as session:
             rows = (

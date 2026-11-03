@@ -40,7 +40,7 @@ _MODEL_PREFLIGHT_ATTEMPTS = 3
 _MODEL_PREFLIGHT_RETRY_SECONDS = 0.5
 
 
-# openclaw ``compatibility`` → opencode ``npm`` (AI SDK 包) 映射。
+# ``compatibility`` → opencode ``npm`` (AI SDK 包) 映射。
 #   openai            → /v1/chat/completions
 #   anthropic         → Anthropic Messages 格式
 _COMPATIBILITY_TO_NPM: dict[str, str] = {

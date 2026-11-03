@@ -33,10 +33,6 @@ from typing import Any
 _MESSAGE_MAX_CHARS = 500
 _RESPONSE_BODY_MAX_CHARS = 500
 
-# openclaw lifecycle error 的 message 形如 "HTTP 401: Invalid Authentication"，
-# 前缀解析出状态码用于分类，剩余部分作为根因 message。
-_HTTP_PREFIX_RE = re.compile(r"^HTTP\s+(\d{3})\b[:\s]*(.*)$", re.DOTALL)
-
 # 配额耗尽特征：部分供应商以 429 + "insufficient quota / exceeded your
 # current quota / insufficient balance / billing" 表达**永久性**配额/余额
 # 耗尽——与可重试的瞬时限流语义相反，须按 message 关键字甄别。
@@ -96,33 +92,10 @@ def classify_from_status(status_code: int | None) -> StreamErrorCode | None:
     return None
 
 
-def classify_dsh_reason(reason: str | None) -> StreamErrorCode:
-    """DshClientError.reason slug → 类别（slug 契约见 dsh_client._map_error_reason）。
-
-    ``config-invalid``（provider 路由/凭据配置错误）与 ``not-started``
-    （harness 未启动即调用）是永久性错误，必须显式映射，不得落入默认的
-    可重试 TRANSPORT_ERROR。
-    """
-    if reason == "transport-closed":
-        return StreamErrorCode.TRANSPORT_CLOSED
-    if reason in ("json-rpc-error", "harness-error"):
-        return StreamErrorCode.TRANSPORT_ERROR
-    if reason == "timeout":
-        return StreamErrorCode.UPSTREAM_TIMEOUT
-    if reason == "protocol-error":
-        return StreamErrorCode.RUNTIME_PROTOCOL_ERROR
-    if reason == "config-invalid":
-        # provider 凭据/路由配置问题：请求侧永久错误，重试无意义。
-        return StreamErrorCode.UPSTREAM_REQUEST
-    if reason == "not-started":
-        return StreamErrorCode.RUNTIME_LIFECYCLE_ERROR
-    return StreamErrorCode.TRANSPORT_ERROR
-
-
 def classify_from_code_hint(code: str | None) -> StreamErrorCode:
     """上游原始 code 字符串 → 类别（关键字匹配，兜底 UPSTREAM_REQUEST）。
 
-    dsh turn-end 的 ``reason.error.code`` 可能是任意上游直传码
+    turn-end 的 ``reason.error.code`` 可能是任意上游直传码
     （"AUTH" / "INVALID_REQUEST" / "MODEL_NOT_FOUND" ...），仅作 hint。
     """
     upper = code.upper() if isinstance(code, str) else ""
@@ -150,10 +123,8 @@ def _apply_quota_override(
 
     - 有状态码且为 402（DeepSeek 等以 402 表达余额不足，初始分类 REQUEST）
       或 429（部分供应商以 429 表达永久性配额耗尽，初始分类 RATE_LIMIT）；
-    - 无状态码且初始分类为 RUNTIME_LIFECYCLE_ERROR（openclaw 自由文本）
-      或 UPSTREAM_RATE_LIMIT（dsh turn-end 只给 ``code="QUOTA_EXCEEDED"``
-      之类的 hint、无 status，初始分类只能命中 RATE_LIMIT）：状态分类
-      不可用，均须按 message 关键字改判，否则配额耗尽会被当成可重试
+    - 无状态码且初始分类为 RUNTIME_LIFECYCLE_ERROR 或 UPSTREAM_RATE_LIMIT：
+      状态分类不可用，均须按 message 关键字改判，否则配额耗尽会被当成可重试
       限流反复重试。
 
     其他组合不改判，避免把鉴权失败等含 "billing" 字样的错误误伤。改判后
@@ -185,7 +156,7 @@ def _single_line(text: str) -> str:
     return _truncate(" ".join(text.split()), _MESSAGE_MAX_CHARS)
 
 
-# 部分上游（实测 dsh harness）把整个 JSON 错误体塞进 message 文本，
+# 部分上游把整个 JSON 错误体塞进 message 文本，
 # 形如 ``401: {"message":"Invalid Authentication","type":"..."}``。
 # 契约要求 message 是"一句话人类可读根因"，在此统一拆包。
 _EMBEDDED_ERROR_RE = re.compile(r"^\s*\d{3}\s*:\s*(\{.*\})\s*$", re.DOTALL)
@@ -303,7 +274,7 @@ def _classify_upstream(
 ) -> StreamErrorCode:
     """上游分类共用管道：状态码优先 → code hint → fallback，再做配额改判。
 
-    opencode / openclaw / dsh turn-end / orchestrator 异常四条路径共用；
+    opencode 与 orchestrator 异常两条路径共用；
     新接 adaptor 只需写字段抽取部分，分类口径在此单点维护。
     """
     code = classify_from_status(status_code)
@@ -373,131 +344,12 @@ def normalize_opencode_error(raw: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
-def normalize_openclaw_lifecycle_error(data: Mapping[str, Any]) -> dict[str, Any]:
-    """openclaw lifecycle error data → 统一载荷。
-
-    上游把 "HTTP 401: Invalid Authentication" 这类文本写进 ``message``
-    （或 ``error``）；能解析出状态码则按状态分类，剩余文本作根因 message，
-    否则按 lifecycle 错误兜底。``data.code`` 原样保留为 provider_code。
-    """
-    raw_message = data.get("message")
-    if not isinstance(raw_message, str) or not raw_message:
-        raw_message = data.get("error")
-    raw_message = raw_message if isinstance(raw_message, str) and raw_message else ""
-
-    provider_code = data.get("code")
-    provider_code = (
-        provider_code if isinstance(provider_code, str) and provider_code else None
-    )
-
-    match = _HTTP_PREFIX_RE.match(raw_message)
-    if match is not None:
-        status_code = int(match.group(1))
-        root_cause = match.group(2).strip() or raw_message
-        code = _classify_upstream(
-            status_code, root_cause, fallback=StreamErrorCode.RUNTIME_LIFECYCLE_ERROR
-        )
-        return normalize_stream_error(
-            code=code,
-            message=root_cause,
-            source="upstream",
-            retryable=_is_retryable_code(code),
-            detail={
-                "provider_code": provider_code,
-                "status_code": status_code,
-            },
-        )
-
-    # 无 "HTTP NNN" 前缀的自由文本（openclaw 常态）：无法按状态分类，先按
-    # lifecycle 兜底，再经配额关键字改判（如 "billing error / insufficient
-    # balance" → UPSTREAM_QUOTA_EXCEEDED，与 opencode/dsh 口径对齐）。
-    fallback_code = _apply_quota_override(
-        StreamErrorCode.RUNTIME_LIFECYCLE_ERROR, raw_message
-    )
-    # 改判成功说明根因是上游供应商（message 直指 provider 计费），source
-    # 相应从 runtime 升为 upstream；其余保持 lifecycle 语义。
-    source = (
-        "upstream"
-        if fallback_code == StreamErrorCode.UPSTREAM_QUOTA_EXCEEDED
-        else "runtime"
-    )
-    return normalize_stream_error(
-        code=fallback_code,
-        message=raw_message or "openclaw lifecycle stream error",
-        source=source,
-        retryable=False,
-        detail={"provider_code": provider_code},
-    )
-
-
-def normalize_dsh_turn_error(error: Mapping[str, Any]) -> dict[str, Any]:
-    """dsh turn-end ``reason.error`` → 统一载荷。
-
-    实测样本：``{"code": "AUTH", "message": "...api key...invalid", "status": 401}``、
-    ``{"code": "INVALID_REQUEST", "message": "model not found", "status": 400}``。
-    优先按 status 分类，缺失时按 code hint。
-    """
-    code_str = error.get("code")
-    code_str = code_str if isinstance(code_str, str) and code_str else None
-    message = error.get("message")
-    message = (
-        message if isinstance(message, str) and message else "dsh turn ended with error"
-    )
-    status_code = error.get("status")
-    status_code = status_code if isinstance(status_code, int) else None
-
-    code = _classify_upstream(status_code, message, code_hint=code_str)
-    return normalize_stream_error(
-        code=code,
-        message=message,
-        source="upstream",
-        retryable=_is_retryable_code(code),
-        detail={"provider_code": code_str, "status_code": status_code},
-    )
-
-
-def normalize_dsh_output_truncated() -> dict[str, Any]:
-    """dsh turn-end ``reason.kind == "max-tokens"`` → 统一载荷。
-
-    单轮模型输出触达 ``maxTokens`` 上限而截断：若截断发生在工具调用参数生成
-    过程中（如 ``write`` 的 ``content``），该工具调用不完整、不会执行，表现为
-    “卡在某个工具”其实什么都没发生。属上游输出上限条件（非瞬态、配置相关），
-    不可重试；显式透出以免静默失败。
-    """
-    return normalize_stream_error(
-        code=StreamErrorCode.UPSTREAM_OUTPUT_TRUNCATED,
-        message=(
-            "model output reached the max tokens limit; the turn was truncated "
-            "and any tool call in it was not executed"
-        ),
-        source="upstream",
-        retryable=False,
-        detail={"reason": "max-tokens"},
-    )
-
-
-def normalize_dsh_client_error(reason: str, message: str) -> dict[str, Any]:
-    """dsh 客户端异常（DshClientError）→ 统一载荷；reason 是 dsh_client 的 slug。
-
-    source 随类别推导：传输类 slug → transport，配置/生命周期类 slug →
-    upstream / runtime，不再一律标 transport。
-    """
-    code = classify_dsh_reason(reason)
-    return normalize_stream_error(
-        code=code,
-        message=message,
-        source=_source_for_code(code),
-        retryable=_is_retryable_code(code),
-        detail={"provider_code": reason},
-    )
-
-
 def normalize_exception_error(exc: BaseException) -> dict[str, Any]:
     """orchestrator 捕获的异常 → 统一载荷。
 
     优先级：``status_code`` 属性（含 ``response.status_code``，httpx
-    ``HTTPStatusError`` 把状态码挂在 response 上）→ ``reason`` slug
-    （DshClientError）→ 异常类型嗅探（httpx 传输/超时）→ INTERNAL_ERROR。
+    ``HTTPStatusError`` 把状态码挂在 response 上）→ 异常类型嗅探（httpx
+    传输/超时）→ INTERNAL_ERROR。
     """
     status_code = getattr(exc, "status_code", None)
     if not isinstance(status_code, int):
@@ -518,10 +370,6 @@ def normalize_exception_error(exc: BaseException) -> dict[str, Any]:
                 "status_code": status_code,
             },
         )
-
-    reason = getattr(exc, "reason", None)
-    if isinstance(reason, str) and reason:
-        return normalize_dsh_client_error(reason, str(exc) or reason)
 
     # httpx 传输异常嗅探：模块名匹配避免硬依赖 httpx。
     module = type(exc).__module__ or ""

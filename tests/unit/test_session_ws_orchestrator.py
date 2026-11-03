@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from witty_agent_server.application.models.agent import AgentStatus
 from witty_agent_server.application.services.session_identity_store import (
     SessionIdentityStore,
 )
@@ -30,7 +31,9 @@ class DummyRuntime(RuntimeBase):
         raise NotImplementedError
 
     def answer_question(self, *, request_id: str, answers: list[list[str]]) -> bool:
-        self.answer_question_calls.append({"request_id": request_id, "answers": answers})
+        self.answer_question_calls.append(
+            {"request_id": request_id, "answers": answers}
+        )
         if self._raise_on_answer is not None:
             raise self._raise_on_answer
         return self._answer_question_result
@@ -44,6 +47,7 @@ class DummyRuntime(RuntimeBase):
 
 class UnsupportedRuntime(RuntimeBase):
     """未覆盖 answer_question / reject_question 的 runtime，默认抛 NotImplementedError。"""
+
     runtime_type: Any = "unsupported-runtime"
 
     def _map_events(self, raw: dict[str, Any]) -> Any:
@@ -107,12 +111,12 @@ def test_handle_runtime_event_forwards_runtime_identity_change() -> None:
         session_service=DummySessionService(),
         agent_service=DummyAgentService(),
         identity_store=identity_store,
-        runtime_type="openclaw",
+        runtime_type="opencode",
     )
     identity = identity_store.bind(
         agent_id="agent-1",
         session_id="session-1",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_key="agent:1:session:key-1",
         runtime_session_id=None,
     )
@@ -121,7 +125,7 @@ def test_handle_runtime_event_forwards_runtime_identity_change() -> None:
         orchestrator._handle_runtime_event(
             agent_id="agent-1",
             session_id="session-1",
-            runtime_type="openclaw",
+            runtime_type="opencode",
             identity=identity,
             event={
                 "type": "session.runtime.changed",
@@ -134,7 +138,7 @@ def test_handle_runtime_event_forwards_runtime_identity_change() -> None:
     assert events[0]["type"] == "session.runtime.changed"
     assert events[0]["agent_id"] == "agent-1"
     assert events[0]["session_id"] == "session-1"
-    assert events[0]["runtime_type"] == "openclaw"
+    assert events[0]["runtime_type"] == "opencode"
     assert events[0]["payload"] == {
         "runtime_session_id": "runtime-session-1",
         "runtime_session_key": "agent:1:session:key-1",
@@ -256,3 +260,56 @@ def test_infer_event_source_question_events_are_assistant(
     result = orchestrator._infer_event_source(event_type)
 
     assert result == expected_source
+
+
+# =============================================================================
+# precheck_message — 单 runtime 事实不受环境影响
+# =============================================================================
+
+
+class _RunningAgent:
+    status = AgentStatus.RUNNING
+
+
+def _make_running_orchestrator(
+    *,
+    session_runtime_type: str,
+    runtime_type: str = "opencode",
+) -> SessionWSOrchestrator:
+    session_service = DummySessionService()
+    session_service._session = {
+        "runtime_type": session_runtime_type,
+        "runtime_session_key": "agent:1:session:key-1",
+    }
+    session_service._runtime_map[runtime_type] = DummyRuntime()
+    agent_service = DummyAgentService()
+    agent_service.agent = _RunningAgent()  # type: ignore[attr-defined]
+    return SessionWSOrchestrator(
+        session_service=session_service,
+        agent_service=agent_service,
+        identity_store=SessionIdentityStore(),
+        runtime_type=runtime_type,
+    )
+
+
+def test_precheck_ignores_legacy_runtime_environment(monkeypatch) -> None:
+    """旧 WITTY_RUNTIME_SUPPORTED=openclaw 不得把真实 OpenCode 会话判成不可用。"""
+    monkeypatch.setenv("WITTY_RUNTIME_DEFAULT", "openclaw")
+    monkeypatch.setenv("WITTY_RUNTIME_SUPPORTED", "openclaw")
+    orchestrator = _make_running_orchestrator(session_runtime_type="opencode")
+
+    orchestrator.precheck_message(agent_id="agent-1", session_id="s-1", message="hi")
+
+
+def test_precheck_rejects_retired_runtime_session() -> None:
+    """历史 Session 来自已退役 Runtime：明确 400，而不是 503 掩盖成暂时不可用。"""
+    orchestrator = _make_running_orchestrator(session_runtime_type="openclaw")
+
+    with pytest.raises(SessionWSOrchestratorError) as exc:
+        orchestrator.precheck_message(
+            agent_id="agent-1", session_id="s-1", message="hi"
+        )
+
+    assert exc.value.code == "UNSUPPORTED_RUNTIME_TYPE"
+    assert exc.value.status_code == 400
+    assert "openclaw" in exc.value.message

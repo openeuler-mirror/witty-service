@@ -10,14 +10,10 @@ import pytest
 from witty_agent_server.runtimes.stream_errors import (
     StreamErrorCode,
     StreamErrorSource,
-    classify_dsh_reason,
     classify_from_code_hint,
     classify_from_status,
     internal_error,
-    normalize_dsh_client_error,
-    normalize_dsh_turn_error,
     normalize_exception_error,
-    normalize_openclaw_lifecycle_error,
     normalize_opencode_error,
     normalize_stream_error,
 )
@@ -47,24 +43,6 @@ from witty_agent_server.runtimes.stream_errors import (
 )
 def test_classify_from_status(status_code, expected):
     assert classify_from_status(status_code) is expected
-
-
-@pytest.mark.parametrize(
-    ("reason", "expected"),
-    [
-        ("transport-closed", StreamErrorCode.TRANSPORT_CLOSED),
-        ("json-rpc-error", StreamErrorCode.TRANSPORT_ERROR),
-        ("harness-error", StreamErrorCode.TRANSPORT_ERROR),
-        ("timeout", StreamErrorCode.UPSTREAM_TIMEOUT),
-        ("protocol-error", StreamErrorCode.RUNTIME_PROTOCOL_ERROR),
-        # 永久性错误不得落入默认的可重试 TRANSPORT_ERROR
-        ("config-invalid", StreamErrorCode.UPSTREAM_REQUEST),
-        ("not-started", StreamErrorCode.RUNTIME_LIFECYCLE_ERROR),
-        ("unknown-slug", StreamErrorCode.TRANSPORT_ERROR),
-    ],
-)
-def test_classify_dsh_reason(reason, expected):
-    assert classify_dsh_reason(reason) is expected
 
 
 @pytest.mark.parametrize(
@@ -255,160 +233,8 @@ def test_normalize_opencode_error_deepseek_402_insufficient_balance():
 
 
 # ==============================================================================
-# openclaw lifecycle（真实故障样本："HTTP 401: Invalid Authentication"）
+# message 拆包（上游把整个 JSON 错误体塞进 message 文本，实测样本）
 # ==============================================================================
-
-
-def test_normalize_openclaw_lifecycle_error_http_401():
-    payload = normalize_openclaw_lifecycle_error(
-        {"phase": "error", "message": "HTTP 401: Invalid Authentication"}
-    )
-    assert payload["code"] == "UPSTREAM_AUTH"
-    assert payload["message"] == "Invalid Authentication"
-    assert payload["source"] == "upstream"
-    assert payload["retryable"] is False
-    assert payload["detail"] == {"status_code": 401}
-
-
-def test_normalize_openclaw_lifecycle_error_unparsable_message():
-    payload = normalize_openclaw_lifecycle_error(
-        {"phase": "error", "code": "ERR_X", "message": "something odd happened"}
-    )
-    assert payload["code"] == "RUNTIME_LIFECYCLE_ERROR"
-    assert payload["message"] == "something odd happened"
-    assert payload["source"] == "runtime"
-    assert payload["detail"] == {"provider_code": "ERR_X"}
-
-
-def test_normalize_openclaw_lifecycle_error_retries_on_502():
-    payload = normalize_openclaw_lifecycle_error({"message": "HTTP 502: Bad Gateway"})
-    assert payload["code"] == "UPSTREAM_SERVER"
-    assert payload["retryable"] is True
-
-
-def test_normalize_openclaw_lifecycle_error_quota_429():
-    payload = normalize_openclaw_lifecycle_error(
-        {"message": "HTTP 429: Insufficient Balance, please recharge."}
-    )
-    assert payload["code"] == "UPSTREAM_QUOTA_EXCEEDED"
-    assert payload["retryable"] is False
-    assert payload["detail"] == {"status_code": 429}
-
-
-def test_normalize_openclaw_lifecycle_error_plain_429_stays_rate_limit():
-    payload = normalize_openclaw_lifecycle_error(
-        {"message": "HTTP 429: Too many requests"}
-    )
-    assert payload["code"] == "UPSTREAM_RATE_LIMIT"
-    assert payload["retryable"] is True
-
-
-def test_normalize_openclaw_lifecycle_error_402_insufficient_balance():
-    payload = normalize_openclaw_lifecycle_error(
-        {"message": "HTTP 402: Insufficient Balance"}
-    )
-    assert payload["code"] == "UPSTREAM_QUOTA_EXCEEDED"
-    assert payload["retryable"] is False
-
-
-def test_normalize_openclaw_lifecycle_error_free_text_billing():
-    """openclaw 实测样本：无 "HTTP NNN" 前缀的自由文本 billing 报错，
-    落不到状态分类，须按关键字改判为配额耗尽，与 opencode/dsh 对齐。"""
-    payload = normalize_openclaw_lifecycle_error(
-        {
-            "message": (
-                "⚠️ deepseek (deepseek-v4-flash) returned a billing error — "
-                "your API key has run out of credits or has an insufficient balance. "
-                "Check your deepseek billing dashboard and top up or switch to a "
-                "different API key."
-            )
-        }
-    )
-    assert payload["code"] == "UPSTREAM_QUOTA_EXCEEDED"
-    assert payload["source"] == "upstream"
-    assert payload["retryable"] is False
-    assert "insufficient balance" in payload["message"]
-
-
-def test_normalize_openclaw_lifecycle_error_free_text_stays_lifecycle():
-    """无配额关键字的自由文本仍保持 lifecycle 兜底分类。"""
-    payload = normalize_openclaw_lifecycle_error(
-        {"message": "⚠️ tool execution aborted by user"}
-    )
-    assert payload["code"] == "RUNTIME_LIFECYCLE_ERROR"
-    assert payload["source"] == "runtime"
-    assert payload["retryable"] is False
-
-
-# ==============================================================================
-# dsh（真实故障样本：AUTH + "api key ... invalid (request_id: ...)"）
-# ==============================================================================
-
-
-def test_normalize_dsh_turn_error_auth_sample():
-    error = {
-        "code": "AUTH",
-        "message": (
-            "Authentication Fails, Your api key: ****m/v1 is invalid "
-            "(request_id: edac8948-eaee-40a3-99c5-0e44056926c0)"
-        ),
-        "status": 401,
-    }
-    payload = normalize_dsh_turn_error(error)
-    assert payload["code"] == "UPSTREAM_AUTH"
-    assert payload["source"] == "upstream"
-    assert payload["retryable"] is False
-    assert payload["detail"] == {"provider_code": "AUTH", "status_code": 401}
-
-
-def test_normalize_dsh_turn_error_code_hint_fallback():
-    payload = normalize_dsh_turn_error(
-        {"code": "MODEL_NOT_FOUND", "message": "no model"}
-    )
-    assert payload["code"] == "UPSTREAM_REQUEST"
-    assert payload["detail"] == {"provider_code": "MODEL_NOT_FOUND"}
-
-
-def test_normalize_dsh_turn_error_quota_429():
-    error = {
-        "code": "RATE_LIMITED",
-        "message": "Insufficient quota, please upgrade your plan.",
-        "status": 429,
-    }
-    payload = normalize_dsh_turn_error(error)
-    assert payload["code"] == "UPSTREAM_QUOTA_EXCEEDED"
-    assert payload["retryable"] is False
-    assert payload["detail"] == {"provider_code": "RATE_LIMITED", "status_code": 429}
-
-
-def test_normalize_dsh_turn_error_402_insufficient_balance():
-    error = {
-        "code": "INVALID_REQUEST",
-        "message": "Insufficient Balance",
-        "status": 402,
-    }
-    payload = normalize_dsh_turn_error(error)
-    assert payload["code"] == "UPSTREAM_QUOTA_EXCEEDED"
-    assert payload["retryable"] is False
-    assert payload["detail"] == {"provider_code": "INVALID_REQUEST", "status_code": 402}
-
-
-# ==============================================================================
-# message 拆包（dsh 上游把整个 JSON 错误体塞进 message 文本，实测样本）
-# ==============================================================================
-
-
-def test_normalize_dsh_turn_error_unwraps_embedded_json_message():
-    """dsh 实测样本：message='401: {"message":"Invalid Authentication",...}'
-    应拆出内层 message，与 opencode/openclaw 的展示口径对齐。"""
-    error = {
-        "code": "AUTH",
-        "message": '401: {"message":"Invalid Authentication","type":"invalid_authentication_error"}',
-        "status": 401,
-    }
-    payload = normalize_dsh_turn_error(error)
-    assert payload["code"] == "UPSTREAM_AUTH"
-    assert payload["message"] == "Invalid Authentication"
 
 
 def test_extract_embedded_error_message_nested_error_object():
@@ -437,45 +263,6 @@ def test_extract_embedded_error_message_leaves_plain_text_alone():
         assert payload["message"] == message
 
 
-def test_normalize_dsh_client_error_slug():
-    payload = normalize_dsh_client_error(
-        "transport-closed", "dsh stream_turn failed: closed"
-    )
-    assert payload["code"] == "TRANSPORT_CLOSED"
-    assert payload["source"] == "transport"
-    assert payload["retryable"] is True
-    assert payload["detail"] == {"provider_code": "transport-closed"}
-
-
-def test_normalize_dsh_client_error_config_invalid_is_permanent():
-    """provider 配置错误（config-invalid）是永久性错误：不可重试、
-    source 随类别推导为 upstream，而非一律标 transport。"""
-    payload = normalize_dsh_client_error(
-        "config-invalid", "dsh provider route requires dsh_home"
-    )
-    assert payload["code"] == "UPSTREAM_REQUEST"
-    assert payload["source"] == "upstream"
-    assert payload["retryable"] is False
-
-
-def test_normalize_dsh_client_error_not_started_is_lifecycle():
-    payload = normalize_dsh_client_error("not-started", "harness is not started")
-    assert payload["code"] == "RUNTIME_LIFECYCLE_ERROR"
-    assert payload["source"] == "runtime"
-    assert payload["retryable"] is False
-
-
-def test_normalize_dsh_turn_error_quota_without_status():
-    """无状态码、仅 code hint 命中限流的配额耗尽同样改判为不可重试的
-    UPSTREAM_QUOTA_EXCEEDED（否则被当成可重试限流反复重试）。"""
-    payload = normalize_dsh_turn_error(
-        {"code": "QUOTA_EXCEEDED", "message": "Insufficient quota, please upgrade."}
-    )
-    assert payload["code"] == "UPSTREAM_QUOTA_EXCEEDED"
-    assert payload["retryable"] is False
-    assert payload["detail"] == {"provider_code": "QUOTA_EXCEEDED"}
-
-
 # ==============================================================================
 # normalize_exception_error（orchestrator 异常路径）
 # ==============================================================================
@@ -495,12 +282,6 @@ class _HttpStatusLikeError(Exception):
     response = _FakeResponse()
 
 
-class _ReasonError(Exception):
-    def __init__(self, reason: str) -> None:
-        super().__init__(f"dsh failure: {reason}")
-        self.reason = reason
-
-
 def test_normalize_exception_error_with_status_code():
     payload = normalize_exception_error(_StatusError("HTTP 401 unauthorized"))
     assert payload["code"] == "UPSTREAM_AUTH"
@@ -518,13 +299,6 @@ def test_normalize_exception_error_extracts_status_from_response():
     assert payload["source"] == "upstream"
     assert payload["retryable"] is False
     assert payload["detail"]["status_code"] == 401
-
-
-def test_normalize_exception_error_with_dsh_reason():
-    payload = normalize_exception_error(_ReasonError("timeout"))
-    assert payload["code"] == StreamErrorCode.UPSTREAM_TIMEOUT
-    assert payload["source"] == "upstream"
-    assert payload["retryable"] is True
 
 
 def test_normalize_exception_error_generic_fallback():
@@ -555,8 +329,7 @@ class _HttpxReadTimeout(Exception):
 
 
 def test_normalize_exception_error_httpx_timeout_source_follows_code():
-    """httpx 超时嗅探：source 随类别推导为 upstream，与 dsh timeout slug
-    （classify_dsh_reason("timeout") → UPSTREAM_TIMEOUT + upstream）口径一致。"""
+    """httpx 超时嗅探：source 随类别推导为 upstream。"""
     payload = normalize_exception_error(_HttpxReadTimeout("timed out"))
     assert payload["code"] == StreamErrorCode.UPSTREAM_TIMEOUT
     assert payload["source"] == "upstream"

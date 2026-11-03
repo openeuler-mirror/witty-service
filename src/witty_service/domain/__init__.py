@@ -13,7 +13,6 @@ from witty_service.domain.errors import (
     InvalidAgentConfigError,
     InvalidAgentTransitionError,
     InvalidSessionMetadataError,
-    OpenClawAgentNotFoundError,
     SessionNotFoundError,
 )
 from witty_service.domain.models import ErrorPayload
@@ -32,7 +31,6 @@ __all__ = [
     "InvalidAgentConfigError",
     "InvalidAgentTransitionError",
     "InvalidSessionMetadataError",
-    "OpenClawAgentNotFoundError",
     "SessionNotFoundError",
     "can_transition",
 ]

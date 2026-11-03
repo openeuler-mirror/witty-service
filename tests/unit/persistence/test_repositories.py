@@ -70,7 +70,7 @@ def _create_session(
         session_id=session_id,
         agent_id=agent_id,
         status="idle",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_key=f"agent:{agent_id}:session:{session_id}",
         remote_runtime_agent_id="runtime-agent-1",
     )
@@ -126,7 +126,7 @@ def test_session_upsert_list_update_and_delete(repo: SqliteRepository) -> None:
         session_id="session-1",
         agent_id="agent-1",
         status="running",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         remote_runtime_agent_id=None,
     )
     metadata = repo.update_session_metadata(
@@ -136,11 +136,11 @@ def test_session_upsert_list_update_and_delete(repo: SqliteRepository) -> None:
     )
 
     assert created is not None
-    assert created.runtime_type == "openclaw"
+    assert created.runtime_type == "opencode"
     assert created.runtime_session_key == "agent:agent-1:session:session-1"
     assert created.runtime_session_id is None
     assert updated.status == "running"
-    assert updated.runtime_type == "openclaw"
+    assert updated.runtime_type == "opencode"
     assert updated.remote_runtime_agent_id == "runtime-agent-1"
     assert metadata.title == "Important chat"
     assert metadata.pinned is True
@@ -181,22 +181,22 @@ def test_update_session_runtime_identity_persists_and_overwrites(
 
     created = repo.update_session_runtime_identity(
         session_id="session-1",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_id="runtime-session-1",
         runtime_session_key="agent:agent-1:session:session-1",
     )
     updated = repo.update_session_runtime_identity(
         session_id="session-1",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_id="runtime-session-2",
         runtime_session_key="agent:agent-1:session:session-1",
     )
 
-    assert created.runtime_type == "openclaw"
+    assert created.runtime_type == "opencode"
     assert created.runtime_session_id == "runtime-session-1"
     assert created.runtime_session_key == "agent:agent-1:session:session-1"
     assert updated.id == created.id
-    assert updated.runtime_type == "openclaw"
+    assert updated.runtime_type == "opencode"
     assert updated.runtime_session_id == "runtime-session-2"
     assert updated.runtime_session_key == "agent:agent-1:session:session-1"
 
@@ -209,7 +209,7 @@ def test_update_session_runtime_identity_requires_existing_session(
     with pytest.raises(DomainError) as exc_info:
         repo.update_session_runtime_identity(
             session_id="missing-session",
-            runtime_type="openclaw",
+            runtime_type="opencode",
             runtime_session_id="runtime-session-1",
             runtime_session_key="agent:agent-1:session:missing-session",
         )
@@ -225,13 +225,13 @@ def test_find_session_by_runtime_identity_returns_match(
     _create_session(repo, session_id="session-1")
     repo.update_session_runtime_identity(
         session_id="session-1",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_id="runtime-session-1",
         runtime_session_key="agent:agent-1:session:session-1",
     )
 
     result = repo.find_session_by_runtime_identity(
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_id="runtime-session-1",
     )
 
@@ -247,7 +247,7 @@ def test_find_session_by_runtime_identity_returns_none_when_missing(
     _create_session(repo, session_id="session-1")
 
     result = repo.find_session_by_runtime_identity(
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_id="missing-runtime-session",
     )
 
@@ -262,19 +262,19 @@ def test_list_sessions_by_runtime_session_ids_preserves_input_order(
     _create_session(repo, session_id="session-2")
     repo.update_session_runtime_identity(
         session_id="session-1",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_id="runtime-session-1",
         runtime_session_key="agent:agent-1:session:session-1",
     )
     repo.update_session_runtime_identity(
         session_id="session-2",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_id="runtime-session-2",
         runtime_session_key="agent:agent-1:session:session-2",
     )
 
     result = repo.list_sessions_by_runtime_session_ids(
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_ids=[
             "runtime-session-2",
             "runtime-session-1",
@@ -292,21 +292,21 @@ def test_list_sessions_by_runtime_session_ids_ignores_missing_and_empty(
     _create_session(repo, session_id="session-1")
     repo.update_session_runtime_identity(
         session_id="session-1",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_id="runtime-session-1",
         runtime_session_key="agent:agent-1:session:session-1",
     )
 
     assert (
         repo.list_sessions_by_runtime_session_ids(
-            runtime_type="openclaw",
+            runtime_type="opencode",
             runtime_session_ids=[],
         )
         == []
     )
 
     result = repo.list_sessions_by_runtime_session_ids(
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_ids=["missing", "runtime-session-1"],
     )
 
@@ -322,7 +322,7 @@ def test_list_runtime_session_ids_by_agent_id_filters_runtime_type_and_nulls(
     _create_session(repo, agent_id="agent-1", session_id="session-3")
     repo.update_session_runtime_identity(
         session_id="session-1",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_id="runtime-session-1",
         runtime_session_key="agent:agent-1:session:session-1",
     )
@@ -513,7 +513,7 @@ def test_get_messages_aggregates_multi_step_session_usage(
 def test_get_messages_reads_raw_runtime_usage_payload(
     repo: SqliteRepository,
 ) -> None:
-    """历史行里的载荷是 runtime 原始形态（dsh 曾把用量包在 usage 下且为 camelCase）。"""
+    """历史行里的载荷是 runtime 原始形态（用量包在 usage 下且为 camelCase）。"""
     _create_assistant_message_with_usage_events(
         repo,
         [
@@ -801,7 +801,7 @@ def _seed_message(
         session_id=session_id,
         agent_id="agent-1",
         status="idle",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_key=f"agent:agent-1:session:{session_id}",
         remote_runtime_agent_id="runtime-agent-1",
     )

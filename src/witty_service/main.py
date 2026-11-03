@@ -19,7 +19,7 @@ from witty_service.api.scheduled_tasks import router as scheduled_tasks_router
 from witty_service.api.services import ServiceContainer, build_default_services
 from witty_service.api.skills import router as skills_router
 from witty_service.application.skill_manager import SkillManager
-from witty_service.config import get_settings
+from witty_service.config import SUPPORTED_RUNTIME_TYPES, get_settings
 from witty_service.logger import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,8 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
 
     @app.get("/server/capabilities")
     def capabilities() -> dict[str, list[str]]:
-        return {"supported_runtimes": list(settings.runtime.supported)}
+        # 单 runtime：能力声明与 agent-server 装配共用同一事实。
+        return {"supported_runtimes": list(SUPPORTED_RUNTIME_TYPES)}
 
     @app.on_event("startup")
     def sync_awesome_openclaw_skills_on_startup() -> None:

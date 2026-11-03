@@ -13,19 +13,15 @@ from witty_agent_server.application.services.session.errors import (
     SessionNotFoundServiceError,
     SessionServiceError,
 )
-from witty_agent_server.application.services.session.openclaw_session_service import (
-    OpenClawSessionService,
-)
 from witty_agent_server.application.services.session.opencode_session_service import (
     OpenCodeSessionService,
 )
 
-SessionService = OpenClawSessionService
+SessionService = OpenCodeSessionService
 
 __all__ = [
     "InvalidPaginationError",
     "InvalidSessionConfigError",
-    "OpenClawSessionService",
     "OpenCodeSessionService",
     "RuntimeNotSupportedError",
     "RuntimeRegistryPort",

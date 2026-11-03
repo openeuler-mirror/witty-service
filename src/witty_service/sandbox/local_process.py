@@ -132,7 +132,8 @@ class LocalProcessSandboxBackend(SandboxBackend):
         stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info(f"[LocalProcessSandbox] Stderr log path: {stderr_log_path}")
 
-        # 透传调用方注入的额外环境变量（例如 WITTY_RUNTIME_DEFAULT），
+        # 透传调用方注入的额外环境变量；单 runtime 下不再注入 Runtime 选择变量，
+        # 父进程里遗留的 WITTY_RUNTIME_* 也不会改变 agent-server 的装配。
         env_vars = os.environ.copy()
         if env:
             env_vars.update(env)

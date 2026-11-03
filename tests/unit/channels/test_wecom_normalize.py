@@ -1,6 +1,6 @@
 """W12 企微适配器的协议、归一化与三态映射测试。
 
-协议事实来自官方 Node SDK `@wecom/aibot-node-sdk@1.0.7` 与参考实现 dsh-im
+协议事实来自官方 Node SDK `@wecom/aibot-node-sdk@1.0.7` 与参考实现
 （见 `adapters/wecom_bot.py` 的模块 docstring），因此这里断言的是**线格式**：
 帧 cmd 取值域、回执帧没有 cmd 且靠 req_id 前缀关联、入站字段名、单聊 chatid = userid。
 """
@@ -137,7 +137,14 @@ def test_proactive_send_never_uses_the_text_msgtype() -> None:
     入站回调与欢迎语被动回复。这里锁住类型取值域，防止再被"入站字段名"带偏。
     """
     body = build_send_frame(req_id="r3", chat_id="user-1", text="结果")["body"]
-    assert body["msgtype"] in {"markdown", "template_card", "image", "file", "video", "voice"}
+    assert body["msgtype"] in {
+        "markdown",
+        "template_card",
+        "image",
+        "file",
+        "video",
+        "voice",
+    }
     assert body["msgtype"] != "text"
     assert "text" not in body
 
@@ -277,7 +284,9 @@ def test_normalize_mixed_without_text_is_degraded_as_image() -> None:
     ("msgtype", "kind"),
     [("image", "image"), ("file", "file"), ("video", "file"), ("sticker", "unknown")],
 )
-def test_normalize_unsupported_content_is_still_reported(msgtype: str, kind: str) -> None:
+def test_normalize_unsupported_content_is_still_reported(
+    msgtype: str, kind: str
+) -> None:
     """不支持的内容也要上报（text=None + kind），降级文案只有一处。"""
     frame = {
         "cmd": WS_CMD_MSG_CALLBACK,
@@ -368,7 +377,9 @@ def _adapter(**kwargs: object) -> WecomBotAdapter:
 
 
 def test_credential_error_is_rejected() -> None:
-    result = _adapter().classify_exception(WecomProtocolError("40001", "invalid secret"))
+    result = _adapter().classify_exception(
+        WecomProtocolError("40001", "invalid secret")
+    )
 
     assert result.certainty == CERTAINTY_REJECTED
     assert result.error_code == err.CHANNEL_CREDENTIAL_INVALID
@@ -602,6 +613,7 @@ def test_delivered_result_uses_ack_reference() -> None:
     result = adapter._result_from_ack(frame)
 
     assert result == DeliveryResult.delivered_with("m-9")
+
 
 # ==============================================================================
 # 连接生命周期（真机 2026-09-13 事故的回归）

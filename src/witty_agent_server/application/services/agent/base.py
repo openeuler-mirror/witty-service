@@ -6,7 +6,6 @@ from threading import RLock
 from typing import Any, Protocol, runtime_checkable
 
 from witty_agent_server.application.models.agent import Agent, AgentStatus
-from witty_agent_server.infra.clients.dsh_client import DshModelConfig
 from witty_agent_server.runtimes.runtime_base import RuntimeType
 
 
@@ -31,32 +30,6 @@ class RuntimeLifecyclePort(Protocol):
 
 
 @runtime_checkable
-class OpenClawLifecycleControlPort(RuntimeLifecyclePort, Protocol):
-    def update_config(
-        self, *, profile: str | None, gateway_port: int | None
-    ) -> None: ...
-
-    def mcp_set(self, name: str, config: dict[str, object]) -> None: ...
-
-    def mcp_unset(self, name: str) -> None: ...
-
-    def onboard(
-        self,
-        *,
-        auth_choice: str,
-        api_key: str,
-        install_daemon: bool = False,
-        skip_channels: bool = True,
-        skip_search: bool = True,
-        skip_hooks: bool = True,
-        skip_health: bool = False,
-        custom_base_url: str | None = None,
-        custom_model_id: str | None = None,
-        custom_compatibility: str | None = None,
-    ) -> None: ...
-
-
-@runtime_checkable
 class OpenCodeLifecycleControlPort(RuntimeLifecyclePort, Protocol):
     def update_config(self, *, profile: str | None = None) -> None: ...
 
@@ -76,16 +49,6 @@ class OpenCodeLifecycleControlPort(RuntimeLifecyclePort, Protocol):
 
 
 @runtime_checkable
-class DshLifecycleControlPort(RuntimeLifecyclePort, Protocol):
-    def update_config(
-        self,
-        *,
-        agent_id: str | None = None,
-        model_config: DshModelConfig | None = None,
-    ) -> None: ...
-
-
-@runtime_checkable
 class GatewayAgentClientPort(Protocol):
     """Gateway agent 读取端口。"""
 
@@ -101,7 +64,7 @@ class AgentServiceBase(ABC):
         self,
         *,
         agent: Agent | None = None,
-        runtime: RuntimeType = "openclaw",
+        runtime: RuntimeType = "opencode",
     ) -> None:
         self._agent = agent.model_copy(deep=True) if agent is not None else Agent()
         self._runtime: RuntimeType = runtime
@@ -134,9 +97,8 @@ class AgentServiceBase(ABC):
     def stop(self, *, agent_id: str | None = None, wipe: bool = False) -> Agent:
         """将 agent 状态切换为 stopped。
 
-        ``wipe`` 仅对支持"profile 目录"概念的 runtime（openclaw）有意义：
-        True 表示删除时彻底卸载本地数据；False（pause）只停进程、保留数据。
-        其他 runtime 忽略该参数。
+        ``wipe`` 保留以兼容既有调用方（delete 与 pause 的语义差异由外层控制面
+        决定），runtime 侧忽略该参数。
         """
         del wipe
         with self._lock:

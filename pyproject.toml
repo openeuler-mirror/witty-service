@@ -46,8 +46,6 @@ dependencies = [
   "gitpython>=3.1.40",
   "docker>=7.0",
   "apscheduler>=3.11,<4",
-  # dsh runtime（developer preview：锁精确版本，升级需独立评估兼容性）
-  "deepseek-harness-sdk==0.2.1rc2",
 ]
 
 [project.optional-dependencies]
@@ -94,10 +92,6 @@ packages = [
     "witty_agent_server.application.services.session",
     "witty_agent_server.application.services.skill",
     "witty_agent_server.application.models",
-    "witty_agent_server.application.materialization",
-    "witty_agent_server.application.materialization.core",
-    "witty_agent_server.application.materialization.openclaw",
-    "witty_agent_server.application.materialization.openclaw.core",
     "witty_agent_server.adapters",
     "witty_agent_server.runtimes",
     "witty_agent_server.infra",
@@ -108,7 +102,6 @@ packages = [
 package-dir = {"witty_service" = "src/witty_service", "witty_agent_server" = "src/witty_agent_server"}
 [tool.setuptools.package-data]
 "witty_service.data" = ["*.tar.gz", "preset_agents/**/*"]
-"witty_agent_server.infra.clients" = ["dsh_plugins/*.mjs", "dsh_plugins/*.yml"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
@@ -123,11 +116,6 @@ show_error_codes = true
 ignore_missing_imports = false
 follow_imports = "silent"
 exclude = ["tests/*", "examples/*"]
-
-# deepseek-harness-sdk 未打包 py.typed 标记
-[[tool.mypy.overrides]]
-module = "deepseek_harness.*"
-ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 88

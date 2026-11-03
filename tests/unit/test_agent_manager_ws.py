@@ -463,7 +463,7 @@ def _bootstrap_running_agent_and_session(repository: FakeRepository) -> tuple[An
         session_id="session-1",
         agent_id=agent.id,
         status="running",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         remote_runtime_agent_id="runtime-agent-1",
     )
     return agent, session
@@ -480,7 +480,7 @@ def test_send_message_uses_websocket_and_syncs_runtime_session_identity():
                 InboundEvent(
                     type="session.runtime.changed",
                     session_id=session.id,
-                    runtime_type="openclaw",
+                    runtime_type="opencode",
                     event_id="evt-1",
                     ts_ms=1000,
                     payload={
@@ -491,7 +491,7 @@ def test_send_message_uses_websocket_and_syncs_runtime_session_identity():
                 InboundEvent(
                     type="message.completed",
                     session_id=session.id,
-                    runtime_type="openclaw",
+                    runtime_type="opencode",
                     event_id="evt-2",
                     ts_ms=2000,
                     payload={},
@@ -512,7 +512,7 @@ def test_send_message_uses_websocket_and_syncs_runtime_session_identity():
         ]
         assert [event["type"] for event in events["events"]] == ["message.completed"]
         synced_session = repository.sessions[session.id]
-        assert synced_session.runtime_type == "openclaw"
+        assert synced_session.runtime_type == "opencode"
         assert synced_session.runtime_session_id == "runtime-session-1"
         assert synced_session.runtime_session_key == "agent:1:session:key-1"
 
@@ -530,7 +530,7 @@ def test_send_message_runtime_identity_sync_swallows_domain_error(caplog):
                 InboundEvent(
                     type="session.runtime.changed",
                     session_id=session.id,
-                    runtime_type="openclaw",
+                    runtime_type="opencode",
                     event_id="evt-1",
                     ts_ms=1000,
                     payload={
@@ -541,7 +541,7 @@ def test_send_message_runtime_identity_sync_swallows_domain_error(caplog):
                 InboundEvent(
                     type="message.completed",
                     session_id=session.id,
-                    runtime_type="openclaw",
+                    runtime_type="opencode",
                     event_id="evt-2",
                     ts_ms=2000,
                     payload={},
@@ -588,7 +588,7 @@ def test_send_message_runtime_identity_sync_does_not_swallow_programming_error()
                 InboundEvent(
                     type="session.runtime.changed",
                     session_id=session.id,
-                    runtime_type="openclaw",
+                    runtime_type="opencode",
                     event_id="evt-1",
                     ts_ms=1000,
                     payload={
@@ -971,8 +971,8 @@ async def test_uninstall_agent_skill_surfaces_runtime_reason() -> None:
     response = httpx.Response(
         400,
         json={
-            "code": "OPENCLAW_SKILL_NOT_REMOVABLE",
-            "message": "openclaw skill cannot be uninstalled",
+            "code": "OPENCODE_SKILL_NOT_REMOVABLE",
+            "message": "opencode skill cannot be uninstalled",
             "request_id": "req-uninstall-1",
             "details": {"reason": "bundled skill cannot be uninstalled"},
         },
@@ -993,8 +993,8 @@ async def test_uninstall_agent_skill_surfaces_runtime_reason() -> None:
             "agent-1",
             "healthcheck",
             source_type="builtin",
-            source_path="/opt/openclaw/skills/healthcheck",
-            runtime_source="openclaw-bundled",
+            source_path="/opt/opencode/skills/healthcheck",
+            runtime_source="opencode-bundled",
         )
 
     assert exc_info.value.code == "AGENT_SKILL_UNINSTALL_FAILED"
@@ -1003,8 +1003,8 @@ async def test_uninstall_agent_skill_surfaces_runtime_reason() -> None:
         "skill_name": "healthcheck",
         "error": "bundled skill cannot be uninstalled",
         "upstream_status_code": 400,
-        "upstream_error_code": "OPENCLAW_SKILL_NOT_REMOVABLE",
-        "upstream_error_message": "openclaw skill cannot be uninstalled",
+        "upstream_error_code": "OPENCODE_SKILL_NOT_REMOVABLE",
+        "upstream_error_message": "opencode skill cannot be uninstalled",
         "upstream_request_id": "req-uninstall-1",
         "upstream_error_details": {"reason": "bundled skill cannot be uninstalled"},
     }
@@ -1023,10 +1023,10 @@ async def test_install_agent_skill_surfaces_runtime_reason() -> None:
     response = httpx.Response(
         500,
         json={
-            "code": "OPENCLAW_SKILLS_INSTALL_FAILED",
-            "message": "openclaw skills install failed",
+            "code": "OPENCODE_SKILLS_INSTALL_FAILED",
+            "message": "opencode skills install failed",
             "request_id": "req-install-1",
-            "details": {"reason": "openclaw command not found"},
+            "details": {"reason": "opencode command not found"},
         },
         request=request,
     )
@@ -1052,12 +1052,12 @@ async def test_install_agent_skill_surfaces_runtime_reason() -> None:
     assert exc_info.value.details == {
         "agent_id": "agent-1",
         "skill_name": "weather",
-        "error": "openclaw command not found",
+        "error": "opencode command not found",
         "upstream_status_code": 500,
-        "upstream_error_code": "OPENCLAW_SKILLS_INSTALL_FAILED",
-        "upstream_error_message": "openclaw skills install failed",
+        "upstream_error_code": "OPENCODE_SKILLS_INSTALL_FAILED",
+        "upstream_error_message": "opencode skills install failed",
         "upstream_request_id": "req-install-1",
-        "upstream_error_details": {"reason": "openclaw command not found"},
+        "upstream_error_details": {"reason": "opencode command not found"},
     }
     adaptor_client.post.assert_awaited_once_with(
         "/agent/skills/install?id=agent-1",
@@ -1355,7 +1355,7 @@ def test_send_message_reads_agent_and_session_once() -> None:
                 InboundEvent(
                     type="message.completed",
                     session_id=session.id,
-                    runtime_type="openclaw",
+                    runtime_type="opencode",
                     event_id="evt-1",
                     ts_ms=1000,
                     payload={},

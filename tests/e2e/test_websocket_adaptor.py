@@ -22,7 +22,7 @@ def test_agent_manager_uses_websocket_client():
     endpoint = AdaptorEndpoint(
         base_url="ws://localhost:8080",
         session_id="test-session",
-        sandbox_type="openclaw",
+        sandbox_type="opencode",
     )
 
     # Verify pool creates WebSocket clients
@@ -43,7 +43,7 @@ def test_websocket_protocol_types_match_spec():
     event: InboundEvent = {
         "type": "message.delta",
         "session_id": "sess-123",
-        "runtime_type": "openclaw",
+        "runtime_type": "opencode",
         "event_id": "evt-456",
         "ts_ms": 1712650000123,
         "payload": {"delta": "hello"},

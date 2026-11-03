@@ -10,7 +10,11 @@ import pytest
 from witty_service.api.services import ServiceContainer
 from witty_service.domain.enums import AgentStatus
 from witty_service.domain.errors import DomainError
-from witty_service.persistence.db import create_session_factory, create_sqlite_engine, init_db
+from witty_service.persistence.db import (
+    create_session_factory,
+    create_sqlite_engine,
+    init_db,
+)
 from witty_service.persistence.repositories import SqliteRepository
 
 
@@ -49,20 +53,22 @@ def _create_session(
         session_id=session_id,
         agent_id=agent_id,
         status="idle",
-        runtime_type="openclaw",
+        runtime_type="opencode",
         runtime_session_key=f"agent:{agent_id}:session:{session_id}",
         remote_runtime_agent_id=f"runtime-agent:{agent_id}",
     )
     if runtime_session_id is not None:
         repo.update_session_runtime_identity(
             session_id=session_id,
-            runtime_type="openclaw",
+            runtime_type="opencode",
             runtime_session_id=runtime_session_id,
             runtime_session_key=f"agent:{agent_id}:session:{session_id}",
         )
 
 
-def _http_status_error(method: str, path: str, status_code: int) -> httpx.HTTPStatusError:
+def _http_status_error(
+    method: str, path: str, status_code: int
+) -> httpx.HTTPStatusError:
     request = httpx.Request(method, f"http://localhost:7396{path}")
     response = httpx.Response(status_code, request=request, text="bad gateway")
     return httpx.HTTPStatusError("upstream failure", request=request, response=response)
@@ -166,8 +172,12 @@ async def test_list_sessions_enriches_managed_sessions_and_warns_for_missing_lin
 ) -> None:
     _create_agent(repo, "agent-1", "Alpha")
     _create_agent(repo, "agent-2", "Beta")
-    _create_session(repo, agent_id="agent-1", session_id="session-1", runtime_session_id="runtime-1")
-    _create_session(repo, agent_id="agent-2", session_id="session-2", runtime_session_id="runtime-2")
+    _create_session(
+        repo, agent_id="agent-1", session_id="session-1", runtime_session_id="runtime-1"
+    )
+    _create_session(
+        repo, agent_id="agent-2", session_id="session-2", runtime_session_id="runtime-2"
+    )
     repo.list_agent_records_by_ids = MagicMock(
         return_value=repo.list_agent_records_by_ids(["agent-1"])
     )
@@ -241,9 +251,13 @@ async def test_get_session_traces_uses_witty_session_runtime_mapping(
     repo: SqliteRepository,
 ) -> None:
     _create_agent(repo, "agent-1", "Alpha")
-    _create_session(repo, agent_id="agent-1", session_id="session-1", runtime_session_id="runtime-1")
+    _create_session(
+        repo, agent_id="agent-1", session_id="session-1", runtime_session_id="runtime-1"
+    )
     insight_http_client = FakeInsightHttpClient()
-    insight_http_client.get_results["/api/sessions/runtime-1/traces"] = [{"trace_id": "trace-1"}]
+    insight_http_client.get_results["/api/sessions/runtime-1/traces"] = [
+        {"trace_id": "trace-1"}
+    ]
     facade = _make_facade(repo, insight_http_client)
 
     result = await facade.get_session_traces("session-1", start_ns=10, end_ns=20)
@@ -275,7 +289,9 @@ async def test_get_session_interruptions_remaps_runtime_session_ids(
     repo: SqliteRepository,
 ) -> None:
     _create_agent(repo, "agent-1", "Alpha")
-    _create_session(repo, agent_id="agent-1", session_id="session-1", runtime_session_id="runtime-1")
+    _create_session(
+        repo, agent_id="agent-1", session_id="session-1", runtime_session_id="runtime-1"
+    )
     insight_http_client = FakeInsightHttpClient()
     insight_http_client.get_results["/api/sessions/runtime-1/interruptions"] = [
         {
@@ -381,7 +397,9 @@ async def test_export_atif_session_rewrites_session_identity(
     repo: SqliteRepository,
 ) -> None:
     _create_agent(repo, "agent-1", "Alpha")
-    _create_session(repo, agent_id="agent-1", session_id="session-1", runtime_session_id="runtime-1")
+    _create_session(
+        repo, agent_id="agent-1", session_id="session-1", runtime_session_id="runtime-1"
+    )
     insight_http_client = FakeInsightHttpClient()
     insight_http_client.get_results["/api/export/atif/session/runtime-1"] = {
         "schema_version": "1.6",
@@ -435,8 +453,8 @@ async def test_get_agent_health_joins_managed_agents_and_orphan_runtimes(
             {
                 "pid": 101,
                 "agent_name": "raw-alpha",
-                "category": "openclaw",
-                "exe_path": "/usr/bin/openclaw",
+                "category": "opencode",
+                "exe_path": "/usr/bin/opencode",
                 "ports": [18080],
                 "status": "healthy",
                 "last_check_time": 111,
@@ -446,8 +464,8 @@ async def test_get_agent_health_joins_managed_agents_and_orphan_runtimes(
             {
                 "pid": 202,
                 "agent_name": "orphan-runtime",
-                "category": "openclaw",
-                "exe_path": "/usr/bin/openclaw",
+                "category": "opencode",
+                "exe_path": "/usr/bin/opencode",
                 "ports": [19999],
                 "status": "offline",
                 "last_check_time": 222,
@@ -483,8 +501,8 @@ async def test_get_agent_health_joins_managed_agents_and_orphan_runtimes(
             "runtime": {
                 "pid": 101,
                 "agent_name": "raw-alpha",
-                "category": "openclaw",
-                "exe_path": "/usr/bin/openclaw",
+                "category": "opencode",
+                "exe_path": "/usr/bin/opencode",
                 "ports": [18080],
                 "status": "healthy",
                 "last_check_time": 111,
@@ -518,8 +536,8 @@ async def test_get_agent_health_joins_managed_agents_and_orphan_runtimes(
         {
             "pid": 202,
             "agent_name": "orphan-runtime",
-            "category": "openclaw",
-            "exe_path": "/usr/bin/openclaw",
+            "category": "opencode",
+            "exe_path": "/usr/bin/opencode",
             "ports": [19999],
             "status": "offline",
             "last_check_time": 222,
@@ -551,8 +569,8 @@ async def test_get_agent_health_prefers_live_runtime_over_stale_offline_matches(
             {
                 "pid": 101,
                 "agent_name": "raw-alpha-live",
-                "category": "openclaw",
-                "exe_path": "/usr/bin/openclaw",
+                "category": "opencode",
+                "exe_path": "/usr/bin/opencode",
                 "ports": [18080],
                 "status": "healthy",
                 "last_check_time": 300,
@@ -562,8 +580,8 @@ async def test_get_agent_health_prefers_live_runtime_over_stale_offline_matches(
             {
                 "pid": 99,
                 "agent_name": "raw-alpha-old",
-                "category": "openclaw",
-                "exe_path": "/usr/bin/openclaw",
+                "category": "opencode",
+                "exe_path": "/usr/bin/opencode",
                 "ports": [18080],
                 "status": "offline",
                 "last_check_time": 200,
@@ -584,8 +602,8 @@ async def test_get_agent_health_prefers_live_runtime_over_stale_offline_matches(
     assert agent["runtime"] == {
         "pid": 101,
         "agent_name": "raw-alpha-live",
-        "category": "openclaw",
-        "exe_path": "/usr/bin/openclaw",
+        "category": "opencode",
+        "exe_path": "/usr/bin/opencode",
         "ports": [18080],
         "status": "healthy",
         "last_check_time": 300,

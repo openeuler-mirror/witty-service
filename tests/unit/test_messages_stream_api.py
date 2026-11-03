@@ -28,7 +28,7 @@ def test_send_message_stream_returns_sse_events(monkeypatch):
             "event": {
                 "type": "message.delta",
                 "session_id": "session-1",
-                "runtime_type": "openclaw",
+                "runtime_type": "opencode",
                 "event_id": "evt-1",
                 "ts_ms": 123,
                 "payload": {"delta": "hello"},
@@ -39,7 +39,7 @@ def test_send_message_stream_returns_sse_events(monkeypatch):
             "event": {
                 "type": "message.completed",
                 "session_id": "session-1",
-                "runtime_type": "openclaw",
+                "runtime_type": "opencode",
                 "event_id": "evt-2",
                 "ts_ms": 456,
                 "payload": {},
@@ -70,7 +70,7 @@ def test_send_message_stream_returns_sse_events(monkeypatch):
             "event": {
                 "type": "message.delta",
                 "session_id": "session-1",
-                "runtime_type": "openclaw",
+                "runtime_type": "opencode",
                 "event_id": "evt-1",
                 "ts_ms": 123,
                 "payload": {"delta": "hello"},
@@ -81,7 +81,7 @@ def test_send_message_stream_returns_sse_events(monkeypatch):
             "event": {
                 "type": "message.completed",
                 "session_id": "session-1",
-                "runtime_type": "openclaw",
+                "runtime_type": "opencode",
                 "event_id": "evt-2",
                 "ts_ms": 456,
                 "payload": {},
@@ -157,7 +157,7 @@ def test_regenerate_message_stream_returns_sse_events(monkeypatch):
             "event": {
                 "type": "message.delta",
                 "session_id": "session-1",
-                "runtime_type": "openclaw",
+                "runtime_type": "opencode",
                 "event_id": "evt-1",
                 "ts_ms": 123,
                 "payload": {"delta": "重生成中"},
@@ -168,7 +168,7 @@ def test_regenerate_message_stream_returns_sse_events(monkeypatch):
             "event": {
                 "type": "message.completed",
                 "session_id": "session-1",
-                "runtime_type": "openclaw",
+                "runtime_type": "opencode",
                 "event_id": "evt-2",
                 "ts_ms": 456,
                 "payload": {"text": "重生成结果"},

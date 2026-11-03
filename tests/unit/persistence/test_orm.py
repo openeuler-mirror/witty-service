@@ -266,7 +266,7 @@ def test_session_orm_runtime_identity_uniqueness(session: Session) -> None:
         SessionORM(
             id="sess-1",
             agent_id="agent-1",
-            runtime_type="openclaw",
+            runtime_type="opencode",
             runtime_session_id="runtime-1",
             runtime_session_key="agent:agent-1:session:sess-1",
         )
@@ -277,7 +277,7 @@ def test_session_orm_runtime_identity_uniqueness(session: Session) -> None:
         SessionORM(
             id="sess-2",
             agent_id="agent-2",
-            runtime_type="openclaw",
+            runtime_type="opencode",
             runtime_session_id="runtime-1",
             runtime_session_key="agent:agent-2:session:sess-2",
         )
@@ -290,7 +290,7 @@ def test_session_orm_runtime_identity_uniqueness(session: Session) -> None:
         SessionORM(
             id="sess-3",
             agent_id="agent-2",
-            runtime_type="openclaw",
+            runtime_type="opencode",
             runtime_session_id="runtime-3",
             runtime_session_key="agent:agent-1:session:sess-1",
         )

@@ -98,7 +98,9 @@ class Env:
         for _ in range(5):
             await asyncio.sleep(0)
 
-    async def emit(self, text: str | None, *, user: str = "u1", event_id: str | None = None) -> None:
+    async def emit(
+        self, text: str | None, *, user: str = "u1", event_id: str | None = None
+    ) -> None:
         self.counter += 1
         await self.adapter.emit(
             InboundMessage(
@@ -127,7 +129,7 @@ def _build(tmp_path: Path, monkeypatch, *, stall_window: float = 30.0) -> Env:
         agent_id=AGENT_ID,
         name="演示 agent",
         sandbox_type="local_process",
-        adapter_type="openclaw",
+        adapter_type="opencode",
         workspace_path=str(tmp_path / "workspace"),
         idle_timeout_seconds=300,
         status=AgentStatus.running,
@@ -262,7 +264,9 @@ async def test_commands_are_handled_in_place(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_access_policy_denial_is_replied_and_not_queued(tmp_path, monkeypatch) -> None:
+async def test_access_policy_denial_is_replied_and_not_queued(
+    tmp_path, monkeypatch
+) -> None:
     env = await _ready(tmp_path, monkeypatch)
     env.repository.upsert_access_policy(
         instance_id=env.instance_id,

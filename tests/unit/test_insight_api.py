@@ -67,7 +67,7 @@ def _trace_detail_payload() -> dict[str, Any]:
         "output_messages": "out",
         "system_instructions": "sys",
         "agent_name": "Alpha",
-        "process_name": "openclaw",
+        "process_name": "opencode",
         "pid": 123,
         "user_query": "hello",
         "event_json": "{}",
@@ -166,8 +166,8 @@ def _agent_health_payload() -> dict[str, Any]:
                 "runtime": {
                     "pid": 101,
                     "agent_name": "raw-alpha",
-                    "category": "openclaw",
-                    "exe_path": "/usr/bin/openclaw",
+                    "category": "opencode",
+                    "exe_path": "/usr/bin/opencode",
                     "ports": [18080],
                     "status": "healthy",
                     "last_check_time": 111,
@@ -181,8 +181,8 @@ def _agent_health_payload() -> dict[str, Any]:
             {
                 "pid": 202,
                 "agent_name": "orphan-runtime",
-                "category": "openclaw",
-                "exe_path": "/usr/bin/openclaw",
+                "category": "opencode",
+                "exe_path": "/usr/bin/opencode",
                 "ports": [19999],
                 "status": "offline",
                 "last_check_time": 222,
@@ -219,7 +219,15 @@ def _atif_conversation_payload() -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    ("request_method", "path", "params", "facade_method", "payload", "expected_args", "expected_kwargs"),
+    (
+        "request_method",
+        "path",
+        "params",
+        "facade_method",
+        "payload",
+        "expected_args",
+        "expected_kwargs",
+    ),
     [
         (
             "get",
