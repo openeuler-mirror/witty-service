@@ -366,6 +366,10 @@ class SandboxBackend(Protocol):
 
     def cleanup(self, handle: SandboxHandle | str, **kwargs: Any) -> None: ...
 
+    def find_handle_by_agent_id(
+        self, *, agent_id: str, workspace_path: str
+    ) -> SandboxHandle | None: ...
+
 
 class SessionStreamRegistry:
     """Broadcast stream events to multiple SSE subscribers per session.
@@ -2494,25 +2498,40 @@ class AgentManager:
             except Exception as exc:
                 cleanup_errors.append(self._cleanup_error("runtime_stop", exc))
 
-        # 2. 清理沙箱（停止并注销执行体）
-        if sandbox_state is not None:
+        # 2. 解析执行体句柄。创建流程是"先起执行体、后落 state"，中途失败会
+        #    留下未登记的执行体；必须按身份回查，否则会删掉仍在被写入的数据。
+        sandbox_handle: SandboxHandle | None = (
+            sandbox_state.handle if sandbox_state is not None else None
+        )
+        if sandbox_state is None:
             try:
-                self._cleanup_sandbox(agent_id)
+                sandbox_handle = self._sandbox_backend.find_handle_by_agent_id(
+                    agent_id=agent_id,
+                    workspace_path=agent.workspace_path,
+                )
+            except Exception as exc:
+                # 查询失败 = 无法确认执行体是否还在，必须阻断后续磁盘删除。
+                cleanup_errors.append(self._cleanup_error("sandbox_lookup", exc))
+
+        # 3. 清理沙箱（停止并注销执行体）
+        if sandbox_handle is not None:
+            try:
+                self._cleanup_sandbox(agent_id, handle=sandbox_handle)
             except Exception as exc:
                 cleanup_errors.append(self._cleanup_error("sandbox_cleanup", exc))
 
-            # 3. 磁盘清理前必须确认执行体真的退出：进程仍运行或状态无法确认时
+            # 4. 磁盘清理前必须确认执行体真的退出：进程仍运行或状态无法确认时
             #    保留目录等待重试，绝不删除可能仍在写入的数据。
             self._collect_error(
                 cleanup_errors,
                 "sandbox_verify",
-                lambda: self._require_sandbox_stopped(sandbox_state.handle),
+                lambda: self._require_sandbox_stopped(sandbox_handle),
             )
 
-        # 4. 前置阶段（停止 / 退出校验）失败即中止，不进入磁盘清理。
+        # 5. 前置阶段（停止 / 退出校验）失败即中止，不进入磁盘清理。
         #    「停止请求失败但执行体已确认退出」属于可继续的场景：沙箱清理与状态校验
         #    已经证明执行体不在了；反之沙箱状态无法确认时任何停止失败都必须阻断。
-        sandbox_verified = sandbox_state is not None and not any(
+        sandbox_verified = sandbox_handle is not None and not any(
             error["stage"] == "sandbox_verify" for error in cleanup_errors
         )
         blocking_errors = [
@@ -2533,7 +2552,7 @@ class AgentManager:
                 },
             )
 
-        # 5. 清理磁盘：workspace 与 runtime 实例目录（opencode-instances）。
+        # 6. 清理磁盘：workspace 与 runtime 实例目录（opencode-instances）。
         # 失败只记 warning 不阻断删除——磁盘残留可事后回收，但 DB 记录必须删掉，
         # 否则 agent 永远删不掉（见 _is_tolerable_cleanup_error）。错误信息里带有
         # 具体路径，便于人工回收。
@@ -2549,7 +2568,7 @@ class AgentManager:
                 cleanup_errors,
             )
 
-        # 6. 不可逆阶段（放在最后）：更新状态并删除 agent 记录。
+        # 7. 不可逆阶段（放在最后）：更新状态并删除 agent 记录。
         try:
             self._repository.update_agent_status(agent_id, AgentStatus.deleted)
             logger.info("[AgentManager] Agent status updated to deleted in database")
@@ -2992,11 +3011,20 @@ class AgentManager:
             return True
         return stat[0] == "Z"
 
-    def _cleanup_sandbox(self, agent_id: str) -> None:
-        """清理沙箱"""
-        sandbox_state = self._repository.get_sandbox_state(agent_id)
-        if sandbox_state is not None:
-            self._sandbox_backend.cleanup(sandbox_state.handle)
+    def _cleanup_sandbox(
+        self, agent_id: str, *, handle: SandboxHandle | None = None
+    ) -> None:
+        """清理沙箱。
+
+        ``handle`` 为空时从 DB 读 sandbox_state（常规路径）；调用方已通过
+        身份回查拿到句柄时直接传入，避免再次读一个不存在的 state。
+        """
+        if handle is None:
+            sandbox_state = self._repository.get_sandbox_state(agent_id)
+            if sandbox_state is None:
+                return
+            handle = sandbox_state.handle
+        self._sandbox_backend.cleanup(handle)
 
     async def _stop_runtime(self, agent_id: str) -> None:
         """停止 witty-agent-server 运行时（delete 路径，wipe=true 完整卸载）"""

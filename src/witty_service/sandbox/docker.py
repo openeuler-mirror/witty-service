@@ -210,6 +210,26 @@ class DockerSandboxBackend(SandboxBackend):
                 return handle
         return None
 
+    def find_handle_by_agent_id(
+        self, *, agent_id: str, workspace_path: str
+    ) -> SandboxHandle | None:
+        """按容器名回查执行体；容器不存在返回 None，查询失败向上抛。
+
+        与内存句柄的回查不同，这里必须区分"确定没有容器"和"查不到状态"：
+        后者由 ``_find_container_for_status`` 抛错，交给删除流程阻断。
+        """
+        handle = self._find_handle_by_agent_id(agent_id)
+        if handle is not None:
+            return handle
+        probe = SandboxHandle(
+            sandbox_id=f"lookup-{agent_id}",
+            agent_id=agent_id,
+            workspace_path=workspace_path,
+        )
+        if self._find_container_for_status(probe) is None:
+            return None
+        return probe
+
     def _try_find_container(self, container_name: str) -> Any | None:
         try:
             container = _with_retry(

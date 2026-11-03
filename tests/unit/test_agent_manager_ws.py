@@ -313,6 +313,16 @@ class FakeSandboxBackend:
     def __init__(self) -> None:
         self.handles: dict[str, Any] = {}
         self.status_result = SandboxStatus.stopped
+        self.lookup_handle: Any = None
+        self.lookup_error: Exception | None = None
+        self.lookup_calls: list[tuple[str, str]] = []
+        self.cleaned_handles: list[Any] = []
+
+    def find_handle_by_agent_id(self, *, agent_id: str, workspace_path: str) -> Any:
+        self.lookup_calls.append((agent_id, workspace_path))
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        return self.lookup_handle
 
     def start(
         self,
@@ -357,7 +367,7 @@ class FakeSandboxBackend:
         return {"id": f"session-{handle.sandbox_id}"}
 
     def cleanup(self, handle: Any, **_: Any) -> None:
-        pass
+        self.cleaned_handles.append(handle)
 
     def status(self, handle: Any, **_: Any) -> Any:
         return self.status_result
@@ -1279,7 +1289,7 @@ def test_delete_agent_tolerates_missing_sandbox_handle() -> None:
         async def _noop_stop(agent_id: str) -> None:
             return None
 
-        def _gone(agent_id: str) -> None:
+        def _gone(agent_id: str, **_: Any) -> None:
             # 真实来源：sandbox backend 的 _resolve_handle 在句柄丢失时抛
             # sandbox_not_found()（code=SANDBOX_NOT_FOUND）；判定按码而非文案。
             raise sandbox_not_found(
@@ -1292,6 +1302,94 @@ def test_delete_agent_tolerates_missing_sandbox_handle() -> None:
         await manager.delete_agent(agent.id)
 
         assert repository.get_agent(agent.id) is None
+
+    asyncio.run(run())
+
+
+def _bootstrap_agent_without_sandbox_state(repository: FakeRepository) -> Any:
+    """模拟创建中途（status=creating）失败：执行体可能已起，但 state 还没落库。"""
+    return repository.create_agent_with_id(
+        agent_id="agent-1",
+        name="demo",
+        description="",
+        sandbox_type="local_process",
+        adapter_type="http",
+        workspace_path="/tmp/agent-1/workspace",
+        idle_timeout_seconds=300,
+        status=AgentStatus.creating,
+        mcp_server_list=[],
+    )
+
+
+def test_delete_agent_cleans_up_unregistered_sandbox_found_by_identity() -> None:
+    """没有 sandbox_state 但执行体仍存在：必须按身份回查并清理后再删数据。"""
+
+    async def run() -> None:
+        manager, _request, repository, store, backend, _pool = _make_ws_manager()
+        agent = _bootstrap_agent_without_sandbox_state(repository)
+        handle = SandboxHandle(
+            sandbox_id=f"sandbox-{agent.id}",
+            agent_id=agent.id,
+            workspace_path=agent.workspace_path,
+            metadata={},
+        )
+        backend.lookup_handle = handle
+        backend.status_result = SandboxStatus.stopped
+
+        await manager.delete_agent(agent.id)
+
+        assert backend.lookup_calls == [(agent.id, agent.workspace_path)]
+        assert backend.cleaned_handles == [handle]
+        assert store.cleaned_workspaces == [agent.id]
+        assert repository.get_agent(agent.id) is None
+
+    asyncio.run(run())
+
+
+def test_delete_agent_keeps_data_when_unregistered_sandbox_still_running() -> None:
+    """回查到执行体仍在运行：禁止删盘，否则会破坏仍在写入的数据。"""
+
+    async def run() -> None:
+        manager, _request, repository, store, backend, _pool = _make_ws_manager()
+        agent = _bootstrap_agent_without_sandbox_state(repository)
+        handle = SandboxHandle(
+            sandbox_id=f"sandbox-{agent.id}",
+            agent_id=agent.id,
+            workspace_path=agent.workspace_path,
+            metadata={},
+        )
+        backend.lookup_handle = handle
+        backend.status_result = SandboxStatus.running
+
+        with pytest.raises(DomainError) as exc_info:
+            await manager.delete_agent(agent.id)
+
+        assert exc_info.value.code == AGENT_DELETE_FAILED
+        stages = {error["stage"] for error in exc_info.value.details["cleanup_errors"]}
+        assert "sandbox_verify" in stages
+        assert backend.cleaned_handles == [handle]
+        assert store.cleaned_workspaces == []
+        assert repository.get_agent(agent.id) is not None
+
+    asyncio.run(run())
+
+
+def test_delete_agent_blocks_disk_cleanup_when_sandbox_lookup_fails() -> None:
+    """回查本身失败 = 无法确认执行体是否存在，必须阻断删盘并保留记录。"""
+
+    async def run() -> None:
+        manager, _request, repository, store, backend, _pool = _make_ws_manager()
+        agent = _bootstrap_agent_without_sandbox_state(repository)
+        backend.lookup_error = RuntimeError("docker daemon unreachable")
+
+        with pytest.raises(DomainError) as exc_info:
+            await manager.delete_agent(agent.id)
+
+        assert exc_info.value.code == AGENT_DELETE_FAILED
+        stages = {error["stage"] for error in exc_info.value.details["cleanup_errors"]}
+        assert "sandbox_lookup" in stages
+        assert store.cleaned_workspaces == []
+        assert repository.get_agent(agent.id) is not None
 
     asyncio.run(run())
 

@@ -85,6 +85,30 @@ def test_cleanup_refuses_symlink_escaping_the_workspace_root(tmp_path) -> None:
     assert (outside / "keep.txt").exists()
 
 
+def test_cleanup_removes_symlink_without_following_it(tmp_path) -> None:
+    """目录被替换成软链时只删链接本身（rmtree 对软链会抛 OSError）。"""
+    target = tmp_path / "agent-workspaces" / "shared-target"
+    target.mkdir(parents=True)
+    (target / "keep.txt").write_text("keep", encoding="utf-8")
+
+    agent_wrapper = tmp_path / "agent-workspaces" / "agent-1"
+    agent_wrapper.symlink_to(target, target_is_directory=True)
+
+    instance_target = tmp_path / "opencode-instances" / "shared-target"
+    instance_target.mkdir(parents=True)
+    instance_link = tmp_path / "opencode-instances" / "agent-1"
+    instance_link.symlink_to(instance_target, target_is_directory=True)
+
+    store = WorkspaceStore(base_dir=tmp_path)
+    store.cleanup_workspace("agent-1")
+    store.cleanup_runtime_instances("agent-1")
+
+    assert not agent_wrapper.is_symlink()
+    assert not instance_link.is_symlink()
+    assert (target / "keep.txt").exists()
+    assert instance_target.is_dir()
+
+
 def test_cleanup_rejects_invalid_agent_ids(tmp_path) -> None:
     store = WorkspaceStore(base_dir=tmp_path)
 

@@ -46,8 +46,7 @@ class WorkspaceStore:
         self._ensure_managed_target(
             agent_root, allowed_parent=self.base_dir / "agent-workspaces"
         )
-        if agent_root.is_symlink() or agent_root.exists():
-            shutil.rmtree(agent_root)
+        self._remove_tree_or_link(agent_root)
 
     def cleanup_runtime_instances(self, agent_id: str) -> None:
         """删除 runtime 实例隔离目录（opencode-instances）。
@@ -61,8 +60,19 @@ class WorkspaceStore:
             self._ensure_managed_target(
                 instance_dir, allowed_parent=self.base_dir / name
             )
-            if instance_dir.is_symlink() or instance_dir.exists():
-                shutil.rmtree(instance_dir)
+            self._remove_tree_or_link(instance_dir)
+
+    @staticmethod
+    def _remove_tree_or_link(target: Path) -> None:
+        """删除目录或符号链接本身。
+
+        ``shutil.rmtree`` 对符号链接会抛 ``OSError``（它不是普通目录），因此
+        软链必须先 ``unlink``，只删除链接而不是它指向的内容。
+        """
+        if target.is_symlink():
+            target.unlink()
+        elif target.exists():
+            shutil.rmtree(target)
 
     def _ensure_managed_target(self, target: Path, *, allowed_parent: Path) -> None:
         """校验删除目标确实位于本分支管理目录之内。
