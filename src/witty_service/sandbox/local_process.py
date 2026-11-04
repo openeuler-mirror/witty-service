@@ -26,16 +26,22 @@ from witty_service.sandbox.base import (
 from witty_service.sandbox.ports import find_free_port, port_is_bindable
 
 
-def read_proc_stat(pid: int) -> tuple[str, str, str] | None:
+def read_proc_stat(pid: int, *, strict: bool = False) -> tuple[str, str, str] | None:
     """读取 ``/proc/<pid>/stat``，返回 ``(状态字符, 进程组 id, 启动时间)``。
 
-    进程不存在 / 无权限时返回 ``None``。启动时间（proc(5) 第 22 个字段）在同一台
-    机器上不会重复，因此它是判断 *pid 是否被复用* 的唯一可靠依据——只凭 pid 存活
-    就认领/清理一个进程，迟早会杀掉别人的进程。
+    进程不存在时返回 ``None``。启动时间（proc(5) 第 22 个字段）在同一台机器上
+    不会重复，因此它是判断 *pid 是否被复用* 的唯一可靠依据——只凭 pid 存活就
+    认领/清理一个进程，迟早会杀掉别人的进程。
+
+    ``strict=True`` 时无权限等读取失败会抛错（进程已退出除外）。
     """
     try:
         raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
     except OSError:
+        if strict:
+            raise
         return None
     # comm（第 2 个字段）可能包含空格和括号，按最后一个右括号切分才能稳定取到后续字段。
     _, sep, rest = raw.rpartition(")")
@@ -49,11 +55,19 @@ def read_proc_stat(pid: int) -> tuple[str, str, str] | None:
     return fields[0], fields[2], fields[19]
 
 
-def read_proc_cmdline(pid: int) -> list[str] | None:
-    """读取 ``/proc/<pid>/cmdline``；进程不存在 / 无权限时返回 ``None``。"""
+def read_proc_cmdline(pid: int, *, strict: bool = False) -> list[str] | None:
+    """读取 ``/proc/<pid>/cmdline``；进程不存在时返回 ``None``。
+
+    ``strict=True`` 时无权限等读取失败会抛错，供删除前的归属回查区分「不存在」
+    与「读不到」。
+    """
     try:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except FileNotFoundError:
+        return None
     except OSError:
+        if strict:
+            raise
         return None
     if not raw:  # 僵尸进程的 cmdline 为空
         return None
@@ -303,12 +317,12 @@ class LocalProcessSandboxBackend(SandboxBackend):
             if not entry.isdigit():
                 continue
             pid = int(entry)
-            cmdline = read_proc_cmdline(pid)
+            cmdline = read_proc_cmdline(pid, strict=True)
             if not cmdline or "witty_agent_server.app:create_app" not in cmdline:
                 continue
-            if not self._cwd_under(pid, root):
+            if not self._cwd_under(pid, root, strict=True):
                 continue
-            stat = read_proc_stat(pid)
+            stat = read_proc_stat(pid, strict=True)
             if stat is None:
                 continue
             _state, pgrp, start_time = stat
@@ -674,11 +688,18 @@ class LocalProcessSandboxBackend(SandboxBackend):
         return result
 
     @staticmethod
-    def _cwd_under(pid: int, root: Path) -> bool:
-        """进程的 cwd 是否位于 *root* 目录树之内（判归属的关键依据）。"""
+    def _cwd_under(pid: int, root: Path, *, strict: bool = False) -> bool:
+        """进程的 cwd 是否位于 *root* 目录树之内（判归属的关键依据）。
+
+        ``strict=True`` 时读不到 cwd 会抛错（进程已退出除外）。
+        """
         try:
             cwd = Path(os.readlink(f"/proc/{pid}/cwd")).resolve()
+        except FileNotFoundError:
+            return False
         except OSError:
+            if strict:
+                raise
             return False
         return cwd == root or root in cwd.parents
 

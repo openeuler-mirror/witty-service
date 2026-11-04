@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -354,17 +355,17 @@ def test_find_handle_by_agent_id_scans_proc_and_confirms_absence(
     )
     monkeypatch.setattr(
         "witty_service.sandbox.local_process.read_proc_cmdline",
-        lambda pid: (
+        lambda pid, *, strict=False: (
             ["python", "witty_agent_server.app:create_app"] if pid == 1234 else None
         ),
     )
     monkeypatch.setattr(
         "witty_service.sandbox.local_process.read_proc_stat",
-        lambda pid: ("S", "1234", "start-1") if pid == 1234 else None,
+        lambda pid, *, strict=False: ("S", "1234", "start-1") if pid == 1234 else None,
     )
     monkeypatch.setattr(
         "witty_service.sandbox.local_process.LocalProcessSandboxBackend._cwd_under",
-        staticmethod(lambda pid, root: True),
+        staticmethod(lambda pid, root, *, strict=False: True),
     )
 
     handle = backend.find_handle_by_agent_id(
@@ -380,7 +381,8 @@ def test_find_handle_by_agent_id_scans_proc_and_confirms_absence(
     }
 
     monkeypatch.setattr(
-        "witty_service.sandbox.local_process.read_proc_cmdline", lambda pid: None
+        "witty_service.sandbox.local_process.read_proc_cmdline",
+        lambda pid, *, strict=False: None,
     )
     assert (
         backend.find_handle_by_agent_id(
@@ -405,6 +407,70 @@ def test_find_handle_by_agent_id_raises_when_proc_scan_fails(
         backend.find_handle_by_agent_id(
             agent_id="agent-1", workspace_path=str(tmp_path)
         )
+
+
+def test_find_handle_by_agent_id_raises_when_cmdline_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """进程存在但读不到 cmdline 时是 unknown，不能当成已确证不存在。"""
+    backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path))
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.os.listdir", lambda _: ["1234"]
+    )
+
+    def _denied(_: Path) -> bytes:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "read_bytes", _denied)
+
+    with pytest.raises(PermissionError):
+        backend.find_handle_by_agent_id(
+            agent_id="agent-1", workspace_path=str(tmp_path)
+        )
+
+
+def test_find_handle_by_agent_id_raises_when_cwd_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """进程存在但读不到 cwd 时是 unknown，不能当成已确证不存在。"""
+    backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path))
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.os.listdir", lambda _: ["1234"]
+    )
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.read_proc_cmdline",
+        lambda pid, *, strict=False: ["python", "witty_agent_server.app:create_app"],
+    )
+
+    def _denied(_: str) -> str:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr("witty_service.sandbox.local_process.os.readlink", _denied)
+
+    with pytest.raises(PermissionError):
+        backend.find_handle_by_agent_id(
+            agent_id="agent-1", workspace_path=str(tmp_path)
+        )
+
+
+def test_cwd_under_only_accepts_workspace_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """归属过滤只接受 workspace 目录树内的 cwd。"""
+    workspace = tmp_path / "agent" / "workspace"
+    outside = tmp_path / "other"
+    workspace.mkdir(parents=True)
+    outside.mkdir()
+
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.os.readlink", lambda _: str(outside)
+    )
+    assert not LocalProcessSandboxBackend._cwd_under(1234, workspace)
+
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.os.readlink", lambda _: str(workspace)
+    )
+    assert LocalProcessSandboxBackend._cwd_under(1234, workspace)
 
 
 def test_status_probes_pid_for_untracked_handle(
