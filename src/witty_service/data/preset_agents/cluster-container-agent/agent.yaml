@@ -68,3 +68,14 @@ mcp:
     env:
       OPENEULER_TOKEN: "${OPENEULER_TOKEN}"
     enabled: true
+
+# 英文界面文案：随 GET /agent-templates 的 Accept-Language 返回。
+i18n:
+  en-US:
+    description: "Cluster and container platform: Kubernetes/HA orchestration, container and VM lifecycle, service process management"
+    prompt:
+      default: "Run a cluster health inspection across four layers: nodes, workloads, storage, and networking. List abnormal objects and give remediation suggestions with impact assessment."
+      examples:
+        - "Run a cluster health inspection: check node status, workload replicas, and cluster networking, list abnormal objects, and give remediation suggestions."
+        - "A Pod in my Kubernetes cluster keeps restarting with CrashLoopBackOff. Help me determine whether the image, configuration, or resource limits are causing it."
+        - "I need to take a node offline for maintenance. Give me safe drain steps, a capacity assessment, and a rollback plan."

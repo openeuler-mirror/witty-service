@@ -104,6 +104,8 @@ def list_catalog() -> list[ChannelCatalogItemResponse]:
 
     这一条不在框架文档 §9 的清单里，但前端无法在不硬编码渠道标识符的前提下渲染
     渠道选择与手填表单，因此按"取值域只有一处出处"的原则由服务端给出。
+
+    只透传适配器声明，不做本地化；前端按稳定的 ``channel`` / ``field.name`` 自行翻译。
     """
     from witty_service.channels.provisioning.drivers import DRIVER_REGISTRY
 

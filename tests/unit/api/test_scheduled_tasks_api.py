@@ -6,9 +6,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from apscheduler.triggers.cron import CronTrigger
+from fastapi import FastAPI, Response
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from witty_service.api import scheduled_tasks as tasks_api
+from witty_service.api.auth import require_bearer_auth
 from witty_service.api.scheduled_task_schemas import (
     CreateScheduledTaskRequest,
     RunScheduledTaskRequest,
@@ -439,13 +442,13 @@ def test_get_task_run_rejects_run_from_other_task() -> None:
 
 def test_list_templates_returns_builtins() -> None:
     services = _services()
-    from witty_service.application.scheduled_task_service import BUILTIN_TEMPLATES
+    from witty_service.domain.scheduled_task_template import BUILTIN_TEMPLATES
 
     services.scheduled_task_service.list_templates.return_value = list(
         BUILTIN_TEMPLATES
     )
 
-    resp = tasks_api.list_templates(services=services)
+    resp = tasks_api.list_templates(Response(), services=services, locale="zh-CN")
 
     keys = [template.key for template in resp]
     assert len(resp) == 8
@@ -479,3 +482,24 @@ def test_conversation_summary_carries_scheduled_task_id() -> None:
     )
 
     assert summary.scheduled_task_id == "task-1"
+
+
+def test_templates_endpoint_negotiates_locale_and_sets_headers() -> None:
+    services = _services()
+    services.scheduled_task_service.list_templates.side_effect = lambda locale: []
+
+    app = FastAPI()
+    app.state.services = services
+    app.include_router(tasks_api.router)
+    app.dependency_overrides[require_bearer_auth] = lambda: None
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/scheduled-tasks/templates",
+            headers={"Accept-Language": "en-US,en;q=0.9"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["Content-Language"] == "en-US"
+    assert "Accept-Language" in response.headers["Vary"]
+    services.scheduled_task_service.list_templates.assert_called_once_with("en-US")

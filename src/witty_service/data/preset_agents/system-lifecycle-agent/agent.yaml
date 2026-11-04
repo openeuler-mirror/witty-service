@@ -70,3 +70,14 @@ mcp:
     env:
       OPENEULER_TOKEN: "${OPENEULER_TOKEN}"
     enabled: true
+
+# 英文界面文案：随 GET /agent-templates 的 Accept-Language 返回。
+i18n:
+  en-US:
+    description: "System resources and lifecycle: inspections, storage/network/kernel, upgrade rollback, backup and recovery"
+    prompt:
+      default: "Run a system inspection for me: resource utilization, storage, networking, and kernel parameters. Provide a risk list and follow-up recommendations."
+      examples:
+        - "Check disk and LVM usage, assess whether expansion is needed, and provide expansion steps with snapshots and a rollback plan."
+        - "Troubleshoot this machine's network issues: connectivity, bond/VLAN, and firewall rules. Identify the cause of disconnections."
+        - "I need to upgrade packages and the kernel on this batch of machines. Provide a complete backup, baseline capture, execute, verify, and rollback plan."

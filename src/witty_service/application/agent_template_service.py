@@ -388,6 +388,7 @@ class AgentTemplateService:
         name: str,
         model_id: str | None,
         sandbox_type: str = "local_process",
+        locale: str = "zh-CN",
     ) -> AgentCreateResult:
         """一键实例化包内预置模板（一模板一实例）。
 
@@ -435,7 +436,7 @@ class AgentTemplateService:
         agent_manager = self._agent_manager_factory(sandbox_type)
         create_request = AgentCreateRequest(
             name=template.name,
-            description=template.description,
+            description=template.description_for(locale),
             sandbox_type=sandbox_type,
             adapter_type=adapter_type,
             idle_timeout_seconds=_default_idle_timeout(),

@@ -47,3 +47,14 @@ skills:
   # 对照组：不随基线声明编排/采集/分析/调优链路上的任何 skill。
   - name: opentunex-bench-result-fetch
     source: skills/benchmark/opentunex-bench-result-fetch
+
+# 英文界面文案：随 GET /agent-templates 的 Accept-Language 返回。
+i18n:
+  en-US:
+    description: "OS-level performance tuning control group: only two skills (remote execution and benchmark result retrieval); the agent handles collection, analysis, and tuning itself"
+    prompt:
+      default: "Connect via SSH as root to the redis application on xxx.xxx.xxx.xxx, analyze performance bottlenecks, and produce a tuning recommendation report. Write important documents locally first, then sync them to the remote host."
+      examples:
+        - "Analyze the target machine's performance bottlenecks and produce a tuning recommendation report, executable tuning script, and rollback script."
+        - "Fetch the latest benchmark results CSV, compare before-and-after metrics, and determine whether the tuning actually took effect."
+        - "For a machine with a clear I/O bottleneck, give me a tuning plan and a complete rollback script, but do not execute any changes yet."

@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Request, Response, status
 
 from witty_service.api.auth import require_bearer_auth
 from witty_service.api.schemas import (
@@ -19,6 +19,7 @@ from witty_service.api.schemas import (
 )
 from witty_service.api.services import ServiceContainer
 from witty_service.application.agent_template_service import AgentTemplateService
+from witty_service.i18n import get_locale, normalize_locale, set_locale_headers
 from witty_service.persistence.repositories import AgentRecord
 
 router = APIRouter(
@@ -41,9 +42,16 @@ def _template_service(services: ServiceContainer) -> AgentTemplateService:
 
 @router.get("", response_model=list[AgentTemplateInfoResponse])
 def list_agent_templates(
+    response: Response,
     services: ServiceContainer = Depends(get_services),
+    locale: str = Depends(get_locale),
 ) -> list[AgentTemplateInfoResponse]:
-    """列出包内预置模板（只读，零网络、零 DB）。"""
+    """列出包内预置模板（只读，零网络、零 DB）。
+
+    展示文案按 ``Accept-Language`` 返回；未提供英文翻译时回退中文。
+    ``Vary`` 让缓存按语言分别存储，``Content-Language`` 声明实际返回的语言。
+    """
+    set_locale_headers(response, locale)
     service = _template_service(services)
     result: list[AgentTemplateInfoResponse] = []
     for template in AgentTemplateService.scan_preset_templates():
@@ -57,14 +65,14 @@ def list_agent_templates(
         result.append(
             AgentTemplateInfoResponse(
                 name=template.name,
-                description=template.description,
+                description=template.description_for(locale),
                 version=template.version,
                 skill_count=len(template.skills),
                 skills=[skill.name for skill in template.skills],
                 mcp_count=len(template.mcp),
                 mcp_servers=[server.name for server in template.mcp],
-                default_prompt=template.prompt.default,
-                default_prompts=list(template.prompt.examples),
+                default_prompt=template.default_prompt_for(locale),
+                default_prompts=template.default_prompts_for(locale),
                 source_commit=source_commit,
             )
         )
@@ -81,12 +89,18 @@ async def instantiate_agent_template(
     payload: InstantiateAgentTemplateRequest,
     services: ServiceContainer = Depends(get_services),
 ) -> AgentResponse:
-    """一键实例化预置模板（一模板一实例，同名 agent 已存在返回 409）。"""
+    """一键实例化预置模板（一模板一实例，同名 agent 已存在返回 409）。
+
+    ``description`` 按请求里显式给出的 ``locale`` 写入，作为"创建时的语言快照"，
+    之后可在界面上自行编辑；不隐式跟随 ``Accept-Language``，避免带缓存的客户端
+    在不知情的情况下写出与预期不符的文案。未给出时回退中文。
+    """
     service = _template_service(services)
     result = await service.instantiate_preset_template(
         name=name,
         model_id=payload.model_id,
         sandbox_type=payload.sandbox_type or "local_process",
+        locale=normalize_locale(payload.locale),
     )
     return _to_agent_response(
         result.agent,
