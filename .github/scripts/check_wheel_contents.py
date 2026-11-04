@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import re
 import sys
 import zipfile
 from collections.abc import Iterable
@@ -53,7 +54,7 @@ FORBIDDEN_GLOBS = (
     "witty_service/sandbox/e2b.py",
 )
 
-# 已从 pyproject.toml 删除的运行时依赖，规范化后比较（小写、-/_ 等价）。
+# 已从 pyproject.toml 删除的运行时依赖，规范化后比较（小写、-/_/. 等价）。
 FORBIDDEN_DISTRIBUTIONS = (
     "deepseek-harness",
     "deepseek-harness-sdk",
@@ -62,19 +63,21 @@ FORBIDDEN_DISTRIBUTIONS = (
 )
 
 # 上述 e2b 依赖的实际发行名包含后缀，例如 e2b-code-interpreter。
-FORBIDDEN_DISTRIBUTION_PREFIXES = ("e2b-", "e2b_")
+FORBIDDEN_DISTRIBUTION_PREFIXES = ("e2b-",)
 
 
 def _normalize_distribution(name: str) -> str:
-    """按 PEP 503 规范化分发包名，便于比较 ``-``/``_`` 差异。"""
-    return name.strip().lower().replace("_", "-")
+    """按 PEP 503 规范化分发包名，``-``/``_``/``.`` 等价且连续分隔符折叠。"""
+    return re.sub(r"[-_.]+", "-", name.strip().lower())
 
 
 def _iter_module_names(names: Iterable[str]) -> Iterable[str]:
     for name in names:
         if not name.endswith(".py"):
             continue
-        if name.startswith(PACKAGE_ROOTS):
+        # 按顶层路径段判断，避免 ``witty_service-0.1.0.data/`` 等
+        # 同前缀目录被误认为受管包。
+        if name.split("/", 1)[0] in PACKAGE_ROOTS:
             yield name
 
 

@@ -123,7 +123,10 @@ def test_checker_keeps_openclaw_skill_sync_module(tmp_path: Path) -> None:
     [
         "deepseek-harness-sdk==0.2.1rc2",
         "deepseek_harness>=0.2",
+        "deepseek.harness.sdk>=0.2",
+        "deepseek__harness--sdk",
         "e2b-code-interpreter>=1.0",
+        "e2b.code.interpreter>=1.0",
         "openclaw",
     ],
 )
@@ -138,6 +141,22 @@ def test_checker_rejects_deleted_dependencies(tmp_path: Path, requirement: str) 
     problems = checker.check_wheel(wheel, src)
 
     assert any("已删除依赖" in problem for problem in problems)
+
+
+def test_checker_ignores_non_package_directories(tmp_path: Path) -> None:
+    # wheel 的 .data 目录与同前缀的模块目录不属于受管包，不得据此阻断发布。
+    src = _make_src(tmp_path, [])
+    wheel = _write_wheel(
+        tmp_path / "data.whl",
+        modules=[
+            "witty_service-0.1.0.data/scripts/tool.py",
+            "witty_service_extra/main.py",
+            "witty_agent_server_backup/main.py",
+        ],
+        metadata_requires=[],
+    )
+
+    assert checker.check_wheel(wheel, src) == []
 
 
 def test_checker_requires_metadata(tmp_path: Path) -> None:

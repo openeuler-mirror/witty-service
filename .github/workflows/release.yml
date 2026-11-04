@@ -152,7 +152,7 @@ jobs:
 
   docker-push:
     name: Build & Push Docker to GHCR
-    needs: release
+    needs: [release, build]
     if: inputs.dry_run != 'true' && needs.release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
