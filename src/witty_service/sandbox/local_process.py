@@ -276,6 +276,12 @@ class LocalProcessSandboxBackend(SandboxBackend):
         sandbox_handle = self._resolve_handle(handle)
         process = self._processes.get(sandbox_handle.sandbox_id)
         if process is None:
+            # 重启后登记表为空，按 pid/start_time 探活，避免误判为 stopped。
+            pid = sandbox_handle.metadata.get("pid")
+            if isinstance(pid, int) and self._pid_is_our_agent_server(
+                pid, sandbox_handle.metadata
+            ):
+                return SandboxStatus.running
             return SandboxStatus.stopped
         if process.poll() is None:
             return SandboxStatus.running
@@ -284,15 +290,38 @@ class LocalProcessSandboxBackend(SandboxBackend):
     def find_handle_by_agent_id(
         self, *, agent_id: str, workspace_path: str
     ) -> SandboxHandle | None:
-        """按 agent_id 回查本进程登记的执行体。
+        """按 agent_id 回查执行体：None 表示已确证不存在，扫描失败必须抛错。
 
-        本地子进程的父进程就是 witty-service：服务重启后残留进程由启动时的
-        孤儿收敛负责，因此内存登记表就是本进程内唯一的身份来源。
+        登记表未命中时扫描 /proc（cmdline 为 witty-agent-server 且 cwd 属于该 workspace）。
         """
-        del workspace_path
         for handle in self._handles.values():
             if handle.agent_id == agent_id:
                 return handle
+
+        root = Path(workspace_path).expanduser().resolve()
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            cmdline = read_proc_cmdline(pid)
+            if not cmdline or "witty_agent_server.app:create_app" not in cmdline:
+                continue
+            if not self._cwd_under(pid, root):
+                continue
+            stat = read_proc_stat(pid)
+            if stat is None:
+                continue
+            _state, pgrp, start_time = stat
+            return SandboxHandle(
+                sandbox_id=f"untracked-{pid}",
+                agent_id=agent_id,
+                workspace_path=workspace_path,
+                metadata={
+                    "pid": pid,
+                    "pgid": int(pgrp) if pgrp.isdigit() else pid,
+                    "process_start_time": start_time,
+                },
+            )
         return None
 
     def endpoint(self, handle: SandboxHandle | str, **kwargs: Any) -> AdapterEndpoint:

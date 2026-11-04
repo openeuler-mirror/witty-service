@@ -88,11 +88,15 @@ class SandboxBackend(ABC):
     ) -> SandboxHandle | None:
         """按 agent 身份回查仍在运行的执行体句柄。
 
-        DB 里没有 sandbox_state（创建中途）时用于删除前的安全检查。默认返回
-        None：只有能可靠证明身份的 backend 才覆盖，查不到即视为不存在。
+        DB 里没有 sandbox_state（创建中途）时用于删除前的安全检查。默认实现无法
+        证明执行体不存在，直接抛错（unknown），由调用方阻断删除；能可靠回查的
+        backend 必须覆盖本方法。
+
+        返回 None 只表示已确证不存在；查询失败必须抛错。
         """
-        del agent_id, workspace_path
-        return None
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot resolve sandbox handle by agent identity"
+        )
 
 
 def sandbox_not_supported(*, sandbox_type: str, operation: str) -> DomainError:

@@ -1336,8 +1336,16 @@ def test_delete_agent_cleans_up_unregistered_sandbox_found_by_identity() -> None
         backend.lookup_handle = handle
         backend.status_result = SandboxStatus.stopped
 
+        stop_calls: list[str] = []
+
+        async def _record_stop(agent_id: str) -> None:
+            stop_calls.append(agent_id)
+
+        manager._stop_runtime = _record_stop  # type: ignore[method-assign]
+
         await manager.delete_agent(agent.id)
 
+        assert stop_calls == []
         assert backend.lookup_calls == [(agent.id, agent.workspace_path)]
         assert backend.cleaned_handles == [handle]
         assert store.cleaned_workspaces == [agent.id]
@@ -1388,6 +1396,82 @@ def test_delete_agent_blocks_disk_cleanup_when_sandbox_lookup_fails() -> None:
         assert exc_info.value.code == AGENT_DELETE_FAILED
         stages = {error["stage"] for error in exc_info.value.details["cleanup_errors"]}
         assert "sandbox_lookup" in stages
+        assert store.cleaned_workspaces == []
+        assert repository.get_agent(agent.id) is not None
+
+    asyncio.run(run())
+
+
+def test_delete_agent_skips_stop_when_no_state_and_no_sandbox() -> None:
+    """没有 state 且回查不到执行体：没有可停止的 runtime，直接删除，不产生 stop 错误。"""
+
+    async def run() -> None:
+        manager, _request, repository, store, backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+        repository.sandbox_states.pop(agent.id)
+
+        stop_calls: list[str] = []
+
+        async def _record_stop(agent_id: str) -> None:
+            stop_calls.append(agent_id)
+
+        manager._stop_runtime = _record_stop  # type: ignore[method-assign]
+
+        await manager.delete_agent(agent.id)
+
+        assert stop_calls == []
+        assert backend.lookup_calls == [(agent.id, agent.workspace_path)]
+        assert backend.lookup_handle is None
+        assert store.cleaned_workspaces == [agent.id]
+        assert repository.get_agent(agent.id) is None
+
+    asyncio.run(run())
+
+
+def test_delete_agent_tolerates_sandbox_not_found_from_verify() -> None:
+    """退出校验抛 SANDBOX_NOT_FOUND 视为已清理，可放行 runtime_stop 的残留错误。"""
+
+    async def run() -> None:
+        manager, _request, repository, store, backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+
+        async def _boom_stop(agent_id: str) -> None:
+            raise RuntimeError("runtime stop timeout")
+
+        def _gone(handle: SandboxHandle) -> SandboxStatus:
+            raise sandbox_not_found(
+                sandbox_type="local_process", sandbox_id=handle.sandbox_id
+            )
+
+        manager._stop_runtime = _boom_stop  # type: ignore[method-assign]
+        backend.status = _gone  # type: ignore[method-assign]
+
+        await manager.delete_agent(agent.id)
+
+        assert store.cleaned_workspaces == [agent.id]
+        assert repository.get_agent(agent.id) is None
+
+    asyncio.run(run())
+
+
+def test_delete_agent_reports_corrupt_sandbox_state_as_delete_failure() -> None:
+    """state 存在但 payload 缺字段：KeyError 必须收口为 AGENT_DELETE_FAILED。"""
+
+    async def run() -> None:
+        manager, _request, repository, store, _backend, _pool = _make_ws_manager()
+        agent = _bootstrap_agent_without_sandbox_state(repository)
+        repository.save_sandbox_state(
+            agent.id,
+            sandbox_payload_json={},
+            adapter_base_url="http://adapter.local",
+        )
+
+        with pytest.raises(DomainError) as exc_info:
+            await manager.delete_agent(agent.id)
+
+        assert exc_info.value.code == AGENT_DELETE_FAILED
+        stages = {error["stage"] for error in exc_info.value.details["cleanup_errors"]}
+        assert "sandbox_state" in stages
         assert store.cleaned_workspaces == []
         assert repository.get_agent(agent.id) is not None
 
