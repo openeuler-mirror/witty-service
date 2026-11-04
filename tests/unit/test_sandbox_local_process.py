@@ -3,11 +3,12 @@ from __future__ import annotations
 import io
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from witty_service.domain.errors import DomainError
-from witty_service.sandbox.base import SandboxStatus
+from witty_service.sandbox.base import SandboxHandle, SandboxStatus
 from witty_service.sandbox.factory import create_sandbox_backend
 from witty_service.sandbox.local_process import LocalProcessSandboxBackend
 
@@ -248,7 +249,9 @@ def test_local_runtime_start_raises_when_process_exits_immediately(
         "witty_service.sandbox.local_process.subprocess.Popen",
         lambda command, **kwargs: fake_process,
     )
-    monkeypatch.setattr("witty_service.sandbox.local_process.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.time.sleep", lambda _: None
+    )
     # 让 _read_stderr_log 返回模拟的 stderr 内容
     monkeypatch.setattr(
         "witty_service.sandbox.local_process.LocalProcessSandboxBackend._read_stderr_log",
@@ -297,7 +300,9 @@ def test_local_runtime_unknown_handle_raises_runtime_not_found(
     assert exc_info.value.details["sandbox_id"] == "missing-runtime"
 
 
-def test_local_runtime_start_raises_when_app_dir_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_local_runtime_start_raises_when_app_dir_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # 通过 monkeypatch _resolve_agent_server_app_dir 让它抛错(模拟自动检测失败)
     from witty_service.sandbox.base import sandbox_start_failed
 
@@ -322,15 +327,168 @@ def test_local_runtime_start_raises_when_app_dir_missing(monkeypatch: pytest.Mon
     assert "WITTY_AGENT_SERVER_APP_DIR" in exc_info.value.message
 
 
-def test_local_runtime_factory_returns_backend(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_local_runtime_factory_returns_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     app_dir = tmp_path / "agent-server"
     app_dir.mkdir()
     monkeypatch.setenv("WITTY_AGENT_SERVER_APP_DIR", str(app_dir))
     # 重置 settings 单例缓存,使 factory 重新读取环境变量
     import witty_service.config as _config
+
     monkeypatch.setattr(_config, "_settings", None)
 
     backend = create_sandbox_backend("local_process")
 
     assert isinstance(backend, LocalProcessSandboxBackend)
     assert backend.agent_server_app_dir == str(app_dir.resolve())
+
+
+def test_find_handle_by_agent_id_scans_proc_and_confirms_absence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """登记表为空时按 /proc 归属回查；扫描成功但无匹配才算已确证不存在。"""
+    backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path))
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.os.listdir",
+        lambda _: ["1234", "self"],
+    )
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.read_proc_cmdline",
+        lambda pid, *, strict=False: (
+            ["python", "witty_agent_server.app:create_app"] if pid == 1234 else None
+        ),
+    )
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.read_proc_stat",
+        lambda pid, *, strict=False: ("S", "1234", "start-1") if pid == 1234 else None,
+    )
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.LocalProcessSandboxBackend._cwd_under",
+        staticmethod(lambda pid, root, *, strict=False: True),
+    )
+
+    handle = backend.find_handle_by_agent_id(
+        agent_id="agent-1", workspace_path=str(tmp_path)
+    )
+
+    assert handle is not None
+    assert handle.sandbox_id == "untracked-1234"
+    assert handle.metadata == {
+        "pid": 1234,
+        "pgid": 1234,
+        "process_start_time": "start-1",
+    }
+
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.read_proc_cmdline",
+        lambda pid, *, strict=False: None,
+    )
+    assert (
+        backend.find_handle_by_agent_id(
+            agent_id="agent-1", workspace_path=str(tmp_path)
+        )
+        is None
+    )
+
+
+def test_find_handle_by_agent_id_raises_when_proc_scan_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """扫描失败必须抛错，不能把「看不到进程」当成「没有进程」。"""
+    backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path))
+
+    def _boom(_: str) -> list[str]:
+        raise OSError("proc unavailable")
+
+    monkeypatch.setattr("witty_service.sandbox.local_process.os.listdir", _boom)
+
+    with pytest.raises(OSError):
+        backend.find_handle_by_agent_id(
+            agent_id="agent-1", workspace_path=str(tmp_path)
+        )
+
+
+def test_find_handle_by_agent_id_raises_when_cmdline_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """进程存在但读不到 cmdline 时是 unknown，不能当成已确证不存在。"""
+    backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path))
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.os.listdir", lambda _: ["1234"]
+    )
+
+    def _denied(_: Path) -> bytes:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "read_bytes", _denied)
+
+    with pytest.raises(PermissionError):
+        backend.find_handle_by_agent_id(
+            agent_id="agent-1", workspace_path=str(tmp_path)
+        )
+
+
+def test_find_handle_by_agent_id_raises_when_cwd_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """进程存在但读不到 cwd 时是 unknown，不能当成已确证不存在。"""
+    backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path))
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.os.listdir", lambda _: ["1234"]
+    )
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.read_proc_cmdline",
+        lambda pid, *, strict=False: ["python", "witty_agent_server.app:create_app"],
+    )
+
+    def _denied(_: str) -> str:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr("witty_service.sandbox.local_process.os.readlink", _denied)
+
+    with pytest.raises(PermissionError):
+        backend.find_handle_by_agent_id(
+            agent_id="agent-1", workspace_path=str(tmp_path)
+        )
+
+
+def test_cwd_under_only_accepts_workspace_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """归属过滤只接受 workspace 目录树内的 cwd。"""
+    workspace = tmp_path / "agent" / "workspace"
+    outside = tmp_path / "other"
+    workspace.mkdir(parents=True)
+    outside.mkdir()
+
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.os.readlink", lambda _: str(outside)
+    )
+    assert not LocalProcessSandboxBackend._cwd_under(1234, workspace)
+
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.os.readlink", lambda _: str(workspace)
+    )
+    assert LocalProcessSandboxBackend._cwd_under(1234, workspace)
+
+
+def test_status_probes_pid_for_untracked_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """未登记句柄不能直接返回 stopped：按 pid / start_time 探活。"""
+    backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path))
+    handle = SandboxHandle(
+        sandbox_id="untracked-1234",
+        agent_id="agent-1",
+        workspace_path=str(tmp_path),
+        metadata={"pid": 1234, "process_start_time": "start-1"},
+    )
+
+    monkeypatch.setattr(backend, "_pid_is_our_agent_server", lambda pid, metadata: True)
+    assert backend.status(handle) == SandboxStatus.running
+
+    monkeypatch.setattr(
+        backend, "_pid_is_our_agent_server", lambda pid, metadata: False
+    )
+    assert backend.status(handle) == SandboxStatus.stopped

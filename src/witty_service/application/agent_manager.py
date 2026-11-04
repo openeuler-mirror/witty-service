@@ -364,11 +364,19 @@ class SandboxBackend(Protocol):
 
     def endpoint(self, handle: SandboxHandle | str, **kwargs: Any) -> Any: ...
 
+    def status(self, handle: SandboxHandle | str, **kwargs: Any) -> SandboxStatus: ...
+
     def cleanup(self, handle: SandboxHandle | str, **kwargs: Any) -> None: ...
 
     def find_handle_by_agent_id(
         self, *, agent_id: str, workspace_path: str
-    ) -> SandboxHandle | None: ...
+    ) -> SandboxHandle | None:
+        """按 agent 身份回查仍在运行的执行体句柄。
+
+        返回 handle 表示存在；None 表示已确证不存在；回查失败必须抛错，
+        调用方会把异常视为 unknown 并阻断磁盘删除。
+        """
+        ...
 
 
 class SessionStreamRegistry:
@@ -2490,49 +2498,53 @@ class AgentManager:
 
         cleanup_errors: list[dict[str, str]] = []
 
-        # 1. 停止运行时。失败本身不立刻中止：可能只是进程已经退出、HTTP 拒绝。
-        #    是否允许继续由第 3 步的执行体状态校验决定。
-        if agent.status in {AgentStatus.running, AgentStatus.paused}:
+        # 无 state 时按身份回查：创建中途失败会留下未登记的执行体。
+        sandbox_handle: SandboxHandle | None = None
+        if sandbox_state is not None:
+            # 脏 payload 的 KeyError 也归入统一错误汇总。
             try:
-                await self._stop_runtime(agent_id)
+                sandbox_handle = sandbox_state.handle
             except Exception as exc:
-                cleanup_errors.append(self._cleanup_error("runtime_stop", exc))
-
-        # 2. 解析执行体句柄。创建流程是"先起执行体、后落 state"，中途失败会
-        #    留下未登记的执行体；必须按身份回查，否则会删掉仍在被写入的数据。
-        sandbox_handle: SandboxHandle | None = (
-            sandbox_state.handle if sandbox_state is not None else None
-        )
-        if sandbox_state is None:
+                cleanup_errors.append(self._cleanup_error("sandbox_state", exc))
+        else:
             try:
                 sandbox_handle = self._sandbox_backend.find_handle_by_agent_id(
                     agent_id=agent_id,
                     workspace_path=agent.workspace_path,
                 )
             except Exception as exc:
-                # 查询失败 = 无法确认执行体是否还在，必须阻断后续磁盘删除。
                 cleanup_errors.append(self._cleanup_error("sandbox_lookup", exc))
 
-        # 3. 清理沙箱（停止并注销执行体）
+        # 没有 state 就没有可 stop 的 runtime；未登记执行体交给 cleanup 回收。
+        if sandbox_state is not None and agent.status in {
+            AgentStatus.running,
+            AgentStatus.paused,
+        }:
+            try:
+                await self._stop_runtime(agent_id)
+            except Exception as exc:
+                cleanup_errors.append(self._cleanup_error("runtime_stop", exc))
+
+        # 清理沙箱（停止并注销执行体）
         if sandbox_handle is not None:
             try:
                 self._cleanup_sandbox(agent_id, handle=sandbox_handle)
             except Exception as exc:
                 cleanup_errors.append(self._cleanup_error("sandbox_cleanup", exc))
 
-            # 4. 磁盘清理前必须确认执行体真的退出：进程仍运行或状态无法确认时
-            #    保留目录等待重试，绝不删除可能仍在写入的数据。
+            # 磁盘清理前确认执行体已退出；仍在运行或状态未知时保留目录。
             self._collect_error(
                 cleanup_errors,
                 "sandbox_verify",
                 lambda: self._require_sandbox_stopped(sandbox_handle),
             )
 
-        # 5. 前置阶段（停止 / 退出校验）失败即中止，不进入磁盘清理。
-        #    「停止请求失败但执行体已确认退出」属于可继续的场景：沙箱清理与状态校验
-        #    已经证明执行体不在了；反之沙箱状态无法确认时任何停止失败都必须阻断。
-        sandbox_verified = sandbox_handle is not None and not any(
-            error["stage"] == "sandbox_verify" for error in cleanup_errors
+        # 停止失败仅在句柄退出校验通过时放行；解析 / 回查失败视为 unknown。
+        verify_errors = [
+            error for error in cleanup_errors if error["stage"] == "sandbox_verify"
+        ]
+        sandbox_verified = sandbox_handle is not None and all(
+            self._is_tolerable_cleanup_error(error) for error in verify_errors
         )
         blocking_errors = [
             error
