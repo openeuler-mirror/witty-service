@@ -80,3 +80,14 @@ skills:
     source: skills/benchmark/app-benchmark-deployment
   - name: opentunex-bench-result-fetch
     source: skills/benchmark/opentunex-bench-result-fetch
+
+# 英文界面文案：随 GET /agent-templates 的 Accept-Language 返回。
+i18n:
+  en-US:
+    description: "OS-level performance bottleneck analysis and tuning (top-down + scenario-based)"
+    prompt:
+      default: "Connect via SSH as root to xxx.xxx.xxx.xxx, analyze performance bottlenecks for redis, and produce a tuning recommendation report. Write important documents locally first, then sync them to the remote host."
+      examples:
+        - "Connect to the target machine via SSH as root, perform an OS-level performance bottleneck analysis for redis, and produce a tuning recommendation report."
+        - "This machine has abnormal CPU usage. Use a top-down approach to determine whether the bottleneck is scheduling, locks, I/O, memory, or networking."
+        - "Run a kernel parameter tuning task following the backup, execute, verify, and rollback process, with quantitative verification and a rollback plan."

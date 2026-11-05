@@ -18,10 +18,9 @@ from witty_service.api.scheduled_task_schemas import (
     UpdateScheduledTaskRequest,
 )
 from witty_service.api.services import ServiceContainer
-from witty_service.application.scheduled_task_service import (
-    ScheduledTaskService,
-    ScheduledTaskTemplate,
-)
+from witty_service.application.scheduled_task_service import ScheduledTaskService
+from witty_service.domain.scheduled_task_template import ScheduledTaskTemplate
+from witty_service.i18n import get_locale, set_locale_headers
 from witty_service.persistence.repositories import (
     ScheduledTaskRecord,
     ScheduledTaskRunRecord,
@@ -48,9 +47,13 @@ def _task_service(services: ServiceContainer) -> ScheduledTaskService:
     response_model=list[ScheduledTaskTemplateResponse],
 )
 def list_templates(
+    response: Response,
     services: ServiceContainer = Depends(get_services),
+    locale: str = Depends(get_locale),
 ) -> list[ScheduledTaskTemplateResponse]:
-    templates = _task_service(services).list_templates()
+    """列出内置模板；name/description/content 按 Accept-Language 本地化。"""
+    set_locale_headers(response, locale)
+    templates = _task_service(services).list_templates(locale)
     return [_to_template_response(template) for template in templates]
 
 

@@ -52,12 +52,14 @@ class CreateAgentHubRequest(BaseModel):
 class InstantiateAgentTemplateRequest(BaseModel):
     """一键实例化预置模板的请求。
 
-    只有 model_id 与 sandbox_type 可配；adapter_type 恒为 opencode，
+    model_id / sandbox_type / locale 可配；adapter_type 恒为 opencode，
     name 恒为模板名（一模板一实例，同名 agent 已存在返回 409）。
+    ``locale`` 决定写入 agent 的 description 语言，是创建瞬间的语言快照。
     """
 
     model_id: str | None = None
     sandbox_type: str | None = None
+    locale: str | None = None
 
 
 class AgentTemplateInfoResponse(BaseModel):

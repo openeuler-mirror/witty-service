@@ -26,6 +26,11 @@ from apscheduler.triggers.interval import IntervalTrigger  # type: ignore
 from witty_service.config import SchedulerSettings, get_settings
 from witty_service.domain.enums import AgentStatus, ScheduledTaskRunStatus
 from witty_service.domain.errors import DomainError
+from witty_service.domain.scheduled_task_template import (
+    BUILTIN_TEMPLATES,
+    ScheduledTaskTemplate,
+    localize_scheduled_template,
+)
 from witty_service.persistence.orm import MessageStatus
 from witty_service.persistence.repositories import (
     AgentRecord,
@@ -55,21 +60,6 @@ def utcnow() -> datetime:
 
 
 @dataclass(frozen=True)
-class ScheduledTaskTemplate:
-    """内置定时任务模板，仅作新建参考。"""
-
-    key: str
-    name: str
-    description: str
-    schedule_type: str
-    cron_expr: str | None
-    interval_seconds: int | None
-    timezone: str
-    content: str
-    workspace_folder: str | None
-
-
-@dataclass(frozen=True)
 class TaskListOverview:
     """列表聚合查询结果：任务 + 最近 N 条 run + 会话摘要 + 在飞任务集合。"""
 
@@ -77,147 +67,6 @@ class TaskListOverview:
     runs_by_task: dict[str, list[ScheduledTaskRunRecord]]
     sessions_by_task: dict[str, list[ScheduledTaskSessionRecord]]
     running_task_ids: set[str]
-
-
-BUILTIN_TEMPLATES: tuple[ScheduledTaskTemplate, ...] = (
-    ScheduledTaskTemplate(
-        key="unattended_ops_inspection",
-        name="无人值守系统巡检",
-        description=(
-            "每天定时按资源、磁盘、进程、服务、日志、安全分层巡检 Linux 主机，"
-            "输出带状态分级的巡检日报到工作区；巡检项、阈值、触发时间与执行智能体均可按需调整。"
-        ),
-        schedule_type="cron",
-        cron_expr="0 7 * * *",
-        interval_seconds=None,
-        timezone="Asia/Shanghai",
-        content=(
-            "请以 Linux 系统管理员的身份执行一次无人值守巡检，按分层巡检项采集现状、"
-            "识别异常，并输出巡检日报：\n"
-            "1. 系统概况：`hostname`、`uname -r`、`uptime -p`、`timedatectl`（校时是否正常）；\n"
-            "2. CPU 与负载：`nproc`、`uptime`、`top -bn1 | head -15`，"
-            "比较 load average 与 CPU 核数，关注负载是否长期高于核数；\n"
-            "3. 内存与交换：`free -h`，关注 available 内存与 swap 占用；\n"
-            "4. 磁盘与文件系统：`df -h`（空间）、`df -i`（inode），"
-            "并检查是否有分区被只读挂载；\n"
-            "5. 内核与硬件异常：`dmesg -T | tail -100`，检索 OOM-killer、I/O error、MCE 等关键字；\n"
-            "6. 进程健康：`ps -eo pid,ppid,stat,pcpu,pmem,comm --sort=-pcpu | head -10`"
-            "（内存占用同理按 `-pmem` 排序），检查是否有僵尸进程（STAT 含 Z）或异常高占用进程；\n"
-            "7. 服务与端口：`systemctl --failed` 查看失败单元，`ss -tulnp` 核对关键服务端口是否在监听；\n"
-            "8. 日志与安全：`journalctl -p err --since '24 hours ago' --no-pager` 汇总错误日志，"
-            "`lastb | head` 与 `last` 查看近期登录失败与异常来源。\n"
-            "巡检一律使用只读命令，不改变系统状态；命令或工具缺失时跳过并注明。\n"
-            "对每项给出状态判定：❌异常 / ⚠️警告 / ✅正常。参考基线（可按本机环境调整）："
-            "负载持续高于核数、内存/inode/磁盘使用率 > 80%、存在失败服务或只读挂载、"
-            "出现 OOM/I/O 错误或错误日志，均判为异常或警告。\n"
-            "最后生成 Markdown 巡检日报写入工作区 `ops-reports` 目录（文件名含日期），"
-            "结构包含：巡检概况（主机/内核/时间/时区）、分项结果与状态、异常明细、"
-            "按优先级排序的处理建议；若目录中已有上次报告，补充关键指标的环比变化。\n"
-            "可按实际环境增删巡检项、调整阈值、触发时间（间隔 / 每天 / 每周 / 自定义 cron）"
-            "与时区，并更换执行智能体。"
-        ),
-        workspace_folder="ops-reports",
-    ),
-    ScheduledTaskTemplate(
-        key="daily_ai_news",
-        name="每日 AI 新闻推送",
-        description="每天汇总 AI 领域的重要动态，侧重 AI coding 与具身智能进展。",
-        schedule_type="cron",
-        cron_expr="0 9 * * *",
-        interval_seconds=None,
-        timezone="Asia/Shanghai",
-        content=(
-            "请推送今天的 AI 领域重要动态：关注 AI coding 与具身智能方向，"
-            "筛选 3-5 条值得关注的信息，逐条给出要点摘要与来源链接，"
-            "并说明每条动态对我的实际影响。"
-        ),
-        workspace_folder=None,
-    ),
-    ScheduledTaskTemplate(
-        key="daily_repo_digest",
-        name="每日代码仓库巡检",
-        description="工作日上午汇总我参与仓库的 PR 与 Issue 进展，输出待关注事项。",
-        schedule_type="cron",
-        cron_expr="0 10 * * mon-fri",
-        interval_seconds=None,
-        timezone="Asia/Shanghai",
-        content=(
-            "请巡检我参与的代码仓库：汇总最近的 Pull Request 与 Issue 进展，"
-            "输出关键变更、待处理事项以及需要我关注的风险点，按优先级排序。"
-        ),
-        workspace_folder=None,
-    ),
-    ScheduledTaskTemplate(
-        key="weekly_work_report",
-        name="每周工作周报",
-        description="每周五汇总本周工作进展与下周计划，输出结构化周报。",
-        schedule_type="cron",
-        cron_expr="0 18 * * fri",
-        interval_seconds=None,
-        timezone="Asia/Shanghai",
-        content=(
-            "请生成本周工作周报：汇总本周已完成事项、进行中事项、遇到的问题，"
-            "并给出下周计划，按「完成 / 进行中 / 风险 / 下周计划」结构化输出。"
-        ),
-        workspace_folder=None,
-    ),
-    ScheduledTaskTemplate(
-        key="weekly_dependency_check",
-        name="每周依赖与安全更新检查",
-        description="每周一检查项目依赖的版本更新与已知安全问题，给出升级建议。",
-        schedule_type="cron",
-        cron_expr="0 9 * * mon",
-        interval_seconds=None,
-        timezone="Asia/Shanghai",
-        content=(
-            "请检查项目主要依赖：列出有更新的依赖版本与已知安全问题，"
-            "给出升级建议以及每项升级的影响面评估，标注需要优先处理的高风险项。"
-        ),
-        workspace_folder=None,
-    ),
-    ScheduledTaskTemplate(
-        key="interview_prep_reminder",
-        name="面试准备提醒",
-        description="工作日上午每 2 小时提醒复习大模型与编程知识，并生成模拟面试题。",
-        schedule_type="cron",
-        cron_expr="0 9-18/2 * * mon-fri",
-        interval_seconds=None,
-        timezone="Asia/Shanghai",
-        content=(
-            "请提醒我进行面试准备：复习大模型与编程的高频考点，"
-            "并生成 3 个模拟面试问题，附上回答要点与常见追问。"
-        ),
-        workspace_folder=None,
-    ),
-    ScheduledTaskTemplate(
-        key="meeting_prep_reminder",
-        name="会议前准备",
-        description="每个工作日早上提醒整理当天会议的议题、目标与待确认问题。",
-        schedule_type="cron",
-        cron_expr="30 9 * * mon-fri",
-        interval_seconds=None,
-        timezone="Asia/Shanghai",
-        content=(
-            "请帮我做会议前准备：整理今天会议的议题、目标、待确认问题和关键结论，"
-            "输出一份便于会前快速过一遍的准备清单。"
-        ),
-        workspace_folder=None,
-    ),
-    ScheduledTaskTemplate(
-        key="focus_break_reminder",
-        name="专注与休息提醒",
-        description="每 2 小时提醒暂存当前进度、短暂休息并明确下一步行动。",
-        schedule_type="interval",
-        cron_expr=None,
-        interval_seconds=7200,
-        timezone="Asia/Shanghai",
-        content=(
-            "请提醒我暂存当前任务进度、起身短暂休息，并帮我列出返回工作后的"
-            "下一步行动，让我能快速回到专注状态。"
-        ),
-        workspace_folder=None,
-    ),
-)
 
 
 AgentManagerFactory = Callable[[str], Any]
@@ -316,8 +165,11 @@ class ScheduledTaskService:
     # 模板
     # ------------------------------------------------------------------
 
-    def list_templates(self) -> list[ScheduledTaskTemplate]:
-        return list(BUILTIN_TEMPLATES)
+    def list_templates(self, locale: str = "zh-CN") -> list[ScheduledTaskTemplate]:
+        return [
+            localize_scheduled_template(template, locale)
+            for template in BUILTIN_TEMPLATES
+        ]
 
     # ------------------------------------------------------------------
     # 任务 CRUD 与启停

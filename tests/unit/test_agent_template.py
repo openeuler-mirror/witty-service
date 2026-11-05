@@ -200,9 +200,7 @@ def test_install_template_skills_records_inline_skill(tmp_path, monkeypatch) -> 
         skill_source=None,
         skill_md_url=None,
     )
-    assert (
-        Path(tmp_path / "ws") / "skills" / ".inline_skills" / "helper.md"
-    ).exists()
+    assert (Path(tmp_path / "ws") / "skills" / ".inline_skills" / "helper.md").exists()
 
 
 def _write_opencode_config(workspace: Path, config: dict) -> None:
@@ -254,7 +252,7 @@ mcp:
         "- name: broken\n  type: local",
         "- name: broken\n  type: remote",
         "- name: broken\n  type: stdio\n  command: [npx]",
-        "- name: \"\"\n  command: [npx]",
+        '- name: ""\n  command: [npx]',
     ],
 )
 def test_agent_template_rejects_invalid_mcp_server(mcp_block: str) -> None:
@@ -457,7 +455,9 @@ async def test_enable_template_mcp_runtime_posts_to_adaptor(
 
 
 @pytest.mark.asyncio
-async def test_enable_template_mcp_runtime_swallows_adaptor_failure(monkeypatch) -> None:
+async def test_enable_template_mcp_runtime_swallows_adaptor_failure(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(
         "witty_service.application.agent_template_service.AdaptorHttpClient",
         _FakeAdaptorClient,
@@ -476,8 +476,6 @@ async def test_enable_template_mcp_runtime_swallows_adaptor_failure(monkeypatch)
     await service._enable_template_mcp_runtime(agent=_agent_record(), template=template)
 
     assert _FakeAdaptorClient.calls[0][0] == "/agent/mcp/enable"
-
-
 
 
 def test_agent_template_parses_default_prompt(tmp_path) -> None:
@@ -505,7 +503,9 @@ def test_agent_template_default_prompt_is_optional() -> None:
 
 
 @pytest.mark.asyncio
-async def test_apply_preset_post_config_does_not_inject_default_prompt(tmp_path) -> None:
+async def test_apply_preset_post_config_does_not_inject_default_prompt(
+    tmp_path,
+) -> None:
     """默认提问只走 API 给前端，后端不得改写 AGENTS.md。"""
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -527,8 +527,13 @@ async def test_apply_preset_post_config_does_not_inject_default_prompt(tmp_path)
     )
 
     assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == "# System\n你是 X"
+
+
 def test_preset_templates_declare_mcp_and_skills() -> None:
-    templates = {template.name: template for template in AgentTemplateService.scan_preset_templates()}
+    templates = {
+        template.name: template
+        for template in AgentTemplateService.scan_preset_templates()
+    }
     expected = {
         "log-diagnosis-agent",
         "security-cve-agent",
@@ -546,3 +551,16 @@ def test_preset_templates_declare_mcp_and_skills() -> None:
         assert all(skill.source for skill in template.skills)
         assert template.prompt.system
         assert template.prompt.default
+
+
+def test_preset_templates_ship_complete_english_translations() -> None:
+    templates = AgentTemplateService.scan_preset_templates()
+    assert templates
+
+    for template in templates:
+        translation = template.i18n.get("en-US")
+        assert translation is not None, template.name
+        assert translation.description, template.name
+        assert translation.prompt is not None, template.name
+        assert translation.prompt.default, template.name
+        assert translation.prompt.examples, template.name

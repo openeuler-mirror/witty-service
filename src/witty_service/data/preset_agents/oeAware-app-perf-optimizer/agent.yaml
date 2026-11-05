@@ -45,3 +45,14 @@ skills:
     source: skills/auxiliary/opentunex-benchmark-execution
   - name: app-benchmark-deployment
     source: skills/benchmark/app-benchmark-deployment
+
+# 英文界面文案：随 GET /agent-templates 的 Accept-Language 返回。
+i18n:
+  en-US:
+    description: "Application-layer performance bottleneck analysis and optimization (cross-layer attribution is handled by switching to the OS agent)"
+    prompt:
+      default: "Help me locate an application-layer performance bottleneck: first review symptoms and metrics, then pinpoint the specific stage, and finally give an optimization plan and load-test verification method."
+      examples:
+        - "Help me locate an application-layer performance bottleneck in a Java application: first review symptoms and metrics, then pinpoint the specific stage."
+        - "My web service slows down under high concurrency. Analyze CPU, memory, lock contention, and networking, and give an optimization plan."
+        - "I have completed application-layer optimizations. Design a load test to verify the effect and provide quantitative comparison metrics."

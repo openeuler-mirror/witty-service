@@ -27,6 +27,24 @@ class AgentTemplatePrompt(BaseModel):
     examples: list[str] = Field(default_factory=list)
 
 
+class AgentTemplatePromptTranslation(BaseModel):
+    """非默认语言的 prompt 展示文案（默认提问 / 示例提问）。"""
+
+    default: str | None = None
+    examples: list[str] = Field(default_factory=list)
+
+
+class AgentTemplateTranslation(BaseModel):
+    """单个语言的模板展示文案。
+
+    只承载面向用户展示的字段；``system`` 等模型指令不参与翻译，
+    避免语言切换改变 agent 的行为。
+    """
+
+    description: str | None = None
+    prompt: AgentTemplatePromptTranslation | None = None
+
+
 class AgentTemplateSkill(BaseModel):
     """SKILL 配置项"""
 
@@ -116,6 +134,8 @@ class AgentTemplate(BaseModel):
     author: str | None = None
     license: str | None = None
     tags: list[str] = Field(default_factory=list)
+    # 按语言覆盖展示文案：``en-US`` 等 key 与前端 Accept-Language 对齐。
+    i18n: dict[str, AgentTemplateTranslation] = Field(default_factory=dict)
     prompt: AgentTemplatePrompt = Field(default_factory=AgentTemplatePrompt)
     skills: list[AgentTemplateSkill] = Field(default_factory=list)
     skill_source: AgentTemplateSkillSource | None = None
@@ -145,6 +165,35 @@ class AgentTemplate(BaseModel):
             )
 
         return cls(**data)
+
+    def description_for(self, locale: str) -> str:
+        """按语言取模板描述；缺少对应翻译时回退默认 description。"""
+        translation = self.i18n.get(locale)
+        if translation is not None and translation.description:
+            return translation.description
+        return self.description
+
+    def default_prompt_for(self, locale: str) -> str | None:
+        """按语言取默认提问；缺少对应翻译时回退默认值。"""
+        translation = self.i18n.get(locale)
+        if (
+            translation is not None
+            and translation.prompt is not None
+            and translation.prompt.default
+        ):
+            return translation.prompt.default
+        return self.prompt.default
+
+    def default_prompts_for(self, locale: str) -> list[str]:
+        """按语言取示例提问；缺少对应翻译时回退默认列表。"""
+        translation = self.i18n.get(locale)
+        if (
+            translation is not None
+            and translation.prompt is not None
+            and translation.prompt.examples
+        ):
+            return list(translation.prompt.examples)
+        return list(self.prompt.examples)
 
     def resolve_skill_source_path(
         self, skill: AgentTemplateSkill, template_dir: Path

@@ -72,3 +72,14 @@ mcp:
     env:
       OPENEULER_TOKEN: "${OPENEULER_TOKEN}"
     enabled: true
+
+# 英文界面文案：随 GET /agent-templates 的 Accept-Language 返回。
+i18n:
+  en-US:
+    description: "Logs and fault diagnosis: bare-metal/container log attribution, anomaly detection, crash and OOM localization"
+    prompt:
+      default: "Help me investigate recent anomalies on this machine: first check errors in journalctl and dmesg, then summarize anomalous logs, and finally give a root-cause conclusion and remediation commands."
+      examples:
+        - "Summarize this machine's anomalous logs from the past day, group them by error pattern, and list the most frequent issues."
+        - "This machine had an OOM event last night. Help me identify the process and cause from dmesg and journalctl."
+        - "Design a log rotation plan that prevents logs from filling the disk while meeting audit compliance requirements."
