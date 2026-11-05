@@ -1537,12 +1537,17 @@ class AgentManager:
                     )
                 except httpx.HTTPStatusError as exc:
                     failed_count += 1
+                    status = exc.response.status_code
+                    # 409 是身份冲突/歧义（真实数据问题），单独带响应体记录，
+                    # 否则会和 5xx、网络故障混在同一条 warning 里无法区分。
+                    detail = exc.response.text[:200] if status == 409 else ""
                     logger.warning(
                         f"{prefix}Failed to restore historical session during %s: "
-                        f"session_id=%s status=%s",
+                        f"session_id=%s status=%s detail=%s",
                         log_context,
                         session.id,
-                        exc.response.status_code,
+                        status,
+                        detail,
                     )
                     continue
                 restored_count += 1

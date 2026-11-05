@@ -181,6 +181,36 @@ def test_upsert_session_persists_and_preserves_runtime_session_id(
     )
 
 
+def test_upsert_session_maps_duplicate_runtime_identity_to_conflict(
+    repo: SqliteRepository,
+) -> None:
+    """绕过应用层预检查时，数据库唯一约束仍必须收敛为 409。
+
+    应用层检查与写入之间存在并发窗口，仓储层不能把 IntegrityError 冒成 500。
+    """
+    _create_agent(repo)
+    repo.upsert_session(
+        session_id="session-1",
+        agent_id="agent-1",
+        status="idle",
+        runtime_type="opencode",
+        runtime_session_id="runtime-session-1",
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        repo.upsert_session(
+            session_id="session-2",
+            agent_id="agent-1",
+            status="idle",
+            runtime_type="opencode",
+            runtime_session_id="runtime-session-1",
+        )
+
+    assert exc_info.value.code == "RUNTIME_SESSION_ID_CONFLICT"
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.details["existing_session_id"] == "session-1"
+
+
 def test_sandbox_state_round_trip_and_handle(repo: SqliteRepository) -> None:
     _create_agent(repo)
 

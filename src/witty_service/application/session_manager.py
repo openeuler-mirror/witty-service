@@ -395,7 +395,10 @@ class SessionManager:
     ) -> None:
         """同一个 Runtime Session ID 只能映射到一条 Witty Session。
 
-        P1-A 阶段不加唯一索引（需要先确认存量数据），先在写入路径做冲突检查：
+        sessions 表已有 ``uq_sessions_runtime_type_session_id`` 唯一约束（见
+        20260622_01 迁移）作为最终防线；这里的预检查负责在写入前给出带
+        ``existing_session_id`` 的精确 409，避免正常请求依赖 IntegrityError 的
+        异常路径。并发窗口由仓储层把 IntegrityError 收敛为同一个 409。
         Runtime 侧身份被两条会话共享时，消息、历史与删除都会打到错误的对象上。
         """
         if not isinstance(runtime_type, str) or not runtime_type:
