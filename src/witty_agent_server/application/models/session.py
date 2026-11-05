@@ -1,6 +1,7 @@
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
 from witty_agent_server.runtimes.runtime_base import RuntimeType
 
 
@@ -21,3 +22,4 @@ class SessionCreateRequest(BaseModel):
 
     session_id: str | None = None
     restore: bool = False
+    runtime_session_id: str | None = None

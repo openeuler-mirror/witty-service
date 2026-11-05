@@ -11,10 +11,6 @@ from witty_agent_server.application.services.session import (
     SessionService,
     SessionServiceError,
 )
-from witty_agent_server.application.services.session_identity_store import (
-    RuntimeSessionIdentity,
-    SessionIdentityStore,
-)
 from witty_agent_server.application.services.session_state_sync_service import (
     SessionState,
     SessionStateSyncService,
@@ -52,13 +48,11 @@ class SessionWSOrchestrator:
         *,
         session_service: SessionService,
         agent_service: AgentService,
-        identity_store: SessionIdentityStore | None = None,
         state_sync_service: SessionStateSyncService | None = None,
         runtime_type: RuntimeType,
     ) -> None:
         self._session_service = session_service
         self._agent_service = agent_service
-        self._identity_store = identity_store or SessionIdentityStore()
         self._state_sync_service = state_sync_service or SessionStateSyncService()
         self._runtime_type = runtime_type
 
@@ -70,12 +64,7 @@ class SessionWSOrchestrator:
         session = self._require_session(agent_id=agent_id, session_id=session_id)
         runtime_type = cast(RuntimeType, session.get("runtime_type"))
         runtime = self._require_runtime(runtime_type)
-        identity = self._resolve_identity(
-            agent_id=agent_id,
-            session_id=session_id,
-            session=session,
-            runtime_type=runtime_type,
-        )
+        runtime_session_key = self._resolve_runtime_session_key(session=session)
 
         self._append_session_event(
             agent_id=agent_id,
@@ -96,14 +85,13 @@ class SessionWSOrchestrator:
 
         turn_failed = False
         try:
-            for event in self._run_runtime_turn(runtime, identity, message):
+            for event in self._run_runtime_turn(runtime, runtime_session_key, message):
                 if event.get("type") == "stream.error":
                     turn_failed = True
                 yield from self._handle_runtime_event(
                     agent_id=agent_id,
                     session_id=session_id,
                     runtime_type=runtime_type,
-                    identity=identity,
                     event=event,
                 )
         except Exception as exc:
@@ -272,7 +260,6 @@ class SessionWSOrchestrator:
         agent_id: str,
         session_id: str,
         runtime_type: RuntimeType,
-        identity: RuntimeSessionIdentity,
         event: Mapping[str, Any],
     ) -> Iterator[Mapping[str, Any]]:
         event_type = event.get("type")
@@ -281,27 +268,6 @@ class SessionWSOrchestrator:
 
         payload = event.get("payload")
         normalized_payload = payload if isinstance(payload, dict) else {}
-
-        if event_type == "session.runtime.changed":
-            runtime_session_id = normalized_payload.get("runtime_session_id")
-            if isinstance(runtime_session_id, str) and runtime_session_id:
-                self._identity_store.refresh_runtime_session(
-                    runtime_session_key=identity.runtime_session_key,
-                    runtime_session_id=runtime_session_id,
-                )
-            forwarded_payload = dict(normalized_payload)
-            forwarded_payload.setdefault(
-                "runtime_session_key",
-                identity.runtime_session_key,
-            )
-            yield build_outbound_event(
-                agent_id=agent_id,
-                session_id=session_id,
-                runtime_type=runtime_type,
-                type=event_type,
-                payload=forwarded_payload,
-            )
-            return
 
         self._append_session_event(
             agent_id=agent_id,
@@ -375,14 +341,7 @@ class SessionWSOrchestrator:
         )
         yield event
 
-    def _resolve_identity(
-        self,
-        *,
-        agent_id: str,
-        session_id: str,
-        session: Mapping[str, Any],
-        runtime_type: RuntimeType,
-    ) -> RuntimeSessionIdentity:
+    def _resolve_runtime_session_key(self, *, session: Mapping[str, Any]) -> str:
         runtime_session_key = session.get("runtime_session_key")
         if not isinstance(runtime_session_key, str) or not runtime_session_key:
             raise SessionWSOrchestratorError(
@@ -390,36 +349,23 @@ class SessionWSOrchestrator:
                 message="invalid session runtime key",
                 status_code=500,
             )
-
-        resolved = self._identity_store.resolve(
-            agent_id=agent_id, session_id=session_id
-        )
-        if resolved is not None and resolved.runtime_session_key == runtime_session_key:
-            return resolved
-
-        return self._identity_store.bind(
-            agent_id=agent_id,
-            session_id=session_id,
-            runtime_type=runtime_type,
-            runtime_session_key=runtime_session_key,
-            runtime_session_id=None,
-        )
+        return runtime_session_key
 
     def _run_runtime_turn(
         self,
         runtime: RuntimeBase,
-        identity: RuntimeSessionIdentity,
+        runtime_session_key: str,
         message: str,
     ) -> Iterator[Mapping[str, Any]]:
         if supports_runtime_turn(runtime):
             yield from runtime.run_turn(
-                session_key=identity.runtime_session_key,
+                session_key=runtime_session_key,
                 message=message,
             )
             return
 
         text_parts: list[str] = []
-        for chunk in runtime.stream_message(identity.runtime_session_key, message):
+        for chunk in runtime.stream_message(runtime_session_key, message):
             chunk_type = chunk.get("type")
             if chunk_type in ("delta", "token_delta"):
                 delta = chunk.get("delta")

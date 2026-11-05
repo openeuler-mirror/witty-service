@@ -23,8 +23,22 @@ class ClientBase(ABC):
         """查询指定 agent 可见的技能状态。"""
 
     @abstractmethod
-    def create_session(self, *, session_key: str) -> None:
-        """创建网关会话。"""
+    def create_session(self, *, session_key: str) -> str | None:
+        """创建网关会话，返回 Runtime 原生 Session ID（无法提供时返回 None）。"""
+
+    def bind_session(self, *, session_key: str, runtime_session_id: str) -> None:
+        """把已持久化的 Runtime Session ID 绑定到 session_key。
+
+        默认 no-op：内存映射只是 cache，不支持映射的客户端无需覆盖。
+        """
+        return None
+
+    def find_session_id(self, *, session_key: str) -> str | None:
+        """按 session_key 反查 Runtime 原生 Session ID。
+
+        仅用于旧数据的遗留回退；默认返回 None（表示无法反查）。
+        """
+        return None
 
     @abstractmethod
     def delete_session(self, *, session_key: str) -> None:
@@ -45,15 +59,11 @@ class ClientBase(ABC):
 
         子类按需覆盖；默认抛 NotImplementedError。
         """
-        raise NotImplementedError(
-            "current client does not support question answering"
-        )
+        raise NotImplementedError("current client does not support question answering")
 
     def reject_question(self, *, request_id: str) -> bool:
         """拒绝 AI 提问。
 
         子类按需覆盖；默认抛 NotImplementedError。
         """
-        raise NotImplementedError(
-            "current client does not support question rejection"
-        )
+        raise NotImplementedError("current client does not support question rejection")

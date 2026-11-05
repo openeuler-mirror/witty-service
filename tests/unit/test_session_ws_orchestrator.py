@@ -5,9 +5,6 @@ from typing import Any
 import pytest
 
 from witty_agent_server.application.models.agent import AgentStatus
-from witty_agent_server.application.services.session_identity_store import (
-    SessionIdentityStore,
-)
 from witty_agent_server.application.services.session_ws_orchestrator import (
     SessionWSOrchestrator,
     SessionWSOrchestratorError,
@@ -100,52 +97,19 @@ def _make_orchestrator(
     return SessionWSOrchestrator(
         session_service=session_service,
         agent_service=DummyAgentService(),
-        identity_store=SessionIdentityStore(),
         runtime_type=runtime_type,
     )
 
 
-def test_handle_runtime_event_forwards_runtime_identity_change() -> None:
-    identity_store = SessionIdentityStore()
-    orchestrator = SessionWSOrchestrator(
-        session_service=DummySessionService(),
-        agent_service=DummyAgentService(),
-        identity_store=identity_store,
-        runtime_type="opencode",
-    )
-    identity = identity_store.bind(
-        agent_id="agent-1",
-        session_id="session-1",
-        runtime_type="opencode",
-        runtime_session_key="agent:1:session:key-1",
-        runtime_session_id=None,
-    )
+def test_runtime_session_key_comes_from_session_record() -> None:
+    """编排器不再维护独立身份存储：只读 session 记录里的派生键。"""
+    orchestrator = _make_orchestrator()
 
-    events = list(
-        orchestrator._handle_runtime_event(
-            agent_id="agent-1",
-            session_id="session-1",
-            runtime_type="opencode",
-            identity=identity,
-            event={
-                "type": "session.runtime.changed",
-                "payload": {"runtime_session_id": "runtime-session-1"},
-            },
-        )
-    )
+    session = orchestrator._require_session(agent_id="agent-1", session_id="s-1")
 
-    assert len(events) == 1
-    assert events[0]["type"] == "session.runtime.changed"
-    assert events[0]["agent_id"] == "agent-1"
-    assert events[0]["session_id"] == "session-1"
-    assert events[0]["runtime_type"] == "opencode"
-    assert events[0]["payload"] == {
-        "runtime_session_id": "runtime-session-1",
-        "runtime_session_key": "agent:1:session:key-1",
-    }
-    resolved = identity_store.resolve(agent_id="agent-1", session_id="session-1")
-    assert resolved is not None
-    assert resolved.runtime_session_id == "runtime-session-1"
+    assert orchestrator._resolve_runtime_session_key(session=session) == (
+        "agent:1:session:key-1"
+    )
 
 
 # =============================================================================
@@ -287,7 +251,6 @@ def _make_running_orchestrator(
     return SessionWSOrchestrator(
         session_service=session_service,
         agent_service=agent_service,
-        identity_store=SessionIdentityStore(),
         runtime_type=runtime_type,
     )
 

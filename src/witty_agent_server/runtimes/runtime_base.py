@@ -40,7 +40,6 @@ class TurnEventType(StrEnum):
     ARTIFACT_DELTA = "artifact.delta"
     ARTIFACT_COMPLETED = "artifact.completed"
     SESSION_USAGE = "session.usage"
-    SESSION_RUNTIME_CHANGED = "session.runtime.changed"
     STREAM_ERROR = "stream.error"
     QUESTION_ASKED = "question.asked"
     QUESTION_REPLIED = "question.replied"
@@ -225,9 +224,19 @@ class RuntimeBase(ABC):
                     "payload": artifact_payload,
                 }
 
-    def create_session(self, *, session_key: str) -> None:
-        """创建 runtime 侧会话。"""
-        self._ensure_client().create_session(session_key=session_key)
+    def create_session(self, *, session_key: str) -> str | None:
+        """创建 runtime 侧会话，返回 Runtime 原生 Session ID（无法提供时为 None）。"""
+        return self._ensure_client().create_session(session_key=session_key)
+
+    def bind_session(self, *, session_key: str, runtime_session_id: str) -> None:
+        """绑定已持久化的 Runtime Session ID（内存 cache）。"""
+        self._ensure_client().bind_session(
+            session_key=session_key, runtime_session_id=runtime_session_id
+        )
+
+    def find_session_id(self, *, session_key: str) -> str | None:
+        """按 session_key 反查 Runtime 原生 Session ID（旧数据遗留回退）。"""
+        return self._ensure_client().find_session_id(session_key=session_key)
 
     def delete_session(self, *, session_key: str) -> None:
         """删除 runtime 侧会话。"""

@@ -66,9 +66,11 @@ class SessionServiceBase:
 
         `restore=True` 是唯一接受外部 session_id 的路径：缺 id 会另生成一个、留下永不被
         使用的会话行；多给 id 则等于让调用方自选主键——仓储的 `create` 是按 id upsert。
+        `runtime_session_id` 同理：只允许在恢复时由调用方回填，普通创建由 Runtime 返回。
         """
         restore = bool(config.get("restore"))
         session_id = config.get("session_id")
+        runtime_session_id = config.get("runtime_session_id")
         if restore:
             if not isinstance(session_id, str) or not session_id.strip():
                 return ValidationResult(
@@ -76,12 +78,27 @@ class SessionServiceBase:
                     error_code="INVALID_SESSION_CONFIG",
                     message="session_id is required when restore is true",
                 )
+            if runtime_session_id is not None and (
+                not isinstance(runtime_session_id, str)
+                or not runtime_session_id.strip()
+            ):
+                return ValidationResult(
+                    ok=False,
+                    error_code="INVALID_SESSION_CONFIG",
+                    message="runtime_session_id must be a non-empty string",
+                )
             return ValidationResult(ok=True)
         if session_id is not None:
             return ValidationResult(
                 ok=False,
                 error_code="INVALID_SESSION_CONFIG",
                 message="session_id is only accepted when restore is true",
+            )
+        if runtime_session_id is not None:
+            return ValidationResult(
+                ok=False,
+                error_code="INVALID_SESSION_CONFIG",
+                message="runtime_session_id is only accepted when restore is true",
             )
         return ValidationResult(ok=True)
 
@@ -140,26 +157,44 @@ class SessionServiceBase:
             session_id=session_id,
         )
         if not restore:
-            self._ensure_runtime_session_created(
+            runtime_session_id = self._ensure_runtime_session_created(
                 runtime_type=snapshot.runtime_type,
                 session_key=runtime_session_key,
+            )
+        else:
+            runtime_session_id = self._bind_restored_runtime_session(
+                runtime_type=snapshot.runtime_type,
+                session_key=runtime_session_key,
+                runtime_session_id=config.get("runtime_session_id"),
             )
 
         session = {
             "id": session_id,
             "agent_id": agent_id,
             "runtime_session_key": runtime_session_key,
+            "runtime_session_id": runtime_session_id,
             "context_initialized": True,
             **snapshot.model_dump(),
         }
-        created_session = self.repository.create(session)
+        try:
+            created_session = self.repository.create(session)
+        except Exception:
+            # 会话行落库失败时，刚创建的 Runtime 会话没有任何持久引用，直接清理，
+            # 避免留下可被误用的半初始化映射。
+            if not restore:
+                self._discard_runtime_session(
+                    runtime_type=snapshot.runtime_type,
+                    session_key=runtime_session_key,
+                )
+            raise
         self._events.setdefault(created_session["id"], [])
         logger.info(
-            "session created: agent_id=%s session_id=%s runtime_key=%s runtime_type=%s",
+            "session created: agent_id=%s session_id=%s runtime_key=%s runtime_type=%s runtime_session_id=%s",
             agent_id,
             created_session["id"],
             created_session["runtime_session_key"],
             created_session["runtime_type"],
+            runtime_session_id,
         )
         return created_session
 
@@ -359,21 +394,17 @@ class SessionServiceBase:
 
     def _ensure_runtime_session_created(
         self, *, runtime_type: str | None, session_key: str
-    ) -> None:
-        if not isinstance(runtime_type, str):
-            return
-        runtime = self.get_runtime(runtime_type)
+    ) -> str | None:
+        runtime = self._get_lifecycle_runtime(runtime_type)
         if runtime is None:
-            return
-        if not supports_runtime_lifecycle(runtime):
-            return
+            return None
         logger.info(
             "create runtime session: runtime_type=%s session_key=%s",
             runtime_type,
             session_key,
         )
         try:
-            runtime.create_session(session_key=session_key)
+            runtime_session_id = runtime.create_session(session_key=session_key)
         except Exception as exc:
             logger.exception(
                 "create runtime session failed: runtime_type=%s session_key=%s",
@@ -385,6 +416,114 @@ class SessionServiceBase:
             )
 
             raise RuntimeSessionCreateFailedError() from exc
+        return runtime_session_id if isinstance(runtime_session_id, str) else None
+
+    def _bind_restored_runtime_session(
+        self,
+        *,
+        runtime_type: str | None,
+        session_key: str,
+        runtime_session_id: object,
+    ) -> str | None:
+        """恢复会话时确定 Runtime 原生身份，并回填到 client 内存 cache。
+
+        优先使用调用方持久化的 `runtime_session_id`；只有旧数据缺失时才按 title 做
+        一次性回查（回查结果由调用方回填 DB）。两者都拿不到时明确报错——静默恢复
+        一个不存在的 Runtime Session 只会在下一次发消息时变成更难查的 SESSION_NOT_FOUND。
+        """
+        from witty_agent_server.application.services.session.errors import (
+            RuntimeSessionIdentityConflictError,
+            RuntimeSessionNotFoundError,
+        )
+
+        if isinstance(runtime_session_id, str) and runtime_session_id.strip():
+            runtime = self._get_lifecycle_runtime(runtime_type)
+            if runtime is not None:
+                self._bind_runtime_session(
+                    runtime,
+                    session_key=session_key,
+                    runtime_session_id=runtime_session_id,
+                )
+            return runtime_session_id
+
+        runtime = self._get_lifecycle_runtime(runtime_type)
+        if runtime is None:
+            return None
+        finder = getattr(runtime, "find_session_id", None)
+        if not callable(finder):
+            raise RuntimeSessionNotFoundError(
+                f"runtime session id is missing for session_key={session_key!r}"
+            )
+        try:
+            recovered = finder(session_key=session_key)
+        except Exception as exc:
+            if getattr(exc, "status", None) == 409:
+                raise RuntimeSessionIdentityConflictError(str(exc)) from exc
+            logger.exception(
+                "runtime session lookup failed: session_key=%s", session_key
+            )
+            raise RuntimeSessionNotFoundError(
+                f"failed to resolve runtime session for session_key={session_key!r}"
+            ) from exc
+        if not isinstance(recovered, str) or not recovered:
+            raise RuntimeSessionNotFoundError(
+                f"runtime session not found for session_key={session_key!r}"
+            )
+        logger.info(
+            "recovered runtime session id via legacy title lookup: "
+            "session_key=%s runtime_session_id=%s",
+            session_key,
+            recovered,
+        )
+        self._bind_runtime_session(
+            runtime, session_key=session_key, runtime_session_id=recovered
+        )
+        return recovered
+
+    def _bind_runtime_session(
+        self,
+        runtime: RuntimeBase,
+        *,
+        session_key: str,
+        runtime_session_id: str,
+    ) -> None:
+        binder = getattr(runtime, "bind_session", None)
+        if not callable(binder):
+            return
+        try:
+            binder(session_key=session_key, runtime_session_id=runtime_session_id)
+        except Exception:
+            # 绑定失败只影响后续请求能否走内存 cache（仍可回退 title 回查），
+            # 持久化的 runtime_session_id 已经由调用方保存，不阻断恢复。
+            logger.warning(
+                "failed to bind runtime session id: session_key=%s runtime_session_id=%s",
+                session_key,
+                runtime_session_id,
+                exc_info=True,
+            )
+
+    def _discard_runtime_session(
+        self, *, runtime_type: str | None, session_key: str
+    ) -> None:
+        runtime = self._get_lifecycle_runtime(runtime_type)
+        if runtime is None:
+            return
+        try:
+            runtime.delete_session(session_key=session_key)
+        except Exception:
+            logger.warning(
+                "failed to clean up runtime session after create failure: session_key=%s",
+                session_key,
+                exc_info=True,
+            )
+
+    def _get_lifecycle_runtime(self, runtime_type: str | None) -> RuntimeBase | None:
+        if not isinstance(runtime_type, str):
+            return None
+        runtime = self.get_runtime(runtime_type)
+        if runtime is None or not supports_runtime_lifecycle(runtime):
+            return None
+        return runtime
 
     def _ensure_runtime_session_deleted(
         self, *, runtime_type: str | None, session_key: str
