@@ -22,7 +22,7 @@ def test_agent_manager_uses_websocket_client():
     endpoint = AdaptorEndpoint(
         base_url="ws://localhost:8080",
         session_id="test-session",
-        sandbox_type="opencode",
+        sandbox_type="local_process",
     )
 
     # Verify pool creates WebSocket clients

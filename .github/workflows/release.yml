@@ -121,7 +121,13 @@ jobs:
           pip install build
 
       - name: Build package
-        run: python -m build
+        run: |
+          # 干净构建：清理 setuptools 增量中间产物，避免已删除模块被打进 wheel
+          rm -rf build
+          python -m build
+
+      - name: Check wheel contents
+        run: python .github/scripts/check_wheel_contents.py dist/*.whl --src-root src
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -146,7 +152,7 @@ jobs:
 
   docker-push:
     name: Build & Push Docker to GHCR
-    needs: release
+    needs: [release, build]
     if: inputs.dry_run != 'true' && needs.release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
