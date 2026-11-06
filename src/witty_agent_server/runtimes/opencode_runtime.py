@@ -12,8 +12,8 @@ from witty_agent_server.runtimes.runtime_base import (
     TurnEventType,
     tool_call_delta_event,
 )
-from witty_agent_server.runtimes.stream_errors import normalize_opencode_error
-from witty_agent_server.runtimes.usage import (
+from witty_service.runtime.stream_errors import normalize_opencode_error
+from witty_service.runtime.usage import (
     has_token_usage,
     normalize_usage_payload,
 )

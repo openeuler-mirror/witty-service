@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from witty_agent_server.runtimes.artifact_detector import is_sensitive_file
+from witty_service.runtime.artifact_detector import is_sensitive_file
 
 ARTIFACT_EVENT_TYPES = frozenset(
     {"artifact.started", "artifact.delta", "artifact.completed"}
@@ -80,4 +80,3 @@ def normalize_artifact_event(
     if is_sensitive_file(normalized):
         new_payload.pop("content", None)
     return {**event, "payload": new_payload}
-

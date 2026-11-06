@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from witty_agent_server.runtimes.stream_errors import (
+from witty_service.runtime.stream_errors import (
     StreamErrorCode,
     StreamErrorSource,
     classify_from_code_hint,

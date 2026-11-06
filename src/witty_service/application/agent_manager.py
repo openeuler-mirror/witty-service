@@ -17,7 +17,7 @@ import httpx
 
 # 统一错误契约（stream_errors.py）：跨包复用有先例（repositories.py 导入
 # runtimes.usage），合成 stream.error 载荷必须走唯一出口，避免手写漂移。
-from witty_agent_server.runtimes.stream_errors import internal_error
+from witty_service.runtime.stream_errors import internal_error
 
 logger = logging.getLogger(__name__)
 

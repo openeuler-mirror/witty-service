@@ -9,7 +9,6 @@ from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from witty_agent_server.runtimes.usage import merge_usage, normalize_usage_payload
 from witty_service.domain.enums import AgentStatus, ScheduledTaskRunStatus
 from witty_service.domain.errors import runtime_session_id_conflict, session_not_found
 from witty_service.persistence.orm import (
@@ -28,6 +27,7 @@ from witty_service.persistence.orm import (
     SkillORM,
     SkillRepositoryORM,
 )
+from witty_service.runtime.usage import merge_usage, normalize_usage_payload
 from witty_service.sandbox.base import SandboxHandle
 
 

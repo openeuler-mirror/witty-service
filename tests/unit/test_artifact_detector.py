@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from witty_agent_server.runtimes.artifact_detector import (
+from witty_service.runtime.artifact_detector import (
     INLINE_CONTENT_LIMIT,
     artifact_completed_event,
     artifact_started_event,
@@ -179,8 +179,7 @@ def test_artifact_event_none_outside_whitelist_and_accepts_json_args() -> None:
     )
     assert absolute is not None
     assert (
-        absolute["relative_path"]
-        == "/root/.witty/agent-workspaces/"
+        absolute["relative_path"] == "/root/.witty/agent-workspaces/"
         "b07433d1-0416-4a48-b24b-a1123f7abe0a/workspace/output/demo.html"
     )
     assert absolute["content"] == "<h1>hi</h1>"
