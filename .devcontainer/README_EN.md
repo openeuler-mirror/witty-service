@@ -49,7 +49,7 @@ Or press `F5` to use the existing debugpy launch configurations.
 | Node.js | 22 | npm + npx, aligned with production Dockerfile base image (`node:22.23.3-slim`) |
 | uv | 0.8.8 | Python package manager |
 | openclaw | 2026.6.5 | Agent runtime CLI (matches production `OPENCLAW_VERSION`) |
-| opencode-ai | 1.17.20 | OpenCode runtime CLI |
+| opencode-ai | 1.17.13 | OpenCode runtime CLI |
 | wittyhub | latest | Skill management |
 | Docker CLI | - | For building agent images and debugging containers |
 | pre-commit | 4.x | Preinstalled at build time, drives the repo's tracked `.githooks/` commit hooks |
