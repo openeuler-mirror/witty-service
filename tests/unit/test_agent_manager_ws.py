@@ -212,6 +212,7 @@ class FakeRepository:
         status: str,
         context_initialized: bool = False,
         runtime_type: str | None = None,
+        runtime_session_id: str | None = None,
         runtime_session_key: str | None = None,
         created_at: datetime | None = None,
         remote_runtime_agent_id: str | None = None,
@@ -233,9 +234,10 @@ class FakeRepository:
             updated_at=now,
             runtime_type=runtime_type
             or (existing.runtime_type if existing is not None else None),
-            runtime_session_id=existing.runtime_session_id
-            if existing is not None
-            else None,
+            runtime_session_id=(
+                runtime_session_id
+                or (existing.runtime_session_id if existing is not None else None)
+            ),
             runtime_session_key=(
                 runtime_session_key
                 or (existing.runtime_session_key if existing is not None else None)
@@ -265,8 +267,22 @@ class FakeRepository:
         self.sessions[session_id] = updated
         return updated
 
+    def find_session_by_runtime_identity(
+        self, runtime_type: str, runtime_session_id: str
+    ) -> Any | None:
+        for session in self.sessions.values():
+            if (
+                session.runtime_type == runtime_type
+                and session.runtime_session_id == runtime_session_id
+            ):
+                return session
+        return None
+
     def get_last_assistant_status(self, session_id: str) -> str | None:
         return None
+
+    def list_sessions(self, agent_id: str) -> list[Any]:
+        return [item for item in self.sessions.values() if item.agent_id == agent_id]
 
     def find_last_assistant_message_for_session(self, session_id: str) -> Any | None:
         # abort_session 会按 session_id 找最后一条 assistant 消息改 interrupted；
@@ -1622,5 +1638,136 @@ def test_send_message_reads_agent_and_session_once() -> None:
 
         assert session_reads == [session.id]
         assert agent_reads == [agent.id]
+
+    asyncio.run(run())
+
+
+class _RecordingAdaptorClient:
+    """记录 restore 请求的假 adaptor 客户端。"""
+
+    def __init__(self, responses: list[Any]) -> None:
+        self.posts: list[tuple[str, dict[str, Any]]] = []
+        self.closed = False
+        self._responses = list(responses)
+
+    async def post(
+        self, path: str, *, json: dict[str, Any], timeout: float | None = None
+    ) -> Any:
+        self.posts.append((path, json))
+        result = self._responses.pop(0) if self._responses else {}
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def test_restore_historical_sessions_sends_persisted_runtime_session_id() -> None:
+    """恢复时必须携带已持久化的 Runtime Session ID，而不是只靠 title 回查。"""
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, session = _bootstrap_running_agent_and_session(repository)
+        repository.update_session_runtime_identity(
+            session_id=session.id,
+            runtime_type="opencode",
+            runtime_session_id="runtime-session-1",
+            runtime_session_key="agent:agent-1:session:session-1",
+        )
+        client = _RecordingAdaptorClient([{"status": "idle"}])
+        manager._get_adaptor_http_client = lambda agent_id: client  # type: ignore[method-assign]
+
+        await manager._restore_historical_sessions(
+            agent_id=agent.id,
+            remote_runtime_agent_id="runtime-agent-1",
+            log_context="resume from paused",
+        )
+
+        assert client.posts == [
+            (
+                "/agents/runtime-agent-1/sessions",
+                {
+                    "session_id": session.id,
+                    "restore": True,
+                    "runtime_session_id": "runtime-session-1",
+                },
+            )
+        ]
+        assert client.closed is True
+
+    asyncio.run(run())
+
+
+def test_restore_historical_sessions_backfills_identity_from_runtime() -> None:
+    """旧数据缺 ID 时，runtime 侧补齐的 ID 要立即回填 DB，避免下次再回查。"""
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, session = _bootstrap_running_agent_and_session(repository)
+        assert repository.sessions[session.id].runtime_session_id is None
+        client = _RecordingAdaptorClient(
+            [
+                {
+                    "status": "idle",
+                    "runtime_type": "opencode",
+                    "runtime_session_id": "runtime-session-9",
+                    "runtime_session_key": "agent:agent-1:session:session-1",
+                }
+            ]
+        )
+        manager._get_adaptor_http_client = lambda agent_id: client  # type: ignore[method-assign]
+
+        await manager._restore_historical_sessions(
+            agent_id=agent.id,
+            remote_runtime_agent_id="runtime-agent-1",
+            log_context="service restart recovery",
+        )
+
+        assert "runtime_session_id" not in client.posts[0][1]
+        assert repository.sessions[session.id].runtime_session_id == "runtime-session-9"
+        assert (
+            repository.sessions[session.id].runtime_session_key
+            == "agent:agent-1:session:session-1"
+        )
+
+    asyncio.run(run())
+
+
+def test_restore_historical_sessions_continues_after_http_failure() -> None:
+    """单个会话恢复失败不应阻塞其余会话。"""
+
+    async def run() -> None:
+        manager, _request, repository, _store, _backend, _pool = _make_ws_manager()
+        agent, _session = _bootstrap_running_agent_and_session(repository)
+        repository.upsert_session(
+            session_id="session-2",
+            agent_id=agent.id,
+            status="idle",
+            runtime_type="opencode",
+            remote_runtime_agent_id="runtime-agent-1",
+        )
+
+        request = httpx.Request(
+            "POST", "http://adapter.local/agents/runtime-agent-1/sessions"
+        )
+        failure = httpx.HTTPStatusError(
+            "conflict",
+            request=request,
+            response=httpx.Response(409, request=request),
+        )
+        client = _RecordingAdaptorClient([failure, {"status": "idle"}])
+        manager._get_adaptor_http_client = lambda agent_id: client  # type: ignore[method-assign]
+
+        await manager._restore_historical_sessions(
+            agent_id=agent.id,
+            remote_runtime_agent_id="runtime-agent-1",
+            log_context="resume from paused",
+        )
+
+        assert [payload["session_id"] for _, payload in client.posts] == [
+            "session-1",
+            "session-2",
+        ]
 
     asyncio.run(run())

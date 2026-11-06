@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from witty_agent_server.runtimes.usage import merge_usage, normalize_usage_payload
 from witty_service.domain.enums import AgentStatus, ScheduledTaskRunStatus
-from witty_service.domain.errors import session_not_found
+from witty_service.domain.errors import runtime_session_id_conflict, session_not_found
 from witty_service.persistence.orm import (
     AgentORM,
     AgentRuntimeStateORM,
@@ -806,6 +806,7 @@ class SqliteRepository:
         status: str,
         context_initialized: bool = False,
         runtime_type: str | None = None,
+        runtime_session_id: str | None = None,
         runtime_session_key: str | None = None,
         created_at: datetime | None = None,
         remote_runtime_agent_id: str | None = None,
@@ -821,6 +822,7 @@ class SqliteRepository:
                     agent_id=agent_id,
                     remote_runtime_agent_id=remote_runtime_agent_id,
                     runtime_type=runtime_type,
+                    runtime_session_id=runtime_session_id,
                     runtime_session_key=runtime_session_key,
                     status=SessionStatus(status),
                     created_at=created_at or now,
@@ -830,6 +832,11 @@ class SqliteRepository:
             else:
                 existing.status = SessionStatus(status)
                 existing.runtime_type = runtime_type or existing.runtime_type
+                # None 表示本次上报没有携带身份（如 list/get 同步），不是"清空"，
+                # 因此用 or 保留已有值，避免同步接口把持久化身份抹掉。
+                existing.runtime_session_id = (
+                    runtime_session_id or existing.runtime_session_id
+                )
                 existing.runtime_session_key = (
                     runtime_session_key or existing.runtime_session_key
                 )
@@ -838,7 +845,32 @@ class SqliteRepository:
                 )
                 existing.updated_at = now
 
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                # 应用层预检查与写入之间存在并发窗口；数据库唯一约束
+                # uq_sessions_runtime_type_session_id 是最终防线。命中后统一收敛为
+                # 409，避免并发场景下把身份冲突冒成 500。
+                session.rollback()
+                occupant = (
+                    session.query(SessionORM)
+                    .filter(
+                        SessionORM.runtime_type == runtime_type,
+                        SessionORM.runtime_session_id == runtime_session_id,
+                    )
+                    .first()
+                    if runtime_type and runtime_session_id
+                    else None
+                )
+                if occupant is not None and occupant.id != session_id:
+                    raise runtime_session_id_conflict(
+                        runtime_type=runtime_type,
+                        runtime_session_id=runtime_session_id,
+                        session_id=session_id,
+                        existing_session_id=occupant.id,
+                    ) from exc
+                # 其他唯一约束（如 runtime_session_key）违规保持原样抛出。
+                raise
             session.refresh(existing or row)
             return self._to_session_record(existing or row)
 

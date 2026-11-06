@@ -53,6 +53,17 @@ class RepositoryStub:
         self.sessions[session.id] = session
         return session
 
+    def find_session_by_runtime_identity(
+        self, runtime_type: str, runtime_session_id: str
+    ):
+        for session in self.sessions.values():
+            if (
+                getattr(session, "runtime_type", None) == runtime_type
+                and getattr(session, "runtime_session_id", None) == runtime_session_id
+            ):
+                return session
+        return None
+
     def update_session_runtime_identity(self, **kwargs):
         self.identity_updates.append(kwargs)
         session = self.sessions[kwargs["session_id"]]
@@ -118,6 +129,8 @@ class AdaptorClientStub:
                 "status": "idle",
                 "context_initialized": True,
                 "runtime_type": "opencode",
+                "runtime_session_id": "oc-remote-1",
+                "runtime_session_key": "agent:agent-1:session:remote-session-1",
                 "created_at": "2026-01-01T00:00:00+00:00",
             }
         return {}
@@ -204,6 +217,8 @@ async def test_remote_session_methods_sync_repository() -> None:
     await manager.delete_session_remote("agent-1", created.id, client)
 
     assert created.remote_runtime_agent_id == "runtime-default"
+    assert created.runtime_session_id == "oc-remote-1"
+    assert created.runtime_session_key == "agent:agent-1:session:remote-session-1"
     assert listed[0].id == "remote-session-1"
     assert fetched.status == "running"
     assert client.posts == [
@@ -267,6 +282,7 @@ def test_upsert_session_delegates_all_fields() -> None:
         "status": "idle",
         "context_initialized": True,
         "runtime_type": "opencode",
+        "runtime_session_id": None,
         "runtime_session_key": None,
         "created_at": created_at,
         "remote_runtime_agent_id": "runtime-1",
@@ -298,6 +314,78 @@ def test_update_session_runtime_identity_delegates_to_repository() -> None:
         "runtime_session_id": "runtime-session-1",
         "runtime_session_key": "agent:agent-1:session:session-1",
     }
+
+
+def test_upsert_session_rejects_reused_runtime_session_id() -> None:
+    """同一 Runtime Session ID 不能映射到两条 Witty Session。"""
+    repo = RepositoryStub()
+    manager = SessionManager(repo)
+    manager.upsert_session(
+        session_id="session-1",
+        agent_id="agent-1",
+        status="idle",
+        runtime_type="opencode",
+        runtime_session_id="runtime-session-1",
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        manager.upsert_session(
+            session_id="session-2",
+            agent_id="agent-1",
+            status="idle",
+            runtime_type="opencode",
+            runtime_session_id="runtime-session-1",
+        )
+
+    assert exc_info.value.code == "RUNTIME_SESSION_ID_CONFLICT"
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.details["existing_session_id"] == "session-1"
+
+
+def test_upsert_session_allows_same_session_identity_update() -> None:
+    """同一条会话重复上报自身身份不算冲突。"""
+    repo = RepositoryStub()
+    manager = SessionManager(repo)
+    manager.upsert_session(
+        session_id="session-1",
+        agent_id="agent-1",
+        status="idle",
+        runtime_type="opencode",
+        runtime_session_id="runtime-session-1",
+    )
+
+    updated = manager.upsert_session(
+        session_id="session-1",
+        agent_id="agent-1",
+        status="running",
+        runtime_type="opencode",
+        runtime_session_id="runtime-session-1",
+    )
+
+    assert updated.status == "running"
+
+
+def test_update_session_runtime_identity_rejects_reused_runtime_session_id() -> None:
+    repo = RepositoryStub()
+    manager = SessionManager(repo)
+    manager.upsert_session(
+        session_id="session-1",
+        agent_id="agent-1",
+        status="idle",
+        runtime_type="opencode",
+        runtime_session_id="runtime-session-1",
+    )
+    manager.upsert_session(session_id="session-2", agent_id="agent-1", status="idle")
+
+    with pytest.raises(DomainError) as exc_info:
+        manager.update_session_runtime_identity(
+            session_id="session-2",
+            runtime_type="opencode",
+            runtime_session_id="runtime-session-1",
+            runtime_session_key="agent:agent-1:session:session-2",
+        )
+
+    assert exc_info.value.code == "RUNTIME_SESSION_ID_CONFLICT"
 
 
 @pytest.mark.asyncio
