@@ -44,6 +44,18 @@ class TurnModelAttribution(BaseModel):
     display_name: str = Field(description="回合准入时固定的模型展示名")
 
 
+class TurnUsage(BaseModel):
+    """本轮用量（跨 step 累计）；缺项为 null，避免前端显示假 0。"""
+
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    cache_read_tokens: int | None = Field(default=None, ge=0)
+    cache_write_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+    total_cost: float | None = Field(default=None, ge=0)
+
+
 class TurnError(BaseModel):
     code: str
     message: str
@@ -62,6 +74,9 @@ class TurnResponse(BaseModel):
     status: TurnStatus
     agent: TurnAgentAttribution
     model: TurnModelAttribution
+    usage: TurnUsage | None = Field(
+        default=None, description="本轮用量；未产生用量时为 null"
+    )
     error: TurnError | None = None
     started_at: UtcDatetime
     finished_at: UtcDatetime | None = None

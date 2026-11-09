@@ -36,13 +36,15 @@ class AgentListResponse(BaseModel):
 
 
 class CreateAgentRequest(RequestModel):
-    """创建 Expert Agent Definition；Primary 由系统种子创建。"""
+    """创建 Expert Agent Definition；Primary 由系统种子创建。
+
+    来源（local/market/preset 及引用）是服务端安装事实，由服务端写入，不接受
+    客户端指定。
+    """
 
     name: str = Field(min_length=1, max_length=AGENT_NAME_MAX_LENGTH)
     description: str = Field(default="", max_length=AGENT_DESCRIPTION_MAX_LENGTH)
     system_prompt: str = ""
-    source_type: AgentSourceType = "local"
-    source_ref: str | None = None
 
 
 class UpdateAgentRequest(RequestModel):

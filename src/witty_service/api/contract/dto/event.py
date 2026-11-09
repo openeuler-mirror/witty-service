@@ -10,6 +10,8 @@ SESSION_EVENT_TYPES: Final[tuple[str, ...]] = (
     "turn.updated",
     "message.delta",
     "message.completed",
+    # 本轮用量增量；每轮终止前一条，payload 形状由 C04 定义
+    "session.usage",
     "thinking.delta",
     "tool.call.started",
     "tool.call.delta",

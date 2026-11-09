@@ -11,13 +11,18 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainSerializer,
+    StringConstraints,
     WithJsonSchema,
     model_validator,
 )
 
 AgentKind = Literal["primary", "expert"]
 SandboxType = Literal["local", "docker"]
-SessionOrigin = Literal["web", "channel", "scheduled"]
+SessionOrigin = Annotated[
+    str,
+    StringConstraints(pattern=r"^(?:web|scheduled|channel:[A-Za-z0-9_.-]+)$"),
+    Field(description="会话来源：web、scheduled 或 channel:<渠道标识符>"),
+]
 RuntimeStatus = Annotated[
     Literal["stopped", "starting", "ready", "restarting", "unavailable"],
     Field(
@@ -47,7 +52,7 @@ def _workspace_relative_path(value: str) -> str:
         raise ValueError("path must not be empty")
     if value.startswith(("/", "\\")) or "\\" in value:
         raise ValueError("path must be relative to the workspace")
-    if value[1:2] == ":" and value[2:3] == "/" and value[:1].isalpha():
+    if len(value) >= 2 and value[1] == ":" and value[0].isalpha():
         raise ValueError("path must be relative to the workspace")
     if ".." in PurePosixPath(value).parts:
         raise ValueError("path must not escape the workspace")
