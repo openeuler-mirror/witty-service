@@ -17,7 +17,7 @@ from pydantic import (
 )
 
 AgentKind = Literal["primary", "expert"]
-SandboxType = Literal["local", "docker"]
+SandboxType = Literal["local_process", "docker"]
 SessionOrigin = Annotated[
     str,
     StringConstraints(pattern=r"^(?:web|scheduled|channel:[A-Za-z0-9_.-]+)$"),

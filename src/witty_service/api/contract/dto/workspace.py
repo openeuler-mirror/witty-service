@@ -23,7 +23,7 @@ class CreateWorkspaceRequest(RequestModel):
             "该路径不属于响应契约，不在任何响应中返回。"
         ),
     )
-    sandbox_type: SandboxType = "local"
+    sandbox_type: SandboxType = "local_process"
     default_agent_id: str | None = Field(
         default=None, min_length=1, description="省略或 null 时使用未归档 Primary"
     )
@@ -36,8 +36,12 @@ class CreateWorkspaceRequest(RequestModel):
 
 class UpdateWorkspaceRequest(PatchModel):
     name: str = Field(default=None, min_length=1, max_length=255)  # type: ignore[assignment]
-    default_agent_id: str = Field(default=None, min_length=1)  # type: ignore[assignment]
-    default_model_id: str = Field(default=None, min_length=1)  # type: ignore[assignment]
+    default_agent_id: str | None = Field(
+        default=None, min_length=1, description="显式 null 表示重置为未归档 Primary"
+    )
+    default_model_id: str | None = Field(
+        default=None, min_length=1, description="显式 null 表示清空，回到全局默认模型"
+    )
 
 
 class WorkspaceResponse(BaseModel):
