@@ -8,12 +8,12 @@ from enum import StrEnum
 from typing import Any, Literal, NotRequired, TypedDict
 
 from witty_agent_server.infra.clients.base import ClientBase
-from witty_agent_server.runtimes.artifact_detector import (
+from witty_service.runtime.artifact_detector import (
     artifact_completed_event,
     artifact_started_event,
     extract_write_arguments,
 )
-from witty_agent_server.runtimes.usage import normalize_usage_payload
+from witty_service.runtime.usage import normalize_usage_payload
 
 logger = logging.getLogger(__name__)
 

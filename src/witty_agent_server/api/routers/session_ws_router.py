@@ -19,7 +19,7 @@ from witty_agent_server.application.services.task_pool import (
     SessionBusyError,
     TaskPool,
 )
-from witty_agent_server.runtimes.stream_errors import normalize_stream_error
+from witty_service.runtime.stream_errors import normalize_stream_error
 
 logger = logging.getLogger(__name__)
 

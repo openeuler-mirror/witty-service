@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from witty_agent_server.runtimes.usage import (
+from witty_service.runtime.usage import (
     has_token_usage,
     merge_usage,
     normalize_usage_payload,

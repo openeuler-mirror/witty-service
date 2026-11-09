@@ -19,7 +19,6 @@ from typing import Any
 import git
 import yaml
 
-from witty_agent_server.runtimes.opencode_mcp_config import to_opencode_mcp_config
 from witty_service.adapter.http_client import AdaptorHttpClient
 from witty_service.application.agent_manager import (
     AgentCreateRequest,
@@ -31,6 +30,7 @@ from witty_service.config import get_settings
 from witty_service.domain.agent_template import AgentTemplate, AgentTemplateSkill
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.repositories import AgentRecord
+from witty_service.runtime.opencode_mcp_config import to_opencode_mcp_config
 
 logger = logging.getLogger(__name__)
 

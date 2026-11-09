@@ -21,7 +21,7 @@ from witty_agent_server.runtimes.runtime_base import (
     supports_runtime_lifecycle,
     supports_runtime_turn,
 )
-from witty_agent_server.runtimes.stream_errors import normalize_exception_error
+from witty_service.runtime.stream_errors import normalize_exception_error
 
 logger = logging.getLogger(__name__)
 

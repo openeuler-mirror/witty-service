@@ -24,8 +24,8 @@ from witty_agent_server.infra.clients.opencode_client import (
     OpenCodeClient,
     OpenCodeClientError,
 )
-from witty_agent_server.runtimes.opencode_mcp_config import to_opencode_mcp_config
 from witty_service.config import get_settings
+from witty_service.runtime.opencode_mcp_config import to_opencode_mcp_config
 from witty_service.workspace_paths import agent_workspace_path
 
 logger = logging.getLogger(__name__)

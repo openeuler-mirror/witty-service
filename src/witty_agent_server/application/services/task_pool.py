@@ -8,7 +8,7 @@ import threading
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
-from witty_agent_server.runtimes.stream_errors import internal_error
+from witty_service.runtime.stream_errors import internal_error
 
 logger = logging.getLogger(__name__)
 
