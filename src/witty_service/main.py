@@ -10,11 +10,13 @@ from witty_service.api.agent_templates import router as agent_templates_router
 from witty_service.api.agents import router as agents_router
 from witty_service.api.backport import router as backport_router
 from witty_service.api.channels import router as channels_router
+from witty_service.api.contract.routers import router as contract_router
 from witty_service.api.cve import router as cve_router
 from witty_service.api.errors import register_exception_handlers
 from witty_service.api.insight import router as insight_router
 from witty_service.api.mcp_servers import router as mcp_servers_router
 from witty_service.api.models import router as models_router
+from witty_service.api.openapi import ApiApp
 from witty_service.api.scheduled_tasks import router as scheduled_tasks_router
 from witty_service.api.services import ServiceContainer, build_default_services
 from witty_service.api.skills import router as skills_router
@@ -44,7 +46,7 @@ async def _call(method: object) -> Any:
 
 def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
     configure_logging()
-    app = FastAPI(title="Witty Service")
+    app = ApiApp(title="Witty Service")
     app.state.services = services or build_default_services()
     register_exception_handlers(app)
 
@@ -323,5 +325,6 @@ def create_app(*, services: ServiceContainer | None = None) -> FastAPI:
     app.include_router(skills_router)
     app.include_router(backport_router)
     app.include_router(insight_router)
+    app.include_router(contract_router)
 
     return app
