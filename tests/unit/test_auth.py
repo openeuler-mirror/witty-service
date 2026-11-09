@@ -3,9 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 
 from witty_service.api import auth
+from witty_service.domain.errors import DomainError
 
 
 class RequestStub:
@@ -13,17 +14,25 @@ class RequestStub:
         self.method = method
 
 
+def _credentials(scheme: str, token: str) -> HTTPAuthorizationCredentials:
+    return HTTPAuthorizationCredentials(scheme=scheme, credentials=token)
+
+
 def test_require_bearer_auth_skips_options() -> None:
-    auth.require_bearer_auth(RequestStub("OPTIONS"), authorization=None)
+    auth.require_bearer_auth(RequestStub("OPTIONS"), credentials=None)
 
 
 @pytest.mark.parametrize(
-    "authorization",
-    [None, "Basic token", "Bearer ", "Bearer wrong-token"],
+    "credentials",
+    [
+        None,
+        _credentials("Basic", "expected-token"),
+        _credentials("Bearer", "wrong-token"),
+    ],
 )
 def test_require_bearer_auth_rejects_invalid_token(
     monkeypatch,
-    authorization: str | None,
+    credentials: HTTPAuthorizationCredentials | None,
 ) -> None:
     monkeypatch.setattr(
         auth,
@@ -31,12 +40,11 @@ def test_require_bearer_auth_rejects_invalid_token(
         lambda: SimpleNamespace(auth_token="expected-token"),
     )
 
-    with pytest.raises(HTTPException) as exc_info:
-        auth.require_bearer_auth(RequestStub("GET"), authorization=authorization)
+    with pytest.raises(DomainError) as exc_info:
+        auth.require_bearer_auth(RequestStub("GET"), credentials=credentials)
 
     assert exc_info.value.status_code == 401
-    assert exc_info.value.detail == "Unauthorized"
-    assert exc_info.value.headers == {"WWW-Authenticate": "Bearer"}
+    assert exc_info.value.code == "UNAUTHORIZED"
 
 
 def test_require_bearer_auth_accepts_expected_token(monkeypatch) -> None:
@@ -48,5 +56,5 @@ def test_require_bearer_auth_accepts_expected_token(monkeypatch) -> None:
 
     auth.require_bearer_auth(
         RequestStub("GET"),
-        authorization="Bearer expected-token",
+        credentials=_credentials("Bearer", "expected-token"),
     )
