@@ -47,7 +47,7 @@ uv run uvicorn witty_service.main:create_app --factory --host 0.0.0.0 --port 800
 | Node.js | 22 | npm + npx，对齐生产 Dockerfile 基础镜像（`node:22.23.3-slim`） |
 | uv | 0.8.8 | Python 包管理器 |
 | openclaw | 2026.6.5 | Agent 运行时 CLI（对齐生产 Dockerfile `OPENCLAW_VERSION`） |
-| opencode-ai | 1.17.20 | OpenCode 运行时 CLI |
+| opencode-ai | 1.17.13 | OpenCode 运行时 CLI |
 | wittyhub | latest | Skill 管理工具 |
 | Docker CLI | - | 用于构建 agent 镜像和调试容器 |
 | pre-commit | 4.x | 构建期预装，驱动仓库自带的 `.githooks/` 提交钩子 |

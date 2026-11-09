@@ -65,7 +65,7 @@ FROM final-base AS opencode
 
 USER root
 
-ENV OPENCODE_VERSION=1.17.20
+ENV OPENCODE_VERSION=1.17.13
 
 RUN npm install -g opencode-ai@${OPENCODE_VERSION} \
     && npm install -g @ai-sdk/openai-compatible @ai-sdk/anthropic \
