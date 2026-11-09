@@ -964,3 +964,290 @@ erDiagram
 - `ck_channel_access_policies_allow_commands`：`allow_commands IN (0,1)`。
 - `uq_channel_access_policies_instance_conversation(channel_instance_id, conversation_type)`。
 - 当前 Allowlist 是小规模配置，保留 JSON 可避免额外 join；若未来需要逐成员管理、大规模名单或成员审计，再拆子表，不提前抽象。
+
+## 8. 冗余字段与投影一致性
+
+### 8.1 冗余字段
+
+| 冗余字段 | 业务收益 | 写入时机 | 一致性策略 |
+| --- | --- | --- | --- |
+| `workspaces.session_count` | Workspace 列表免聚合/COUNT | Session 创建、删除事务 | 与 Session 同事务；提供低频校准 |
+| `workspaces.last_activity_at` | Workspace 侧栏排序 | Session 创建、Turn 终态 | 允许秒级业务近似，不作事实判断 |
+| `sessions.last_turn_seq` | 避免 MAX 扫描与序号竞态 | Turn 准入事务；崩溃恢复时校准 | `turns(session_id,turn_seq)` 唯一约束兜底；恢复按 MAX 重算 |
+| `skill_repo.skill_count` | 来源列表免聚合 | Skill 同步事务 | 可重算，不用于可见性判断 |
+| `scheduled_tasks.last_run_id/last_run_at/last_run_status` | 任务列表免 N+1 | Run 创建/终态事务 | 按 Run `(created_at,id)` 条件更新；可由 Runs 重算 |
+| `turns.agent_name_snapshot/model_name_snapshot` | 保留历史展示、减少目录回查 | 最终 Turn 准入事务，从目录记录复制 | 写入后不可变；只用于历史归因，不参与重跑 |
+| Channel `credential_mask` | 列表直接展示掩码 | 凭据更新时 | 只用于展示，不参与认证 |
+
+不允许冗余：
+
+- Session 当前 Agent/模型名称：易因目录改名产生无意义双写，直接 join。
+- Turn 的 Workspace ID：当前查询可通过 Session 获得，不增加写放大。
+- Session 当前执行指针：会形成循环引用，使用 running 部分唯一索引和 Runtime Manager 内存登记。
+- Turn 的 prompt、模型参数、Skill/MCP 配置或工具集：执行时从最新确认投影获取，不复制到 Turn。
+- OpenCode 消息正文、耗时、Part 状态：属于 Runtime 历史事实，不复制。
+
+### 8.2 Workspace 全量投影与唯一 hash
+
+Workspace 每次构建完整的执行投影，而不是增量补丁。投影范围固定为：
+
+- 所有未归档 Agent Definition，包括执行所需名称、描述、prompt、kind 和来源等非密字段。
+- 所有 enabled Model 的非密执行字段。
+- 所有 enabled Skill 及其 `content_sha256`；它们对所有 Agent 可见。
+- 所有 enabled MCP 的非密 `config_json`、工具集摘要和 `secret_revision`。Session 激活集合只决定该 Session 使用哪些已发布 MCP，不把全量投影裁剪成 Agent 级配置。
+
+hash 输入采用确定性规范序列化：对象键排序、集合并按稳定 ID 排序、Unicode 与数字表示固定，然后计算 SHA-256。相同投影内容必须得到相同 hash；文件遍历顺序、字典顺序或工具返回顺序不得影响结果。
+
+- 候选投影只在内存构建。发布判断只比较候选 `projection_hash` 与 `workspaces.published_projection_hash` 这一个值；相等则无需发布，不同则发布完整候选投影。数据库不保存候选版本或持久 dirty 标记。
+- Runtime Manager 按 Workspace 串行发布。发布期间暂停新 Turn Permit，并等待活动 Turn 自然终态；不得自动终止在飞 Turn。
+- 只有 Runtime 成功接受完整候选投影后，才能把 `published_projection_hash` 更新为实际发布的候选 hash；发布失败保持原值。hash 更新使用独立短事务，网络请求不得在事务内。
+- 如果配置在发布过程中再次变更，已发布 hash 仍只代表实际发布内容。下一轮重新构建全量投影会得到不同 hash，必须再次发布，不能因前一次成功而丢失这次变更。
+- 投影生成在数据库事务外执行且必须幂等；投影失败不回滚已提交配置。修复后依据完整投影 hash 重试，不反向回写 Agent。
+- MCP 凭据值不进入规范 hash 输入或日志，凭据轮换通过 `secret_revision` 反映；`credential_ref` 只在运行时解析。模型和 Channel 的凭据值同样不得进入 hash 或日志。
+
+### 8.3 与 ADR 0002 的持久化边界
+
+ADR 0002 规定的运行时持久化面只有三个值，其余运行时事实全部留在 Workspace Runtime Manager 内存。`sandbox_type` 是创建期静态配置，不属于运行时观测事实。
+
+| 值 | 位置 | 边界 |
+| --- | --- | --- |
+| `host_directory` | `workspaces` | 规范化后的宿主目录，创建后不可变；不保存 runtime_directory 或 Runtime Home 布局 |
+| `runtime_session_id` | `sessions` | OpenCode Session 标识；首个 Turn 前可为空，不保存连接、端口或句柄 |
+| `published_projection_hash` | `workspaces` | 只记录最近一次成功发布的非密投影 hash；候选投影、dirty 标记和发布进度只在内存 |
+
+明确不建表、不建字段：进程、端口、PID、句柄、健康状态、Turn Permit、活动 Turn 登记、发布状态机、Runtime Home 目录。DDL 中出现这些列即偏离 ADR 0002，D01/D02 不得实现。
+
+## 9. 高频查询与逻辑查询视图
+
+参考图中的 `query_*` 节点，以下均为 Repository/SQL 逻辑查询，不创建物理表或物化视图。
+
+| 逻辑视图 | 数据来源 | 主要用途 | 索引/访问方式 |
+| --- | --- | --- | --- |
+| `query_workspace_sidebar` | Workspace + Agent + Model | Workspace 列表、默认选择展示 | Workspace sidebar 索引 + PK lookup |
+| `query_workspace_sessions` | Session + Agent + Model | Workspace 内 Session 聚合 | `ix_sessions_workspace_sidebar` |
+| `query_agent_catalog` | Agent Definition | Agent 选择器 | catalog 索引 |
+| `query_session_mcp_activations` | Session Activation + MCP | Session 当前 MCP 选择与有效状态 | Activation PK + MCP PK |
+| `query_session_turns` | Turn + Runtime Message Mapping | Turn 时间线、执行详情 | `uq_turns_session_seq` 反向扫描 |
+| `query_session_history` | OpenCode History + Turn/Mapping | 消息、Agent/模型名称标签、产物投影 | OpenCode 游标 + Turn 批量映射；名称取 Turn 快照 |
+| `query_scheduled_task_overview` | Task + last_run 冗余 + running Run | 任务列表 | Task 索引 + running 部分索引 |
+| `query_channel_route_overview` | Instance + Route + Policy | 渠道配置与路由状态 | Route/Policy 唯一索引 |
+| `query_turn_delivery_diagnostics` | Turn + Delivery | 投递排障 | `ix_channel_deliveries_turn_created` |
+
+### 9.1 列表分页
+
+所有持续增长列表使用 Keyset Pagination，禁止大 Offset：
+
+- Workspaces：游标 `(is_default, last_activity_at, id)`，统一按 DESC 排序。
+- Workspace Sessions：游标 `(pinned, last_activity_at, id)`，统一按 DESC 排序。
+- Turns：游标 `turn_seq`。
+- Scheduled Runs：游标 `(created_at, id)`。
+- Deliveries：游标 `(created_at, id)`。
+
+排序字段必须包含唯一 ID 作为最终 tie-breaker，避免同一毫秒记录跨页重复或遗漏。OpenCode 消息分页不使用这些 DB 游标。
+
+### 9.2 避免 N+1
+
+- Agent Catalog 一次查询 Definition；全局 enabled Skill/MCP 目录分别批量读取，不按 Agent 回查。
+- Session 列表批量加载当前 Agent/Model；需要 MCP 状态时按一批 Session ID 查询 Activation。
+- Turn 历史按一批 `runtime_message_id` 查询映射，不按消息逐条查 Turn；名称快照随 Turn 一次读出。
+- Scheduled Task 列表使用 `last_run_*` 和 running Run 批量查询，不逐任务取 latest。
+
+## 10. 删除、归档与依赖恢复策略
+
+| 实体 | 策略 | 原因 |
+| --- | --- | --- |
+| Primary Agent | 不删除、不归档 | 系统默认入口与 Workspace 回退目标 |
+| Expert Agent | 写 `archived_at` 归档 | 保留历史 Turn 与名称快照；归档后只读 |
+| Model | 被引用后仅 `enabled=0`，不硬删 | 避免悬挂引用；触发默认值回退和依赖暂停 |
+| Skill/MCP | 被引用后仅禁用，不硬删 | 保留目录审计；下一轮全量投影移除 |
+| Workspace | 首版不提供删除 | 避免目录、Session、Runtime 的复杂级联 |
+| Session | 先写 `deleted_at` 关闭准入，再清理 Runtime，最后硬删除领域记录 | 防止删除期间新 Turn 逃逸；Activation、Operation、Turn/Mapping 按 FK 清理 |
+| Turn | 不单独删除；随 Session 清理 | 保持执行序号与 Runtime 关联 |
+| Turn Operation | 不单独作为历史保留；随 Session 清理 | 仅协调重生成，不是消息或配置事实源 |
+| Scheduled Task | 归档，不级联删除 Runs | 保留调度审计 |
+| Channel Instance | 用户可显式删除，Route/Policy 级联 | 配置可重建；依赖失效不能走物理删除 |
+| Route.active_session_id | 故意无 FK | Session 删除后保留下一条入站消息重建路由的机会 |
+| Inbound/Delivery 引用 | 故意无 FK | 实体删除后仍保留去重和投递审计 |
+
+### 10.1 外键与级联矩阵
+
+下表是 D01 的逐字段实现依据；每个外键都必须显式声明动作，不存在隐含 `CASCADE`。
+
+| 子表.字段 | 父表 | 动作 | 理由 |
+| --- | --- | --- | --- |
+| `workspaces.default_agent_id` | `agent_definitions.id` | RESTRICT | 默认 Agent 只能归档；归档事务先回退 Primary，禁止硬删造成悬挂 |
+| `workspaces.default_model_id` | `models.id` | RESTRICT | 模型只禁用；禁用事务先切换默认值 |
+| `sessions.workspace_id` | `workspaces.id` | RESTRICT | Workspace 首版不删除，Session 创建后固定归属 |
+| `sessions.current_agent_id` | `agent_definitions.id` | RESTRICT | 当前选择必须指向真实定义；归档不物理删除 |
+| `sessions.current_model_id` | `models.id` | RESTRICT | 可空；被禁用模型仍需保留行以维持历史引用 |
+| `sessions.scheduled_task_id` | `scheduled_tasks.id` | RESTRICT | Task 只归档；保住 `origin='scheduled'` 的一致性 |
+| `session_mcp_activations.session_id` | `sessions.id` | CASCADE | Session 硬删后激活行无独立意义 |
+| `session_mcp_activations.mcp_server_id` | `mcp_servers.id` | RESTRICT | MCP 只禁用，不硬删 |
+| `turns.session_id` | `sessions.id` | CASCADE | Session 硬删时清理全部执行记录 |
+| `turns.agent_id` | `agent_definitions.id` | RESTRICT | 历史归因依赖真实定义；Agent 只归档 |
+| `turns.model_id` | `models.id` | RESTRICT | 历史归因依赖真实模型；模型只禁用 |
+| `turn_operations.session_id` | `sessions.id` | CASCADE | 操作随 Session 清理，不跨 Session 保留 |
+| `turn_operations.target_turn_id` | `turns.id` | CASCADE | 目标 Turn 不存在时操作无意义；应用层再校验与 Session 一致 |
+| `turn_runtime_messages.turn_id` | `turns.id` | CASCADE | 消息归属随 Turn 清理 |
+| `skills.repo_id` | `skill_repo.repo_id` | RESTRICT | 来源只归档/禁用，已引用 Skill 不被级联抹除 |
+| `scheduled_tasks.workspace_id` | `workspaces.id` | RESTRICT | 任务必须绑定真实 Workspace |
+| `scheduled_tasks.agent_id` | `agent_definitions.id` | RESTRICT | Agent 只归档；依赖失效走 paused + reason |
+| `scheduled_tasks.model_id` | `models.id` | RESTRICT | Model 只禁用；依赖失效走 paused + reason |
+| `scheduled_task_runs.task_id` | `scheduled_tasks.id` | RESTRICT | 保留调度审计，Task 只归档 |
+| `scheduled_task_runs.session_id` | `sessions.id` | SET NULL | Session 删除后保留 Run 审计 |
+| `scheduled_task_runs.turn_id` | `turns.id` | SET NULL | Turn 随 Session 删除，但 Run 审计保留 |
+| `channel_instances.workspace_id` | `workspaces.id` | RESTRICT | 完整绑定必须指向真实 Workspace |
+| `channel_instances.agent_id` | `agent_definitions.id` | RESTRICT | Agent 只归档；依赖失效走 paused + reason |
+| `channel_instances.model_id` | `models.id` | RESTRICT | Model 只禁用；依赖失效走 paused + reason |
+| `channel_provisionings.workspace_id` | `workspaces.id` | RESTRICT | 接入过程同样绑定真实 Workspace |
+| `channel_provisionings.agent_id` | `agent_definitions.id` | RESTRICT | 同上；重选前保持原引用 |
+| `channel_provisionings.model_id` | `models.id` | RESTRICT | 同上；重选前保持原引用 |
+| `channel_routes.channel_instance_id` | `channel_instances.id` | CASCADE | Route 属于 Instance，删除实例时一并清理 |
+| `channel_access_policies.channel_instance_id` | `channel_instances.id` | CASCADE | Policy 属于 Instance，删除实例时一并清理 |
+
+以下引用故意不建 FK，但写入时必须由应用校验目标存在：
+
+| 字段 | 不建 FK 的理由 |
+| --- | --- |
+| `channel_routes.active_session_id` | Session 硬删后保留路由，下一条入站消息可重建；复用前校验 `deleted_at IS NULL` |
+| `channel_inbound_events.channel_instance_id` | 去重审计必须在实例删除后仍可读 |
+| `channel_deliveries.channel_instance_id` | Append-only 投递审计，不随实例删除 |
+| `channel_deliveries.route_id` | 路由删除后仍需保留投递证据 |
+| `channel_deliveries.session_id` | Session 删除后仍需保留投递证据 |
+| `channel_deliveries.turn_id` | Turn 随 Session 删除后仍需保留投递证据 |
+| `scheduled_tasks.last_run_id` | 避免 Task 与 Run 循环外键；按 §6.2 的条件更新维护 |
+
+除本表明确标注的 `CASCADE` / `SET NULL` 外，其余外键一律 `RESTRICT`。新增外键必须同时在本表登记动作和理由，并同步 D01/D02 与 D08 约束测试。
+
+无外键不等于无校验：写入时必须验证目标存在；读取审计表时不得假设被引用实体仍存在。Skill/MCP 的 `enabled=0` 只影响后续投影和有效激活，不改写历史 Turn。
+
+依赖变更必须遵循以下事务规则：
+
+1. **归档 Agent**：同一事务写 `archived_at`，把所有以它为默认的 Workspace 的 `default_agent_id` 回退到未归档 Primary，并将引用它的 Channel Instance、Scheduled Task 置为 `paused=1`、`reason='agent_archived'`。已有 Session 的 `current_agent_id` 原样保留，普通新 Turn 需显式改选；重生成只按第 4.7 节检查原 Turn Agent。
+2. **禁用 Model**：同一事务写 `enabled=0`，必要时清除其 `is_default`。对每个以它为默认的 Workspace，按目录顺序 `(is_default DESC, created_at DESC, id DESC)` 选择下一个 enabled 模型作为 `default_model_id`，没有则置 NULL。已有 Session 的当前模型值保留，但普通新 Turn 和重生成均被阻止，直至显式改选 enabled 模型。
+3. **暂停依赖**：Model 禁用还将引用它的 Channel Instance、Scheduled Task 置为 `paused=1`、`reason='model_disabled'`。Agent/Model 依赖失效时不得物理删除这些实体或清空外键。
+4. **显式恢复**：Channel/Scheduler 恢复时，用户必须重选未归档 Agent 和 enabled Model；应用校验完整绑定后，同事务更新绑定并清除 `paused/reason`。重新启用 Model 或其他依赖变化不得自动解除暂停。
+5. **MCP 默认值**：修改 `default_active` 只影响之后创建的 Session；新增 MCP 对已有 Session 默认未激活，不做回填。
+
+## 11. 事务、并发与 API 不变量
+
+1. **Agent 配置变更**：名称、描述、prompt、来源等 Definition 更新与 `config_updated_at` 推进必须同事务；`config_updated_at` 严格递增。
+2. **Agent 并发编辑**：使用 `WHERE id=:id AND config_updated_at=:expected` 条件更新；受影响行数为 0 即判定冲突，不覆盖他人修改。
+3. **Session 创建**：插入 Session、按当时 enabled MCP 的 `default_active` 初始化 Activation、增加 Workspace.session_count、更新 Workspace 活动时间必须同事务。
+4. **Workspace 发布与 Permit**：候选全量投影在事务外构建；Runtime Manager 在内存暂停新准入、等待活动 Turn、发布并恢复准入。Permit 确认最新投影与登记活动 Turn 必须原子；不自动杀在飞 Turn，数据库只保存已发布 hash。
+5. **Turn 准入**：取得 Permit 后，最终事务重新校验 Session 未删除、所选 Agent 未归档、Model enabled，递增 `last_turn_seq` 并插入 running Turn 与名称快照；任一步失败都释放内存登记。
+6. **Turn 终态**：条件更新 running → terminal，并更新 Session/Workspace 活动时间；不得覆盖已有终态。
+7. **Runtime Message 关联**：以 `runtime_message_id` 幂等插入；重复事件不得产生新 ordinal。
+8. **重生成**：目标预检、`reverting` 插入使用同一 Session 串行协调；部分唯一索引兜底。OpenCode revert 不放在 DB 事务中，`accepted/failed/interrupted` 均按第 4.7 节推进。
+9. **崩溃恢复**：重新开放 Session 准入前，先对账 running Turn、遗留 `reverting` Operation 和 Runtime 可见历史，修复 Mapping 与 Session `last_turn_seq`；不自动重放用户输入，恢复后由用户重新输入。
+10. **Scheduled Run**：running 部分唯一索引防重入；终态和租约接管使用条件 UPDATE。
+11. **Channel Route**：依赖三元组唯一约束处理创建竞态，冲突后回读。
+12. **Channel Provisioning**：waiting 表达式唯一索引防止同归属重复接入。
+
+### 11.1 Turn 操作 HTTP 语义
+
+- 所有 Turn 操作按 **400 参数错误 → 404 存在性 → 409 状态冲突 → 503 可用性** 的优先级返回首个适用错误。
+- `abort` 幂等：对 running Turn 条件更新为 interrupted 后返回 200，`already_stopped=false`；目标已是终态或重复 abort 同样返回 200，`already_stopped=true`。重复 abort 不返回 409；不存在的 Turn 仍按存在性返回 404。
+- 重生成非最新 Turn 返回 `409 INVALID_TURN_OPERATION`；原 Turn Agent 已归档、当前 Model disabled 等状态问题也返回 409。OpenCode/Runtime 不可用且不存在更高优先级错误时返回 503。
+- OpenCode 历史不可用时历史查询返回 503，不使用数据库表拼接旧消息。
+
+## 12. 性能与可扩展性
+
+### 12.1 写入性能
+
+- 不为每个 Delta 写 DB，避免高频率小事务。
+- 所有高频外键关系均有对应左前缀索引，减少插入时的外键检查成本。
+- 不重复建立已被 PK/UQ 左前缀覆盖的索引，降低 Turn 和 Mapping 写放大。
+- JSON 只用于小配置，不在 JSON 字段上过滤、排序或 join。
+- 事务只覆盖数据库原子操作，Runtime HTTP 和文件 I/O 在事务外。
+
+### 12.2 数据增长
+
+- `channel_inbound_events` 按去重窗口清理。
+- `channel_deliveries` 按审计保留策略批量清理。
+- `scheduled_task_runs` 可按任务保留最近 N 条或按保留期清理；Task 的 `last_run_*` 不因此失效。
+- Turn/Session 不自动清理；需要归档时另行设计，不在 P0 增加归档表。
+- 清理使用小批次 keyset，避免长写事务和巨大 WAL。
+
+### 12.3 扩展路径
+
+- 当前模块化单体仍以 SQLite 为部署基线，不提前引入分布式锁或数据库队列。
+- 关系、约束和时间类型可平滑映射到 PostgreSQL；未来迁移时替换 SQLite 表达式/部分索引为对应方言，不改变领域模型。
+- 单服务多实例出现真实需求前，不实现 DB 调度队列；现有 Run 租约与条件更新已避免明显状态覆盖。
+- 只有查询指标证明必要时才增加覆盖索引或物理视图，不预先为所有字段建索引。
+
+## 13. 新基线迁移顺序
+
+项目未投产，采用单一清理式 baseline。数据库从空结构只创建本文枚举的新表，不创建旧表、不保留新旧并行路径、不双写，也不提供旧数据在线转换；已有开发库清理后重建，生产数据转换不在范围内。
+
+1. 创建无依赖的 `models`、`skill_repo`、`mcp_servers`、`agent_definitions`。
+2. 创建 `skills`、`workspaces`。
+3. 创建 `scheduled_tasks`、`sessions`、`session_mcp_activations`、`turns`、`turn_operations`、`turn_runtime_messages`。
+4. 创建 `scheduled_task_runs` 和六张 Channel 表。
+5. 创建全部 CHECK、UQ、部分唯一索引和查询索引。
+6. 初始化 Primary、内建 Skill Repo、默认 Workspace；默认模型允许后配置。
+7. 执行结构、并发、恢复和 API 契约测试后再开放服务。
+
+## 14. 验收清单
+
+以下是进入 Verified Frozen 前必须通过真实实现和契约测试验证的标准，不是当前已完成或已通过的声明。M1 只冻结核心对话 7 表（`agent_definitions`、`workspaces`、`sessions`、`session_mcp_activations`、`turns`、`turn_operations`、`turn_runtime_messages`）；Scheduler/Channel 表结构可随 baseline 固化，但行为语义随 M4 验收。
+
+状态标记规则：M0 阶段所有表保持 Draft；M1 验证通过后只给核心对话 7 表的标题追加 `Verified Frozen`，其余表继续保留 Draft，直到 M4 行为语义验收完成。
+
+### 14.1 结构验收
+
+- `PRAGMA foreign_key_check` 无结果，`PRAGMA integrity_check` 返回 `ok`；SQLite 版本不低于 3.35.0。
+- Alembic baseline 按第 3 节枚举清单逐项核对业务表：核心 7、目录 4、Scheduler 2、Channel 6 必须全部存在且无额外业务表；数量 19 只作提示，不以数量增删表。
+- `sqlite_master` 中能查到本文全部命名 `ck_*`、`uq_*`、`ix_*`，且部分唯一索引、表达式唯一索引的谓词与表达式和文档一致。
+- Primary、默认 Workspace、全局默认模型均至多一个，`uq_agent_definitions_one_primary` 生效。
+- `session_mcp_activations` 的 PK 为 `(session_id,mcp_server_id)`，`active` 只允许 0/1；MCP 反查索引存在。
+- 所有 BOOL 字段都有 `IN (0,1)` CHECK；所有状态字段为 `TEXT + CHECK`；`turns.turn_seq >= 1`、`turn_runtime_messages.ordinal >= 0` 等范围约束真实生效。
+- `turns` 的两个名称快照非空，Turn 不保存执行配置或消息正文；`turn_operations` 的 type/status CHECK、目标外键和 reverting 部分唯一索引生效。
+- `workspaces.published_projection_hash` 可空且只在成功发布后写入；`mcp_servers.default_active` 为 BOOL，`secret_revision` 拒绝负数。
+- 全部 JSON 字段拒绝非法 JSON，温度使用 REAL 且默认 0.7；所有时间字段只读写 UTC 毫秒整数。
+
+### 14.2 并发与投影验收
+
+- 同 Session 并发准入只产生一个 running Turn，Turn 序号无重复；同 Agent 并发编辑经 `config_updated_at` 条件更新只有一方成功。
+- 同 Session 并发重生成至多一个 `reverting` Operation；同 Scheduled Task 并发触发至多一个 running Run。
+- 同 Channel 归属并发 Provisioning 至多一个 waiting Attempt，Route 创建竞态最终只有一条三元组记录；重复 Runtime 事件不会生成重复 Mapping。
+- 相同全量投影在不同遍历顺序下得到相同 hash；未归档 Agent 或 enabled Model/Skill/MCP 的执行内容变化会改变 hash。
+- MCP 非密配置、工具集摘要或 `secret_revision` 变化会改变 hash；凭据值和 Secret 内容不出现在 hash 输入与日志中。
+- 发布暂停新 Permit 并等待活动 Turn 自然终态，不自动 abort；发布失败不推进已发布 hash。
+- 发布中再次修改配置时，实际发布 hash 与下一轮候选 hash 不同，下一轮必须再次发布。
+
+### 14.3 Session、重生成与恢复验收
+
+- Session 创建时按当时 enabled MCP 的 `default_active` 初始化 Activation；修改默认值不影响已有 Session，新增 MCP 对已有 Session 默认未激活。
+- enabled Skill 对所有 Agent 可见，disabled Skill 在下一轮全量投影中移除；有效 MCP 必须同时满足目录 enabled、Session active 和 Runtime ready，非 ready 工具本轮不可见且普通对话不被阻塞。
+- 重生成仅接受最新 Turn，使用原 Turn Agent 的最新配置和 Session 当前 enabled Model；原 Agent 归档会拒绝，Session 当前 Agent 归档不妨碍原 Agent 可用的重生成。
+- Operation 状态按 `reverting → accepted/failed` 推进；崩溃恢复对账 Runtime 可见历史后把遗留操作标为 interrupted，修复 `last_turn_seq`，不自动重放输入，不增加其他 Turn 终态。
+- Agent 归档使 Workspace 默认 Agent 回退 Primary，已有 Session 当前值保留；Model 禁用使 Workspace 默认 Model 选择下一个 enabled 候选或 NULL。
+- Agent/Model 依赖失效使 Channel/Scheduler 写入 paused + reason，不物理删除；只有显式重选有效 Agent/Model 才能解除暂停。
+
+### 14.4 API 与查询验收
+
+- abort 首次停止和重复调用均按契约返回 200，重复响应 `already_stopped=true`；不存在目标返回 404。
+- 构造同时命中多类错误的请求，验证 HTTP 优先级为 400、404、409、503；非最新重生成稳定返回 `409 INVALID_TURN_OPERATION`。
+- Workspace/Session/Turn/Run/Delivery 列表均使用既定索引和 keyset；SQLite `EXPLAIN QUERY PLAN` 验证高频查询无全表扫描，小表目录点查除外。
+- Session 历史不按消息逐条查询 Turn，Channel/Scheduler 列表无 N+1；OpenCode 历史不可用时返回 503，不拼接数据库消息。
+
+### 14.5 基线验收
+
+- 在空数据库执行 baseline 后，按第 3 节枚举清单逐项核对表集合；数量 19 只作提示，除业务表和 `alembic_version` 外不得有额外并行结构。
+- 清理式重建不读取或转换旧数据，不执行在线迁移或双写；测试通过前文档保持 Draft。
+
+## 15. 与旧模型的关键差异
+
+- 旧 `agents` 收敛为单层 `agent_definitions`，只保留名称、描述、prompt、来源和乐观锁等直接字段；不再持有 `default_model`。
+- 已删除 `agent_skills`、`agent_mcp_bindings` 及 Agent 能力授权设计；Skill 改为全局 enabled，MCP 改为 Session Activation。
+- 已删除 `turns.execution_snapshot_json` 和旧 `execution_snapshots` 表设计；Turn 仅保留两个名称快照用于历史归因，不重放配置。
+- 已删除 `agent_definitions.config_hash`、`workspaces.config_generation` 及配置代次/租约设计，改为单一 `published_projection_hash` 与 Runtime Manager 内存 Permit。
+- 已删除 Turn 的自引用重生成字段，改由 `turn_operations` 协调 revert 和崩溃恢复；Operation 不是第二历史源。
+- 旧 `sessions.agent_id` 所有权改为 Workspace 所有权 + 当前 Agent 选择。
+- 旧 `messages/message_events` 删除，改为 Turn + Runtime Message Mapping。
+- 旧 `runtime_type/runtime_session_key/remote_runtime_agent_id` 删除，只保留 `runtime_session_id`。
+- 旧 `agent_runtime_state/agent_locks` 删除。
+- Model API Key、MCP/Channel 秘密统一使用 Secret Store 引用；MCP 以 `secret_revision` 参与非密投影 hash。
+- Scheduled Task 改为绑定 Workspace + Agent + Model，Run 增加 Turn 关联、租约和重入约束；依赖失效使用 paused + reason。
+- Channel Instance/Provisioning 改为绑定 Workspace + Agent + Model，并补齐状态、依赖暂停及活跃占用约束。
