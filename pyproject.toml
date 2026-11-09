@@ -56,6 +56,8 @@ dev = [
   "bandit>=1.9",
   "mypy>=1.8",
   "python-semantic-release>=9.0",
+  "types-PyYAML>=6.0.12",
+  "openapi-spec-validator>=0.9",
 ]
 
 [project.scripts]
@@ -162,6 +164,8 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.15",
     "bandit>=1.9",
+    "types-PyYAML>=6.0.12",
+    "openapi-spec-validator>=0.9",
 ]
 
 [tool.uv]
