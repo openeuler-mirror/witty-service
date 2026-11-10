@@ -217,14 +217,17 @@ def test_catalog_default_model_and_skill_upsert(repos: Repos) -> None:
     assert again.skill_id == skill.skill_id
     assert again.content_sha256 == "hash-2"
     assert again.enabled == 0
+    assert repos.catalog.get_skill_repo(repo.repo_id).skill_count == 1
 
 
 def test_mcp_upsert_increments_secret_revision(repos: Repos) -> None:
     first = repos.catalog.upsert_mcp_server("Search", {"url": "a"}, "ref-1", 1, 1_000)
     second = repos.catalog.upsert_mcp_server("search", {"url": "b"}, "ref-2", 1, 1_001)
+    third = repos.catalog.upsert_mcp_server("search", {"url": "c"}, "ref-2", 1, 1_002)
     assert first.secret_revision == 0
     assert second.id == first.id
     assert second.secret_revision == 1
+    assert third.secret_revision == 1
     assert second.mcp_server_name == "Search"
 
 
@@ -247,12 +250,19 @@ def test_scheduler_run_finish_updates_task_summary(repos: Repos) -> None:
     )
     run = repos.scheduler.create_run(task.id, "worker-1", 2_000, None, None, 1_001)
     finished = repos.scheduler.finish_run(
-        run.id, ScheduledTaskRunStatus.succeeded, None, 1_002
+        run.id, ScheduledTaskRunStatus.succeeded, None, "worker-1", 1_002
     )
     assert finished is not None and finished.lease_owner is None
     task_after = repos.scheduler.get_task(task.id)
     assert task_after.last_run_id == run.id
-    assert task_after.last_run_status == ScheduledTaskRunStatus.succeeded
+    assert task_after.last_run_at == run.created_at
+    assert task_after.last_run_status is ScheduledTaskRunStatus.succeeded
+    assert (
+        repos.scheduler.finish_run(
+            run.id, ScheduledTaskRunStatus.failed, None, "worker-2", 1_003
+        )
+        is None
+    )
 
 
 def test_channel_event_dedup_and_route_identity(repos: Repos) -> None:

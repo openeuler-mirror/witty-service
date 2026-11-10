@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from sqlalchemy import update
 from sqlalchemy.dialects.sqlite import insert
 
 from witty_service.domain.enums import (
@@ -168,14 +169,22 @@ class ChannelRepository(RepositoryBase):
         if status == ChannelProvisioningStatus.waiting:
             raise ValueError("finish_provisioning requires a terminal status")
         with self._transaction() as session:
-            row = session.get(ChannelProvisioningORM, provisioning_id)
-            if row is None or row.status != ChannelProvisioningStatus.waiting.value:
+            result = session.execute(
+                update(ChannelProvisioningORM)
+                .where(
+                    ChannelProvisioningORM.id == provisioning_id,
+                    ChannelProvisioningORM.status
+                    == ChannelProvisioningStatus.waiting.value,
+                )
+                .values(status=status.value, error_code=error_code, updated_at=now)
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount != 1:
                 return None
-            row.status = status.value
-            row.error_code = error_code
-            row.updated_at = now
-            session.flush()
-            return record_of(ChannelProvisioningRecord, row)
+            return record_of(
+                ChannelProvisioningRecord,
+                session.get(ChannelProvisioningORM, provisioning_id),
+            )
 
     def get_or_create_route(
         self,

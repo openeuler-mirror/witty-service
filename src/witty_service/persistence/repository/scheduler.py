@@ -8,6 +8,12 @@ from witty_service.persistence.entities import ScheduledTaskORM, ScheduledTaskRu
 from witty_service.persistence.repository._base import RepositoryBase, new_id, record_of
 
 
+def _summary_is_newer(task: ScheduledTaskORM, created_at: int, run_id: str) -> bool:
+    if task.last_run_at is None:
+        return True
+    return (created_at, run_id) >= (task.last_run_at, task.last_run_id or "")
+
+
 class SchedulerRepository(RepositoryBase):
     def create_task(
         self,
@@ -88,6 +94,12 @@ class SchedulerRepository(RepositoryBase):
             )
             session.add(row)
             session.flush()
+            task = session.get(ScheduledTaskORM, task_id)
+            if task is not None and _summary_is_newer(task, row.created_at, row.id):
+                task.last_run_id = row.id
+                task.last_run_at = row.created_at
+                task.last_run_status = row.status
+                task.updated_at = now
             return record_of(ScheduledTaskRunRecord, row)
 
     def finish_run(
@@ -95,6 +107,7 @@ class SchedulerRepository(RepositoryBase):
         run_id: str,
         status: ScheduledTaskRunStatus,
         error: str | None,
+        lease_owner: str,
         now: int,
     ) -> ScheduledTaskRunRecord | None:
         if status == ScheduledTaskRunStatus.running:
@@ -105,6 +118,7 @@ class SchedulerRepository(RepositoryBase):
                 .where(
                     ScheduledTaskRunORM.id == run_id,
                     ScheduledTaskRunORM.status == ScheduledTaskRunStatus.running.value,
+                    ScheduledTaskRunORM.lease_owner == lease_owner,
                 )
                 .values(
                     status=status.value,
@@ -119,10 +133,13 @@ class SchedulerRepository(RepositoryBase):
                 return None
             row = session.get(ScheduledTaskRunORM, run_id)
             task = session.get(ScheduledTaskORM, row.task_id)
-            if task is not None:
+            if task is not None and (
+                task.last_run_id == row.id
+                or _summary_is_newer(task, row.created_at, row.id)
+            ):
                 task.last_run_id = row.id
-                task.last_run_at = now
-                task.last_run_status = status.value
+                task.last_run_at = row.created_at
+                task.last_run_status = row.status
                 task.updated_at = now
             return record_of(ScheduledTaskRunRecord, row)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from sqlalchemy import func
 from sqlalchemy.dialects.sqlite import insert
 
 from witty_service.domain.enums import SkillDiscoverStatus
@@ -194,6 +195,16 @@ class CatalogRepository(RepositoryBase):
                 )
                 .one()
             )
+            skill_count = (
+                session.query(func.count())
+                .select_from(SkillORM)
+                .filter(SkillORM.repo_id == repo_id)
+                .scalar()
+            )
+            session.query(SkillRepoORM).filter(SkillRepoORM.repo_id == repo_id).update(
+                {"skill_count": skill_count, "updated_at": now},
+                synchronize_session=False,
+            )
             return record_of(SkillRecord, row)
 
     def list_skills(self, repo_id: str) -> list[SkillRecord]:
@@ -215,6 +226,16 @@ class CatalogRepository(RepositoryBase):
         now: int,
     ) -> McpServerRecord:
         with self._transaction() as session:
+            existing = (
+                session.query(McpServerORM)
+                .filter(McpServerORM.mcp_server_name == mcp_server_name)
+                .one_or_none()
+            )
+            revision_increment = (
+                0
+                if existing is None or existing.credential_ref == credential_ref
+                else 1
+            )
             statement = insert(McpServerORM).values(
                 id=new_id(),
                 mcp_server_name=mcp_server_name,
@@ -232,13 +253,15 @@ class CatalogRepository(RepositoryBase):
                         "config_json": statement.excluded.config_json,
                         "credential_ref": statement.excluded.credential_ref,
                         "enabled": statement.excluded.enabled,
-                        "secret_revision": McpServerORM.secret_revision + 1,
+                        "secret_revision": McpServerORM.secret_revision
+                        + revision_increment,
                         "updated_at": now,
                     },
                 )
             )
             row = (
                 session.query(McpServerORM)
+                .populate_existing()
                 .filter(McpServerORM.mcp_server_name == mcp_server_name)
                 .one()
             )
