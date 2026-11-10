@@ -6,6 +6,14 @@ from witty_service.persistence.entities.catalog import (
     SkillORM,
     SkillRepoORM,
 )
+from witty_service.persistence.entities.channel import (
+    ChannelAccessPolicyORM,
+    ChannelDeliveryORM,
+    ChannelInboundEventORM,
+    ChannelInstanceORM,
+    ChannelProvisioningORM,
+    ChannelRouteORM,
+)
 from witty_service.persistence.entities.scheduler import (
     ScheduledTaskORM,
     ScheduledTaskRunORM,
@@ -21,6 +29,12 @@ from witty_service.persistence.entities.workspace import WorkspaceORM
 __all__ = [
     "AgentDefinitionORM",
     "Base",
+    "ChannelAccessPolicyORM",
+    "ChannelDeliveryORM",
+    "ChannelInboundEventORM",
+    "ChannelInstanceORM",
+    "ChannelProvisioningORM",
+    "ChannelRouteORM",
     "McpServerORM",
     "ModelORM",
     "ScheduledTaskORM",

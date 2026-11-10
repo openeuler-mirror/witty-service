@@ -19,6 +19,12 @@ from witty_service.persistence.entities import (
 
 EXPECTED_TABLES = {
     "agent_definitions",
+    "channel_access_policies",
+    "channel_deliveries",
+    "channel_inbound_events",
+    "channel_instances",
+    "channel_provisionings",
+    "channel_routes",
     "mcp_servers",
     "models",
     "scheduled_task_runs",
@@ -34,6 +40,17 @@ EXPECTED_TABLES = {
 
 EXPECTED_INDEXES = {
     "ix_agent_definitions_catalog",
+    "ix_channel_deliveries_created",
+    "ix_channel_deliveries_instance_created",
+    "ix_channel_deliveries_route_created",
+    "ix_channel_deliveries_turn_created",
+    "ix_channel_inbound_events_received",
+    "ix_channel_instances_binding",
+    "ix_channel_instances_owner",
+    "ix_channel_instances_status",
+    "ix_channel_provisionings_expiry",
+    "ix_channel_provisionings_lookup",
+    "ix_channel_routes_active_session",
     "ix_mcp_servers_enabled_name",
     "ix_models_catalog",
     "ix_scheduled_task_runs_global_created",
@@ -52,6 +69,7 @@ EXPECTED_INDEXES = {
     "ix_turns_agent",
     "ix_workspaces_sidebar",
     "uq_agent_definitions_one_primary",
+    "uq_channel_provisionings_waiting",
     "uq_models_provider_endpoint_model",
     "uq_models_single_default",
     "uq_scheduled_task_runs_one_running",
@@ -62,6 +80,9 @@ EXPECTED_INDEXES = {
 
 EXPECTED_UNIQUE_CONSTRAINTS = {
     "uq_agent_definitions_name",
+    "uq_channel_access_policies_instance_conversation",
+    "uq_channel_inbound_events_instance_event",
+    "uq_channel_routes_instance_conversation_user",
     "uq_mcp_servers_mcp_server_name",
     "uq_sessions_runtime_session_id",
     "uq_skill_repo_repo_name",
