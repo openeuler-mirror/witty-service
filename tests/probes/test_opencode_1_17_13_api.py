@@ -28,6 +28,10 @@ import pytest
 from tests.probes.conftest import new_marker
 from tests.probes.mock_provider import MockProvider
 from tests.probes.probe_env import (
+    AGENT_A_PROMPT,
+    AGENT_B_PROMPT,
+    SKILL_BODY,
+    SKILL_NAME,
     EventCollector,
     ProbeEnv,
 )
@@ -889,3 +893,652 @@ def test_p22_v2_history_and_message_pagination(
         data[0]["id"],
         data[1]["id"],
     ]
+
+
+# --------------------------------------------------------------------- v2 独有语义
+def test_v2_resume_false_only_admits_then_resume_true_executes(
+    env: ProbeEnv, client: httpx.Client, mock: MockProvider
+) -> None:
+    session_id = str(v2_create(client, env)["id"])
+    marker = new_marker("resume")
+    message_id = f"msg_{uuid.uuid4().hex}"
+
+    admitted = v2_prompt(
+        client, session_id, marker, message_id=message_id, resume=False
+    )
+    assert admitted.status_code == 200
+    time.sleep(1.0)
+    assert mock.count_for(marker) == 0
+    assert [event["type"] for event in v2_events(client, session_id)] == [
+        "session.next.prompt.admitted"
+    ]
+
+    resumed = v2_prompt(client, session_id, marker, message_id=message_id, resume=True)
+    assert resumed.status_code == 200
+    terminal = v2_wait_turn(client, session_id, 0)
+    assert terminal["type"] == "session.next.step.ended"
+    assert mock.count_for(marker) == 1
+    assert [
+        event["type"] for event in v2_events(client, session_id)
+    ] == NORMAL_TURN_TYPES
+
+    duplicate = v2_prompt(
+        client, session_id, marker, message_id=message_id, resume=True
+    )
+    assert duplicate.status_code == 200
+    assert duplicate.json()["data"]["promotedSeq"] == 2
+    assert mock.count_for(marker) == 1
+    assert len(v2_events(client, session_id)) == len(NORMAL_TURN_TYPES)
+
+
+def test_v2_busy_prompt_admission_before_previous_step_end(
+    env: ProbeEnv, client: httpx.Client, mock: MockProvider
+) -> None:
+    session_id = str(v2_create(client, env)["id"])
+    first = new_marker("busy1")
+    second = new_marker("busy2")
+
+    assert v2_prompt(client, session_id, f"SLOW {first}").status_code == 200
+    mock.wait_for_marker(first, 1, timeout=20)
+    assert v2_prompt(client, session_id, second).status_code == 200
+
+    deadline = time.time() + 40
+    while time.time() < deadline:
+        types = [event["type"] for event in v2_events(client, session_id)]
+        if types.count("session.next.step.ended") >= 2:
+            break
+        time.sleep(0.05)
+    else:
+        raise TimeoutError(f"两轮未完成：{types[-12:]}")
+
+    events = v2_events(client, session_id)
+    types = [event["type"] for event in events]
+    assert types.count("session.next.prompt.admitted") == 2
+    first_end = types.index("session.next.step.ended")
+    second_admit = [
+        index
+        for index, event_type in enumerate(types)
+        if event_type == "session.next.prompt.admitted"
+    ][1]
+    second_prompt = [
+        index
+        for index, event_type in enumerate(types)
+        if event_type == "session.next.prompted"
+    ][1]
+    assert second_admit < first_end < second_prompt
+
+    assert mock.count_for(first) == 1
+    assert mock.count_for(second) == 1
+    steered = user_texts(mock.request_for(second))
+    assert steered[:2] == [f"SLOW {first}", second]
+
+    messages = v2_messages(client, session_id)
+    assert [message["type"] for message in messages] == [
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert [message["text"] for message in messages if message["type"] == "user"] == [
+        second,
+        f"SLOW {first}",
+    ]
+
+
+def test_v2_invalid_model_and_agent_at_create(
+    env: ProbeEnv, client: httpx.Client, mock: MockProvider
+) -> None:
+    # 非法 model：create 接受并写进 session；prompt 仍 200，但回合静默停住。
+    bad_model = v2_create(client, env, model=("mock", "does-not-exist"))
+    bad_model_id = str(bad_model["id"])
+    assert bad_model["model"]["id"] == "does-not-exist"
+    marker = new_marker("badmodel")
+    assert v2_prompt(client, bad_model_id, marker).status_code == 200
+    time.sleep(2.5)
+    assert mock.count_for(marker) == 0
+    assert [event["type"] for event in v2_events(client, bad_model_id)] == [
+        "session.next.prompt.admitted",
+        "session.next.prompted",
+    ]
+
+    # 非法 agent：create 接受；prompt 仍按现有 agent 执行，但 session 保留脏值。
+    bad_agent = v2_create(client, env, agent="does-not-exist")
+    bad_agent_id = str(bad_agent["id"])
+    assert bad_agent["agent"] == "does-not-exist"
+    agent_marker = new_marker("badagent")
+    terminal = v2_turn(client, bad_agent_id, agent_marker)
+    assert terminal["type"] == "session.next.step.ended"
+    assert mock.count_for(agent_marker) == 1
+    assert v2_session(client, bad_agent_id)["agent"] == "does-not-exist"
+
+
+def test_v2_location_readiness_requires_retry_not_global_catalog(
+    env: ProbeEnv, client: httpx.Client, mock: MockProvider
+) -> None:
+    catalog = client.get("/api/model")
+    assert catalog.status_code == 200
+    assert isinstance(catalog.json()["data"], list)
+
+    cold = env.work_dir / "cold-location"
+    cold.mkdir(exist_ok=True)
+    # 新的 location 服务是异步启动的；全局 catalog 就绪不代表该 location 可执行。
+    warmed = warm_location(client, env, mock, cold)
+    assert warmed.startswith("ses_")
+    session_id = str(v2_create(client, env, directory=cold)["id"])
+    marker = new_marker("cold")
+    terminal = v2_turn(client, session_id, marker)
+    assert terminal["type"] == "session.next.step.ended"
+    assert mock.count_for(marker) == 1
+
+
+def test_v2_restart_keeps_history_and_after_cursor(
+    standalone_env: Any, mock: MockProvider
+) -> None:
+    probe_env = standalone_env()
+    client = probe_env.client()
+    try:
+        warm_location(client, probe_env, mock, probe_env.work_dir)
+        session_id = str(v2_create(client, probe_env)["id"])
+        first = new_marker("restart1")
+        second = new_marker("restart2")
+        v2_turn(client, session_id, first)
+        v2_turn(client, session_id, second)
+
+        events = v2_events(client, session_id)
+        history_ids = [event["id"] for event in events]
+        message_ids = [message["id"] for message in v2_messages(client, session_id)]
+        cut = int(events[2]["durable"]["seq"])
+        expected_after = [event for event in events if event["durable"]["seq"] > cut]
+
+        probe_env.restart()
+        client.close()
+        client = probe_env.client()
+        health = client.get("/global/health")
+        assert health.status_code == 200
+        assert "1.17.13" in health.text
+
+        restarted = v2_events(client, session_id)
+        assert [event["id"] for event in restarted] == history_ids
+        after = v2_events(client, session_id, after=cut, limit=100)
+        assert [event["id"] for event in after] == [
+            event["id"] for event in expected_after
+        ]
+        assert [message["id"] for message in v2_messages(client, session_id)] == (
+            message_ids
+        )
+        assert v2_session(client, session_id)["model"]["id"] == "mock-model"
+
+        # 重启后 location 服务同样异步；先预热另一个会话，再验证原会话可继续。
+        warm_location(client, probe_env, mock, probe_env.work_dir)
+        third = new_marker("restart3")
+        terminal = v2_turn(client, session_id, third)
+        assert terminal["type"] == "session.next.step.ended"
+        assert mock.count_for(third) == 1
+        assert user_texts(mock.request_for(third)) == [first, second, third]
+        assert len(v2_events(client, session_id)) > len(events)
+    finally:
+        client.close()
+
+
+# ---------------------------------------- 会话级配置、只读接口与跨会话隔离
+def test_p01_version_and_package_identity(env: ProbeEnv, client: httpx.Client) -> None:
+    info = env.binary_info
+    assert info is not None
+    assert info.version == "1.17.13"
+    assert info.package_name == "opencode-ai"
+    assert info.package_version == "1.17.13"
+    health = client.get("/global/health")
+    assert health.status_code == 200
+    assert health.json()["version"] == "1.17.13"
+
+    # v2 自己的健康检查不带版本；版本只能从 /global/health 取。
+    v2_health = client.get("/api/health")
+    assert v2_health.status_code == 200
+    assert v2_health.json() == {"healthy": True}
+
+    location = v2_location(client)
+    assert location["directory"] == env.server_directory(client)
+    assert location["project"]["id"] == "global"
+
+    # §3.9 只读端点存在性：统一使用 location[directory]，返回 {location, data} JSON。
+    for path in ("/api/provider", "/api/command", "/api/fs/list", "/api/pty"):
+        response = client.get(path, params={"location[directory]": str(env.work_dir)})
+        assert response.status_code == 200, f"{path}: {response.text}"
+        content_type = response.headers.get("content-type", "")
+        assert "application/json" in content_type, f"{path}: {content_type}"
+        assert isinstance(response.json()["data"], list), path
+
+
+def test_p02_session_agent_switch(
+    env: ProbeEnv, client: httpx.Client, mock: MockProvider
+) -> None:
+    session_id = str(v2_create(client, env)["id"])
+    agent_ids = {str(agent["id"]) for agent in v2_agents(client, env.work_dir)}
+    assert {"build", "probe-a", "probe-b"} <= agent_ids
+
+    v2_switch_agent(client, session_id, "probe-a")
+    marker_a = new_marker("p02-a")
+    v2_turn(client, session_id, marker_a)
+    system_a = system_text(mock.request_for(marker_a))
+    assert AGENT_A_PROMPT in system_a
+    assert AGENT_B_PROMPT not in system_a
+
+    v2_switch_agent(client, session_id, "probe-b")
+    marker_b = new_marker("p02-b")
+    v2_turn(client, session_id, marker_b)
+    system_b = system_text(mock.request_for(marker_b))
+    assert AGENT_B_PROMPT in system_b
+    assert AGENT_A_PROMPT not in system_b
+
+    v2_switch_agent(client, session_id, "build")
+    marker_build = new_marker("p02-build")
+    v2_turn(client, session_id, marker_build)
+    system_build = system_text(mock.request_for(marker_build))
+    assert AGENT_A_PROMPT not in system_build
+    assert AGENT_B_PROMPT not in system_build
+    assert v2_session(client, session_id)["agent"] == "build"
+
+    types = [event["type"] for event in v2_events(client, session_id)]
+    assert types.count("session.next.agent.switched") == 3
+
+
+def test_p03_session_model_switch(
+    env: ProbeEnv, client: httpx.Client, mock: MockProvider
+) -> None:
+    session_id = str(v2_create(client, env)["id"])
+    assert v2_session(client, session_id)["model"]["id"] == "mock-model"
+
+    v2_switch_model(client, session_id, MODEL_B)
+    marker_b = new_marker("p03-b")
+    v2_turn(client, session_id, marker_b)
+    assert mock.request_for(marker_b)["model"] == "mock-model-b"
+
+    marker_sticky = new_marker("p03-sticky")
+    v2_turn(client, session_id, marker_sticky)
+    assert mock.request_for(marker_sticky)["model"] == "mock-model-b"
+
+    v2_switch_model(client, session_id, MODEL)
+    marker_default = new_marker("p03-default")
+    v2_turn(client, session_id, marker_default)
+    assert mock.request_for(marker_default)["model"] == "mock-model"
+    assert v2_session(client, session_id)["model"]["id"] == "mock-model"
+
+    # 新 session 不继承上一会话的 switch；create 显式 model 生效。
+    other_id = str(v2_create(client, env)["id"])
+    marker_other = new_marker("p03-other")
+    v2_turn(client, other_id, marker_other)
+    assert mock.request_for(marker_other)["model"] == "mock-model"
+
+    explicit = v2_create(client, env, model=MODEL_B)
+    assert explicit["model"]["id"] == "mock-model-b"
+    marker_explicit = new_marker("p03-explicit")
+    v2_turn(client, str(explicit["id"]), marker_explicit)
+    assert mock.request_for(marker_explicit)["model"] == "mock-model-b"
+
+
+def test_p05_v2_default_toolset_and_sanitize(
+    env: ProbeEnv,
+    client: httpx.Client,
+    mock: MockProvider,
+    v2_baseline_tools: set[str],
+) -> None:
+    session_id = str(v2_create(client, env)["id"])
+    marker = new_marker("p05")
+    v2_turn(client, session_id, marker)
+    actual = set(mock.tool_names_for(marker))
+    assert actual == v2_baseline_tools
+
+    assert {
+        "apply_patch",
+        "bash",
+        "edit",
+        "glob",
+        "grep",
+        "read",
+        "skill",
+        "todowrite",
+        "webfetch",
+        "websearch",
+        "write",
+    } <= actual
+    # v2 默认工具集与 legacy 不同：没有 task，也没有 MCP 工具。
+    assert "task" not in actual
+    assert not (MCP_TOOL_NAMES & actual)
+    assert not (RAW_MCP_NAMES & actual)
+
+
+def test_p06_prompt_tools_field_ignored(
+    env: ProbeEnv,
+    client: httpx.Client,
+    mock: MockProvider,
+    v2_baseline_tools: set[str],
+) -> None:
+    session_id = str(v2_create(client, env)["id"])
+    marker = new_marker("p06")
+    before = v2_last_seq(client, session_id)
+    body = {
+        "prompt": {"text": marker},
+        "tools": {"bash": False, "skill": False},
+    }
+    response = client.post(f"/api/session/{session_id}/prompt", json=body)
+    # v2 prompt 没有 tools 字段：请求被接受，但工具集不变。
+    assert response.status_code == 200, response.text
+    v2_wait_turn(client, session_id, before)
+    assert set(mock.tool_names_for(marker)) == v2_baseline_tools
+
+    marker_next = new_marker("p06-next")
+    v2_turn(client, session_id, marker_next)
+    assert set(mock.tool_names_for(marker_next)) == v2_baseline_tools
+
+
+def test_p07_mcp_tools_absent_from_v2(
+    env: ProbeEnv,
+    client: httpx.Client,
+    mock: MockProvider,
+    v2_baseline_tools: set[str],
+) -> None:
+    # MCP 连接本身是好的（legacy 只读接口可证），但 v2 不暴露 MCP 工具。
+    assert env.mcp_status(client)["probe"]["status"] == "connected"
+    for path in ("/api/mcp", "/api/config"):
+        fallback = client.get(path, params={"location[directory]": str(env.work_dir)})
+        assert fallback.status_code == 200, path
+        assert "text/html" in fallback.headers.get("content-type", ""), path
+    assert not (MCP_TOOL_NAMES & v2_baseline_tools)
+
+    session_id = str(v2_create(client, env)["id"])
+    marker = new_marker("p07")
+    assert (
+        v2_prompt(client, session_id, f"CALLTOOL probe_echo_upper {marker}").status_code
+        == 200
+    )
+    mock.wait_for_marker(marker, 2, timeout=30)
+    assert not (MCP_TOOL_NAMES & set(mock.tool_names_for(marker)))
+    results = mock.tool_results_for(marker)
+    assert any("Unknown tool: probe_echo_upper" in result for result in results), (
+        results
+    )
+
+
+def test_p08_skill_exposure(
+    env: ProbeEnv,
+    client: httpx.Client,
+    mock: MockProvider,
+    v2_baseline_tools: set[str],
+) -> None:
+    response = client.get(
+        "/api/skill", params={"location[directory]": str(env.work_dir)}
+    )
+    assert response.status_code == 200, response.text
+    skills = list(response.json()["data"])
+    assert any(skill.get("name") == SKILL_NAME for skill in skills)
+    assert "skill" in v2_baseline_tools
+
+    session_id = str(v2_create(client, env)["id"])
+    marker = new_marker("p08")
+    assert v2_prompt(client, session_id, f"CALLTOOL skill {marker}").status_code == 200
+    mock.wait_for_marker(marker, 2, timeout=30)
+    results = mock.tool_results_for(marker)
+    assert any(SKILL_BODY in result for result in results), results
+
+
+def test_p14_restart_boundary(standalone_env: Any, mock: MockProvider) -> None:
+    env = standalone_env()
+    client = env.client()
+    try:
+        warm_location(client, env, mock, env.work_dir)
+        session = v2_create(client, env, model=MODEL_B, agent="probe-a")
+        session_id = str(session["id"])
+
+        first = new_marker("p14-1")
+        v2_turn(client, session_id, first)
+        body = mock.request_for(first)
+        assert body["model"] == "mock-model-b"
+        assert AGENT_A_PROMPT in system_text(body)
+        before_ids = [message["id"] for message in v2_messages(client, session_id)]
+
+        env.restart()
+        client.close()
+        client = env.client()
+        assert "1.17.13" in client.get("/global/health").text
+        restored = v2_session(client, session_id)
+        assert restored["model"]["id"] == "mock-model-b"
+        assert restored["agent"] == "probe-a"
+        assert [message["id"] for message in v2_messages(client, session_id)] == (
+            before_ids
+        )
+
+        warm_location(client, env, mock, env.work_dir)
+        second = new_marker("p14-2")
+        v2_turn(client, session_id, second)
+        body = mock.request_for(second)
+        assert body["model"] == "mock-model-b"
+        assert AGENT_A_PROMPT in system_text(body)
+        assert user_texts(body) == [first, second]
+    finally:
+        client.close()
+
+
+def test_p15_restart_id_stability(standalone_env: Any, mock: MockProvider) -> None:
+    env = standalone_env()
+    client = env.client()
+    try:
+        warm_location(client, env, mock, env.work_dir)
+        session_id = str(v2_create(client, env)["id"])
+        for index in range(2):
+            v2_turn(client, session_id, new_marker(f"p15-{index}"))
+
+        before = [
+            (message["id"], part_ids(message))
+            for message in v2_messages(client, session_id)
+        ]
+        env.restart()
+        client.close()
+        client = env.client()
+        after = [
+            (message["id"], part_ids(message))
+            for message in v2_messages(client, session_id)
+        ]
+        assert after == before, (
+            f"重启后 message/part ID 应保持一致；before={before}, after={after}"
+        )
+        assert len({message_id for message_id, _ in after}) == len(after)
+
+        warm_location(client, env, mock, env.work_dir)
+        v2_turn(client, session_id, new_marker("p15-3"))
+        messages = v2_messages(client, session_id)
+        assert len(messages) == 6
+        new_ids = {message["id"] for message in messages[:2]}
+        assert new_ids.isdisjoint({message_id for message_id, _ in before})
+    finally:
+        client.close()
+
+
+def test_p16_tools_boundaries_ignored(
+    env: ProbeEnv,
+    client: httpx.Client,
+    mock: MockProvider,
+    v2_baseline_tools: set[str],
+) -> None:
+    session_id = str(v2_create(client, env)["id"])
+    cases: list[tuple[dict[str, bool], str]] = [
+        ({}, "空对象"),
+        ({"unknown_tool_xyz": False}, "未知 key"),
+        ({"echo_upper": False}, "原始 MCP 名"),
+        ({"bash": False, "skill": False}, "禁用内建工具"),
+        ({"probe_echo_upper": True}, "MCP 工具显式恢复"),
+    ]
+    for tools, context in cases:
+        marker = new_marker("p16")
+        before = v2_last_seq(client, session_id)
+        response = client.post(
+            f"/api/session/{session_id}/prompt",
+            json={"prompt": {"text": marker}, "tools": tools},
+        )
+        assert response.status_code == 200, (context, response.text)
+        v2_wait_turn(client, session_id, before)
+        actual = set(mock.tool_names_for(marker))
+        assert actual == v2_baseline_tools, f"{context}: {sorted(actual)}"
+
+    # create 也不接受 tools：字段被丢弃，工具集回到 baseline。
+    created = v2_create(client, env, tools={"bash": False})
+    assert "tools" not in created
+    marker = new_marker("p16-create")
+    v2_turn(client, str(created["id"]), marker)
+    assert set(mock.tool_names_for(marker)) == v2_baseline_tools
+
+
+def test_p17_default_location(
+    env: ProbeEnv, client: httpx.Client, mock: MockProvider
+) -> None:
+    default = v2_location(client)
+    directory = str(default["directory"])
+    assert directory == env.server_directory(client)
+
+    warm_location(client, env, mock, directory)
+    response = client.post("/api/session", json={})
+    assert response.status_code == 200, response.text
+    session = dict(response.json()["data"])
+    assert session["location"]["directory"] == directory
+
+    marker = new_marker("p17")
+    assert (
+        v2_prompt(client, str(session["id"]), f"CALLTOOL bash pwd {marker}").status_code
+        == 200
+    )
+    mock.wait_for_marker(marker, 2, timeout=30)
+    results = mock.tool_results_for(marker)
+    assert any(directory in result for result in results), results
+
+    # create 不校验 directory 是否存在：不存在的路径也返回 200。
+    missing = env.work_dir / "missing-location"
+    assert not missing.exists()
+    accepted = client.post(
+        "/api/session", json={"location": {"directory": str(missing)}}
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["data"]["location"]["directory"] == str(missing)
+
+
+def test_p18_invalid_switch_recovery(
+    env: ProbeEnv, client: httpx.Client, mock: MockProvider
+) -> None:
+    # 非法 model：switch 204 并写进 session；prompt 200 但回合静默停在 prompted。
+    session_id = str(v2_create(client, env)["id"])
+    v2_switch_model(client, session_id, ("mock", "nope-model"))
+    assert v2_session(client, session_id)["model"]["id"] == "nope-model"
+    marker = new_marker("p18-model")
+    assert v2_prompt(client, session_id, marker).status_code == 200
+    time.sleep(2.5)
+    assert mock.count_for(marker) == 0
+    types = [event["type"] for event in v2_events(client, session_id)]
+    assert types == [
+        "session.next.model.switched",
+        "session.next.prompt.admitted",
+        "session.next.prompted",
+    ]
+
+    # 切回合法 model 可恢复，无需重建会话。
+    v2_switch_model(client, session_id, MODEL)
+    recover = new_marker("p18-model-recover")
+    v2_turn(client, session_id, recover)
+    assert mock.count_for(recover) == 1
+    assert mock.request_for(recover)["model"] == "mock-model"
+
+    # 非法 agent：switch 204 并保留脏值；回合按默认 agent 继续执行。
+    bad_agent_id = str(v2_create(client, env)["id"])
+    v2_switch_agent(client, bad_agent_id, "does-not-exist")
+    assert v2_session(client, bad_agent_id)["agent"] == "does-not-exist"
+    marker = new_marker("p18-agent")
+    terminal = v2_turn(client, bad_agent_id, marker)
+    assert terminal["type"] == "session.next.step.ended"
+    assert mock.count_for(marker) == 1
+    system = system_text(mock.request_for(marker))
+    assert AGENT_A_PROMPT not in system
+    assert AGENT_B_PROMPT not in system
+    assert v2_session(client, bad_agent_id)["agent"] == "does-not-exist"
+
+
+def test_p19_provider_failure_is_bounded(
+    env: ProbeEnv, client: httpx.Client, mock: MockProvider
+) -> None:
+    def observe(label: str, expected_requests: int, expected: str) -> None:
+        session_id = str(v2_create(client, env)["id"])
+        marker = new_marker(label.lower())
+        assert v2_prompt(client, session_id, f"{label} {marker}").status_code == 200
+        mock.wait_for_marker(marker, 1, timeout=30)
+
+        deadline = time.time() + 40
+        terminal: dict[str, Any] | None = None
+        while time.time() < deadline:
+            terminal = next(
+                (
+                    event
+                    for event in v2_events(client, session_id)
+                    if event["type"]
+                    in {"session.next.step.failed", "session.next.step.ended"}
+                ),
+                None,
+            )
+            if terminal is not None:
+                break
+            time.sleep(0.2)
+        assert terminal is not None, f"{label}: 40s 内没有终态事件"
+        assert terminal["type"] == "session.next.step.failed"
+        assert expected in terminal["data"]["error"]["message"]
+        # 1.17.13 的重试次数是固定的：ERROR500 精确 3 次，TIMEOUT 1 次。
+        assert mock.count_for(marker) == expected_requests
+        v2_wait_idle(client, session_id)
+
+        types = [event["type"] for event in v2_events(client, session_id)]
+        assert "session.error" not in types
+        assistant = next(
+            message
+            for message in v2_messages(client, session_id)
+            if message["type"] == "assistant"
+        )
+        assert assistant["finish"] == "error"
+        assert assistant["content"] == []
+
+    observe("ERROR500", 3, "HTTP 500")
+    observe("TIMEOUT", 1, "transport")
+
+
+def test_p21_cross_session_isolation(
+    env: ProbeEnv, client: httpx.Client, mock: MockProvider
+) -> None:
+    session_a = str(v2_create(client, env)["id"])
+    session_b = str(v2_create(client, env)["id"])
+    v2_switch_agent(client, session_a, "probe-a")
+    v2_switch_model(client, session_a, MODEL_B)
+
+    marker_a = new_marker("p21-a")
+    v2_turn(client, session_a, marker_a)
+    body_a = mock.request_for(marker_a)
+    assert body_a["model"] == "mock-model-b"
+    assert AGENT_A_PROMPT in system_text(body_a)
+
+    marker_b = new_marker("p21-b")
+    v2_turn(client, session_b, marker_b)
+    body_b = mock.request_for(marker_b)
+    assert body_b["model"] == "mock-model"
+    assert AGENT_A_PROMPT not in system_text(body_b)
+    assert AGENT_B_PROMPT not in system_text(body_b)
+    assert v2_session(client, session_b).get("agent") != "probe-a"
+
+    types_a = [event["type"] for event in v2_events(client, session_a)]
+    types_b = [event["type"] for event in v2_events(client, session_b)]
+    assert "session.next.agent.switched" in types_a
+    assert "session.next.model.switched" in types_a
+    assert "session.next.agent.switched" not in types_b
+    assert "session.next.model.switched" not in types_b
+
+    v2_switch_agent(client, session_b, "probe-b")
+    marker_b2 = new_marker("p21-b2")
+    v2_turn(client, session_b, marker_b2)
+    assert AGENT_B_PROMPT in system_text(mock.request_for(marker_b2))
+
+    marker_a2 = new_marker("p21-a2")
+    v2_turn(client, session_a, marker_a2)
+    body_a2 = mock.request_for(marker_a2)
+    assert body_a2["model"] == "mock-model-b"
+    assert AGENT_A_PROMPT in system_text(body_a2)
