@@ -112,7 +112,14 @@ package-dir = {"witty_service" = "src/witty_service", "witty_agent_server" = "sr
 pythonpath = ["."]
 testpaths = ["tests"]
 # 未注册的 marker 直接报错：少了 pytest-asyncio 时，283 条异步用例会「跳过即绿」
-addopts = ["--strict-markers"]
+# probe 需要本地固定版本 OpenCode，默认不收集；显式跑用 `pytest tests/probes -m probe`
+addopts = ["--strict-markers", "-m", "not probe"]
+markers = [
+    "probe: 固定版本 OpenCode 的集成探针（需要本地 1.17.13，见 docs/probes/）",
+    "client_smoke: 使用生产 OpenCodeClient 的冒烟用例（真实 server + mock LLM）",
+    "optional: 可选诊断用例，不属于默认必跑集合",
+    "real_llm: 真实 provider/真实 key 的可选冒烟，显式运行时 key 缺失必须失败",
+]
 
 [tool.mypy]
 python_version = "3.11"
