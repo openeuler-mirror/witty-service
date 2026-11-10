@@ -83,7 +83,6 @@ ERROR_STATUS: Final[dict[ErrorCode, int]] = {
     ErrorCode.TURN_NOT_FOUND: 404,
     ErrorCode.AGENT_NOT_FOUND: 404,
     ErrorCode.MODEL_NOT_FOUND: 404,
-    ErrorCode.MCP_SERVER_NOT_FOUND: 404,
     ErrorCode.ENDPOINT_NOT_FOUND: 404,
     ErrorCode.METHOD_NOT_ALLOWED: 405,
     ErrorCode.ACTIVE_TURN_CONFLICT: 409,
@@ -98,7 +97,6 @@ ERROR_STATUS: Final[dict[ErrorCode, int]] = {
     ErrorCode.INVALID_TURN_OPERATION: 409,
     ErrorCode.INTERNAL_ERROR: 500,
     ErrorCode.ENDPOINT_NOT_IMPLEMENTED: 501,
-    ErrorCode.SESSION_MCP_ACTIVATION_UNSUPPORTED: 501,
     ErrorCode.RUNTIME_UNAVAILABLE: 503,
     ErrorCode.CONFIG_PUBLISH_UNAVAILABLE: 503,
 }

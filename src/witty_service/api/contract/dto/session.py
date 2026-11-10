@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Self
-
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from witty_service.api.contract.dto.common import (
     AgentRef,
@@ -15,8 +13,6 @@ from witty_service.api.contract.dto.common import (
 )
 from witty_service.api.contract.dto.turn import TurnSummary
 from witty_service.domain.field_limits import SESSION_TITLE_MAX_LENGTH
-
-McpConnectionStatus = Literal["ready", "connecting", "degraded", "disabled"]
 
 
 class CreateSessionRequest(RequestModel):
@@ -81,33 +77,3 @@ class SessionResponse(BaseModel):
 class SessionListResponse(BaseModel):
     items: list[SessionResponse]
     next_cursor: str | None = Field(description="下一页游标；null 表示没有更多")
-
-
-class SessionMcpActivationItem(BaseModel):
-    mcp_server_id: str
-    name: str
-    active: bool = Field(description="本会话是否允许向后续回合暴露该 MCP 工具")
-    enabled: bool = Field(description="全局目录开关；disabled 优先于本会话激活")
-    connection_status: McpConnectionStatus = Field(
-        description="Workspace 内该 MCP 的连接状态；只有 ready 的工具进入本轮可用集合"
-    )
-
-
-class SessionMcpActivationListResponse(BaseModel):
-    items: list[SessionMcpActivationItem]
-
-
-class McpActivationUpdate(RequestModel):
-    mcp_server_id: str = Field(min_length=1)
-    active: bool
-
-
-class UpdateSessionMcpActivationsRequest(RequestModel):
-    activations: list[McpActivationUpdate] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _require_unique_servers(self) -> Self:
-        server_ids = [item.mcp_server_id for item in self.activations]
-        if len(server_ids) != len(set(server_ids)):
-            raise ValueError("mcp_server_id must be unique")
-        return self

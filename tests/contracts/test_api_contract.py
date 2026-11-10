@@ -68,12 +68,6 @@ def test_generated_contract_is_valid_openapi(spec: dict[str, Any]) -> None:
         ("PATCH", "/api/sessions/ses_01", {"title": "renamed"}),
         ("PATCH", "/api/sessions/ses_01/selection", {"agent_id": "agt_01"}),
         ("DELETE", "/api/sessions/ses_01", None),
-        ("GET", "/api/sessions/ses_01/mcp-activations", None),
-        (
-            "PATCH",
-            "/api/sessions/ses_01/mcp-activations",
-            {"activations": [{"mcp_server_id": "mcp_01", "active": True}]},
-        ),
         (
             "POST",
             "/api/sessions/ses_01/turns",

@@ -36,7 +36,7 @@ info:
     ## 实现状态
 
     接口按里程碑逐段实现，验收前均保持 Draft：M2 为 Session、Turn、Message 与事件流；
-    M3 为 Agent 编辑/归档与 Session MCP 激活；M4 为 Workspace CRUD、abort、重生成与
+    M3 为 Agent 编辑/归档；M4 为 Workspace CRUD、abort、重生成与
     Session 删除。
 
     ## 错误码
@@ -54,7 +54,6 @@ info:
     | 404 | `TURN_NOT_FOUND` |
     | 404 | `AGENT_NOT_FOUND` |
     | 404 | `MODEL_NOT_FOUND` |
-    | 404 | `MCP_SERVER_NOT_FOUND` |
     | 404 | `ENDPOINT_NOT_FOUND` |
     | 405 | `METHOD_NOT_ALLOWED` |
     | 409 | `ACTIVE_TURN_CONFLICT` |
@@ -69,7 +68,6 @@ info:
     | 409 | `INVALID_TURN_OPERATION` |
     | 500 | `INTERNAL_ERROR` |
     | 501 | `ENDPOINT_NOT_IMPLEMENTED` |
-    | 501 | `SESSION_MCP_ACTIVATION_UNSUPPORTED` |
     | 503 | `RUNTIME_UNAVAILABLE` |
     | 503 | `CONFIG_PUBLISH_UNAVAILABLE` |
   version: 0.1.0
@@ -568,107 +566,6 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '409':
           description: 当前状态不允许该操作
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-  /api/sessions/{session_id}/mcp-activations:
-    get:
-      tags:
-      - sessions
-      summary: List Session Mcp Activations
-      operationId: list_session_mcp_activations_api_sessions__session_id__mcp_activations_get
-      security:
-      - bearerAuth: []
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-          title: Session Id
-      responses:
-        '200':
-          description: Successful Response
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionMcpActivationListResponse'
-        '401':
-          description: 缺少或错误的 Bearer token
-          headers:
-            WWW-Authenticate:
-              description: Bearer challenge
-              schema:
-                type: string
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '404':
-          description: 目标资源不存在
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '501':
-          description: 当前里程碑未实现，或探针失败后明确降级的能力
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-    patch:
-      tags:
-      - sessions
-      summary: Update Session Mcp Activations
-      operationId: update_session_mcp_activations_api_sessions__session_id__mcp_activations_patch
-      security:
-      - bearerAuth: []
-      parameters:
-      - name: session_id
-        in: path
-        required: true
-        schema:
-          type: string
-          title: Session Id
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateSessionMcpActivationsRequest'
-      responses:
-        '200':
-          description: Successful Response
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SessionMcpActivationListResponse'
-        '400':
-          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '401':
-          description: 缺少或错误的 Bearer token
-          headers:
-            WWW-Authenticate:
-              description: Bearer challenge
-              schema:
-                type: string
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '404':
-          description: 目标资源不存在
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '501':
-          description: 当前里程碑未实现，或探针失败后明确降级的能力
           content:
             application/json:
               schema:
@@ -1668,7 +1565,6 @@ components:
       - TURN_NOT_FOUND
       - AGENT_NOT_FOUND
       - MODEL_NOT_FOUND
-      - MCP_SERVER_NOT_FOUND
       - ENDPOINT_NOT_FOUND
       - METHOD_NOT_ALLOWED
       - ACTIVE_TURN_CONFLICT
@@ -1682,7 +1578,6 @@ components:
       - MODEL_DISABLED
       - INVALID_TURN_OPERATION
       - ENDPOINT_NOT_IMPLEMENTED
-      - SESSION_MCP_ACTIVATION_UNSUPPORTED
       - RUNTIME_UNAVAILABLE
       - CONFIG_PUBLISH_UNAVAILABLE
       - INTERNAL_ERROR
@@ -1771,21 +1666,6 @@ components:
       - relative_path
       - mime
       title: FileMessagePart
-    McpActivationUpdate:
-      properties:
-        mcp_server_id:
-          type: string
-          minLength: 1
-          title: Mcp Server Id
-        active:
-          type: boolean
-          title: Active
-      additionalProperties: false
-      type: object
-      required:
-      - mcp_server_id
-      - active
-      title: McpActivationUpdate
     MessageAttribution:
       properties:
         turn_id:
@@ -1926,50 +1806,6 @@ components:
       - items
       - next_cursor
       title: SessionListResponse
-    SessionMcpActivationItem:
-      properties:
-        mcp_server_id:
-          type: string
-          title: Mcp Server Id
-        name:
-          type: string
-          title: Name
-        active:
-          type: boolean
-          title: Active
-          description: 本会话是否允许向后续回合暴露该 MCP 工具
-        enabled:
-          type: boolean
-          title: Enabled
-          description: 全局目录开关；disabled 优先于本会话激活
-        connection_status:
-          type: string
-          enum:
-          - ready
-          - connecting
-          - degraded
-          - disabled
-          title: Connection Status
-          description: Workspace 内该 MCP 的连接状态；只有 ready 的工具进入本轮可用集合
-      type: object
-      required:
-      - mcp_server_id
-      - name
-      - active
-      - enabled
-      - connection_status
-      title: SessionMcpActivationItem
-    SessionMcpActivationListResponse:
-      properties:
-        items:
-          items:
-            $ref: '#/components/schemas/SessionMcpActivationItem'
-          type: array
-          title: Items
-      type: object
-      required:
-      - items
-      title: SessionMcpActivationListResponse
     SessionResponse:
       properties:
         id:
@@ -2328,19 +2164,6 @@ components:
       - expected_config_updated_at
       title: UpdateAgentRequest
       description: 整份编辑定义字段；来源是创建事实，编辑不改变来源。
-    UpdateSessionMcpActivationsRequest:
-      properties:
-        activations:
-          items:
-            $ref: '#/components/schemas/McpActivationUpdate'
-          type: array
-          minItems: 1
-          title: Activations
-      additionalProperties: false
-      type: object
-      required:
-      - activations
-      title: UpdateSessionMcpActivationsRequest
     UpdateSessionRequest:
       properties:
         title:

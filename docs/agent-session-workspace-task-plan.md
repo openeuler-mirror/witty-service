@@ -78,7 +78,7 @@ M4: R08（已在 M2）→ T08 → T09；T05/T07/E01 也汇入 T08
 
 | ID | 任务与交付 | 验收标准 | 依赖 | 主责 | 里程碑 |
 | --- | --- | --- | --- | --- | --- |
-| D01 | 将 `persistence/orm.py` 按聚合拆包，只实现修正后物理稿的新表和约束 | 新 ORM 不含任何旧表兜底；Session/turn/activation/operation/mapping 关系、索引和级联与 C02 一致 | C02 Draft | B | M1 |
+| D01 | 将 `persistence/orm.py` 按聚合拆包，只实现修正后物理稿的新表和约束 | 新 ORM 不含任何旧表兜底；Session/turn/operation/message mapping 关系、索引和级联与 C02 一致 | C02 Draft | B | M1 |
 | D02 | 建立单一 Alembic 清理式 baseline 和空库升级测试 | baseline 只创建新表；空库升级、重复升级和单头检查通过；无在线数据转换和新旧 schema 并行 | D01 | B | M1 |
 | D03 | 重写领域记录、状态和错误，删除旧混合模型 | Agent、Workspace、Session、Turn、TurnOperation 等记录与 C02/C03 一致；Turn 不携带执行环境正文 | C02 Draft | B | M1 |
 | D04 | 将 `persistence/repositories.py` 按聚合拆分，只提供新 Repository | 无消息正文仓储和旧表读取；Session 不按 Agent-owned 路径查询；所有多表写为短事务，网络/文件 I/O 不入事务 | D01、D03 | B | M1 |
