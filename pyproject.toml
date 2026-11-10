@@ -86,6 +86,7 @@ packages = [
     "witty_service.application",
     "witty_service.domain",
     "witty_service.persistence",
+    "witty_service.persistence.entities",
     "witty_service.runtime",
     "witty_service.sandbox",
     "witty_service.storage",
