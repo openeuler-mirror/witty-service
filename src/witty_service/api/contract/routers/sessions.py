@@ -5,9 +5,7 @@ from fastapi.responses import Response
 
 from witty_service.api.contract.dto.session import (
     CreateSessionRequest,
-    SessionMcpActivationListResponse,
     SessionResponse,
-    UpdateSessionMcpActivationsRequest,
     UpdateSessionRequest,
     UpdateSessionSelectionRequest,
 )
@@ -60,26 +58,4 @@ def update_session_selection(
     responses=error_responses(404, 409, 503),
 )
 def delete_session(session_id: str) -> Response:
-    not_implemented()
-
-
-@router.get(
-    "/{session_id}/mcp-activations",
-    response_model=SessionMcpActivationListResponse,
-    responses=error_responses(404, 501),
-)
-def list_session_mcp_activations(
-    session_id: str,
-) -> SessionMcpActivationListResponse:
-    not_implemented()
-
-
-@router.patch(
-    "/{session_id}/mcp-activations",
-    response_model=SessionMcpActivationListResponse,
-    responses=error_responses(400, 404, 501),
-)
-def update_session_mcp_activations(
-    session_id: str, payload: UpdateSessionMcpActivationsRequest
-) -> SessionMcpActivationListResponse:
     not_implemented()

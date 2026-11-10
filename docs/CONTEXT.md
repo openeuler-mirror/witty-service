@@ -15,15 +15,15 @@ _Avoid_: 项目、仓库、Agent 目录、沙箱
 _Avoid_: Agent 实例、机器人、运行时、模板实例
 
 **主 Agent（Primary Agent）**：
-无需先创建或选择专家即可直接处理用户请求的默认 Agent。它使用全局可用的 Skill 和当前 Session 激活的 MCP，但不天然承担多智能体编排职责。
+无需先创建或选择专家即可直接处理用户请求的默认 Agent。它使用全局可用的 Skill，但不天然承担多智能体编排职责；MCP 移出 P0。
 _Avoid_: 默认专家、超级 Agent、Leader、总管
 
 **专家 Agent（Expert Agent）**：
-用户可在会话中直接选择的专业人设与提示词边界。选择专家会改变后续回合使用的提示词，不会改变当前 Session 的 MCP 激活集合，也不会创建隐藏子 Agent。
+用户可在会话中直接选择的专业人设与提示词边界。选择专家会改变后续回合使用的提示词，也不会创建隐藏子 Agent。
 _Avoid_: 子 Agent、技能包、委派、团队
 
 **能力（Capability）**：
-安装级统一提供的 Skill 与 MCP 资源。启用的 Skill 对所有 Agent 可见；MCP 由全局安装和启停，并按 Session 激活决定本轮是否暴露给模型。Workspace 只隔离物化内容与 MCP 连接，切换 Agent 不改变 Session 的激活集合。
+安装级统一提供的 Skill 资源。启用的 Skill 对所有 Agent 可见；Workspace 只隔离物化内容，切换 Agent 不改变全局 Skill 集合。MCP 整体移出 P0，待 E03 重新评估后再定义。
 _Avoid_: 插件列表、Agent 专属权限、Workspace 授权、安装包
 
 **团队（Team）**：
@@ -36,10 +36,6 @@ _Avoid_: 专家团、专家组、主 Agent、子 Agent 列表
 一个工作区内具有连续上下文的对话。会话固定属于一个工作区，保存后续回合默认使用的当前 Agent 与当前模型；切换其中任何一项都不会新建会话或改写历史。
 _Avoid_: Agent 会话、运行时、聊天记录、渠道路由
 
-**Session MCP 激活（Session MCP Activation）**：
-本会话允许向后续回合暴露的全局 MCP 集合。新建 Session 按全局默认值初始化；之后的全局默认值变更不改写已有 Session。激活变更只影响后续回合，全局禁用和连接未就绪优先于 Session 激活。
-_Avoid_: MCP 安装、Workspace 授权、Agent 绑定、回合工具审计
-
 **模型选择（Model Selection）**：
 由提供方与模型共同构成的一次明确选择。它与 Agent 相互独立，可由工作区提供默认值、由会话调整，并在回合开始时固定。
 _Avoid_: Agent 模型、启动模型、全局模型
@@ -49,7 +45,7 @@ _Avoid_: Agent 模型、启动模型、全局模型
 _Avoid_: 执行快照、配置版本、可重放环境、运行时状态
 
 **运行配置投影（Runtime Configuration Projection）**：
-将当前全部未归档 Agent Definition、启用模型、全局 Skill 与启用 MCP 确定性地物化为 Runtime 可加载配置的结果。是否发布只比较完整物化产物的非密摘要；Session MCP 激活通过回合工具过滤生效，不触发发布，也不为历史回合保存配置版本。
+将当前全部未归档 Agent Definition、启用模型和全局 Skill 确定性地物化为 Runtime 可加载配置的结果。是否发布只比较完整物化产物的非密摘要；不为历史回合保存配置版本。MCP 不进入 P0 投影。
 _Avoid_: 回合归因、候选版本、配置代次、消息副本
 
 **回合许可（Turn Permit）**：

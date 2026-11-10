@@ -63,7 +63,7 @@ Witty Service 本地控制面 API 契约（C03 Draft）。
 ## 实现状态
 
 接口按里程碑逐段实现，验收前均保持 Draft：M2 为 Session、Turn、Message 与事件流；
-M3 为 Agent 编辑/归档与 Session MCP 激活；M4 为 Workspace CRUD、abort、重生成与
+M3 为 Agent 编辑/归档；M4 为 Workspace CRUD、abort、重生成与
 Session 删除。
 
 ## 错误码

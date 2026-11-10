@@ -1,0 +1,2314 @@
+openapi: 3.1.0
+info:
+  title: Witty Service API
+  description: |
+    Witty Service 本地控制面 API 契约（C03 Draft）。
+
+    本文件由 `python scripts/render_openapi.py` 从 `src/witty_service/api/contract/`
+    生成，不要手工编辑。
+
+    ## 范围
+
+    覆盖 Workspace、Session、Turn、Message、Agent 与事件流。Console、Channel、Scheduler
+    共用 Session/Turn 接口，外部入口不绕过回合准入。
+
+    ## 通用约定
+
+    - `/api` 下错误响应统一为 `{"error": {"code", "message", "details"}}`，details 只包含非密信息。
+    - `/api` 下请求体、查询与路径参数校验失败返回 400 `VALIDATION_ERROR`，不使用 422；
+      `details.errors` 每项含 `field`、`type`、`reason`，其中 `type` 供客户端分支，
+      `reason` 仅供人类阅读；旧根路径入口在 U03/U09 前保持现有行为。
+    - 同一请求命中多类错误时，判定优先级固定为 400 → 404 → 409 → 503；401 认证失败先于业务错误。
+      `MODEL_REQUIRED` 是 Turn 准入的业务前置条件，不是请求格式错误：先解析路径中的
+      Session（不存在返回 404 `SESSION_NOT_FOUND`），再检查当前模型（为空返回 400）。
+    - 不属于路径中 Session 的 Turn 按 404 `TURN_NOT_FOUND` 返回，不泄露其是否存在。
+    - abort 幂等：重复调用返回 200 且 `already_stopped=true`。
+    - 事件流每帧固定为 `data: <SessionEvent JSON>`，不使用 SSE 的 `id:`/`event:`/
+      `retry:`，不支持 `Last-Event-ID`；断线后按 `resync_required` 全量重读。客户端用
+      fetch + Bearer 读取，不支持原生 `EventSource`。P0 不提供 HITL，不产生
+      `question.*` 事件。
+    - 没有显式配置发布接口：保存配置不停服，下一 Turn 自动确认最新投影已发布；
+      等待超过 10 秒返回 503，且不插入 running Turn。
+    - Workspace 的 `host_directory` 只出现在创建请求中，任何响应都不回传宿主路径。
+    - 本契约仍为 Draft：尚未实现的操作返回 501 `ENDPOINT_NOT_IMPLEMENTED`，
+      经真实入口验证后才标 Verified Frozen。
+
+    ## 实现状态
+
+    接口按里程碑逐段实现，验收前均保持 Draft：M2 为 Session、Turn、Message 与事件流；
+    M3 为 Agent 编辑/归档；M4 为 Workspace CRUD、abort、重生成与
+    Session 删除。
+
+    ## 错误码
+
+    | 状态 | 错误码 |
+    | --- | --- |
+    | 400 | `VALIDATION_ERROR` |
+    | 400 | `INVALID_WORKSPACE_PATH` |
+    | 400 | `MODEL_REQUIRED` |
+    | 400 | `INVALID_CURSOR` |
+    | 400 | `CURSOR_SESSION_MISMATCH` |
+    | 401 | `UNAUTHORIZED` |
+    | 404 | `WORKSPACE_NOT_FOUND` |
+    | 404 | `SESSION_NOT_FOUND` |
+    | 404 | `TURN_NOT_FOUND` |
+    | 404 | `AGENT_NOT_FOUND` |
+    | 404 | `MODEL_NOT_FOUND` |
+    | 404 | `ENDPOINT_NOT_FOUND` |
+    | 405 | `METHOD_NOT_ALLOWED` |
+    | 409 | `ACTIVE_TURN_CONFLICT` |
+    | 409 | `SESSION_ADMISSION_CLOSED` |
+    | 409 | `WORKSPACE_DIRECTORY_CONFLICT` |
+    | 409 | `AGENT_NAME_CONFLICT` |
+    | 409 | `CONFIG_UPDATE_CONFLICT` |
+    | 409 | `CONFIG_PROJECTION_INVALID` |
+    | 409 | `PRIMARY_AGENT_IMMUTABLE` |
+    | 409 | `AGENT_ARCHIVED` |
+    | 409 | `MODEL_DISABLED` |
+    | 409 | `INVALID_TURN_OPERATION` |
+    | 500 | `INTERNAL_ERROR` |
+    | 501 | `ENDPOINT_NOT_IMPLEMENTED` |
+    | 503 | `RUNTIME_UNAVAILABLE` |
+    | 503 | `CONFIG_PUBLISH_UNAVAILABLE` |
+  version: 0.1.0
+paths:
+  /api/workspaces:
+    get:
+      tags:
+      - workspaces
+      summary: List Workspaces
+      operationId: list_workspaces_api_workspaces_get
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cursor
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 20
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceListResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    post:
+      tags:
+      - workspaces
+      summary: Create Workspace
+      operationId: create_workspace_api_workspaces_post
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkspaceRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/workspaces/{workspace_id}:
+    get:
+      tags:
+      - workspaces
+      summary: Get Workspace
+      operationId: get_workspace_api_workspaces__workspace_id__get
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workspace Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceResponse'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    patch:
+      tags:
+      - workspaces
+      summary: Update Workspace
+      operationId: update_workspace_api_workspaces__workspace_id__patch
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workspace Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWorkspaceRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/workspaces/{workspace_id}/sessions:
+    get:
+      tags:
+      - workspaces
+      summary: List Workspace Sessions
+      operationId: list_workspace_sessions_api_workspaces__workspace_id__sessions_get
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: workspace_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workspace Id
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cursor
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 20
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionListResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/sessions:
+    post:
+      tags:
+      - sessions
+      summary: Create Session
+      operationId: create_session_api_sessions_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+      security:
+      - bearerAuth: []
+  /api/sessions/{session_id}:
+    get:
+      tags:
+      - sessions
+      summary: Get Session
+      operationId: get_session_api_sessions__session_id__get
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    patch:
+      tags:
+      - sessions
+      summary: Update Session
+      operationId: update_session_api_sessions__session_id__patch
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSessionRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      tags:
+      - sessions
+      summary: Delete Session
+      operationId: delete_session_api_sessions__session_id__delete
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      responses:
+        '204':
+          description: Successful Response
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Runtime 或配置发布暂不可用，可稍后重试
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/sessions/{session_id}/selection:
+    patch:
+      tags:
+      - sessions
+      summary: Update Session Selection
+      operationId: update_session_selection_api_sessions__session_id__selection_patch
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSessionSelectionRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/sessions/{session_id}/turns:
+    post:
+      tags:
+      - turns
+      summary: Create Turn
+      operationId: create_turn_api_sessions__session_id__turns_post
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTurnRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Runtime 或配置发布暂不可用，可稍后重试
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    get:
+      tags:
+      - turns
+      summary: List Session Turns
+      operationId: list_session_turns_api_sessions__session_id__turns_get
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cursor
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 20
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnListResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/sessions/{session_id}/turns/{turn_id}/abort:
+    post:
+      tags:
+      - turns
+      summary: Abort Turn
+      operationId: abort_turn_api_sessions__session_id__turns__turn_id__abort_post
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      - name: turn_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Turn Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AbortTurnResponse'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Runtime 或配置发布暂不可用，可稍后重试
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/sessions/{session_id}/turns/{turn_id}/regenerate:
+    post:
+      tags:
+      - turns
+      summary: Regenerate Turn
+      operationId: regenerate_turn_api_sessions__session_id__turns__turn_id__regenerate_post
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      - name: turn_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Turn Id
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Runtime 或配置发布暂不可用，可稍后重试
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/sessions/{session_id}/messages:
+    get:
+      tags:
+      - messages
+      summary: List Session Messages
+      operationId: list_session_messages_api_sessions__session_id__messages_get
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 20
+          title: Limit
+      - name: before
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Before
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageListResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Runtime 或配置发布暂不可用，可稍后重试
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/sessions/{session_id}/events:
+    get:
+      tags:
+      - events
+      summary: Stream Session Events
+      operationId: stream_session_events_api_sessions__session_id__events_get
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      responses:
+        '200':
+          description: 'SSE 事件流；每条为 `data: <SessionEvent JSON>`，不使用 `id:`/`event:`/`retry:`；客户端用 fetch
+            + Bearer 读取'
+          content:
+            text/event-stream:
+              schema:
+                description: |-
+                  SSE 事件信封（`GET /api/sessions/{id}/events`）。
+
+                  帧格式固定为 `data: <SessionEvent JSON>\n\n`，不使用 SSE 的 `id:`、`event:`
+                  或 `retry:`，也不支持 `Last-Event-ID`。断线后服务端发送 `resync_required`，
+                  客户端全量重读回合与历史。客户端用 fetch 读取并携带 Bearer，不支持原生
+                  `EventSource`。
+
+                  P0 不提供 HITL，不产生 `question.*` 事件；旧 Console/Channel 的提问入口随
+                  U03/U09 删除。payload 的具体形状由 C04 定义，见 `x-payload-schema`。
+                properties:
+                  event_id:
+                    description: '事件 ID；不是 SSE 的 id: 字段'
+                    title: Event Id
+                    type: string
+                  type:
+                    description: 事件类型；已知类型见 x-event-types
+                    title: Type
+                    type: string
+                  session_id:
+                    title: Session Id
+                    type: string
+                  turn_id:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Turn Id
+                  message_id:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    description: 关联的消息 ID；Delta 与完成事件有值
+                    title: Message Id
+                  occurred_at:
+                    format: date-time
+                    title: Occurred At
+                    type: string
+                  payload:
+                    additionalProperties: true
+                    title: Payload
+                    type: object
+                    x-payload-schema: C04
+                required:
+                - event_id
+                - type
+                - session_id
+                - occurred_at
+                - payload
+                title: SessionEvent
+                type: object
+                x-event-types:
+                - turn.updated
+                - message.delta
+                - message.completed
+                - session.usage
+                - thinking.delta
+                - tool.call.started
+                - tool.call.delta
+                - tool.call.response
+                - artifact.started
+                - artifact.delta
+                - artifact.completed
+                - runtime.status
+                - resync_required
+                x-unsupported-event-types:
+                - question.*
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Runtime 或配置发布暂不可用，可稍后重试
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/agents:
+    get:
+      tags:
+      - agents
+      summary: List Agents
+      operationId: list_agents_api_agents_get
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: kind
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - enum:
+            - primary
+            - expert
+            type: string
+          - type: 'null'
+          title: Kind
+      - name: include_archived
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Include Archived
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cursor
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 20
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentListResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    post:
+      tags:
+      - agents
+      summary: Create Agent
+      operationId: create_agent_api_agents_post
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgentRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/agents/{agent_id}:
+    get:
+      tags:
+      - agents
+      summary: Get Agent
+      operationId: get_agent_api_agents__agent_id__get
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: agent_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Agent Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentResponse'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    put:
+      tags:
+      - agents
+      summary: Update Agent
+      operationId: update_agent_api_agents__agent_id__put
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: agent_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Agent Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAgentRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/agents/{agent_id}/archive:
+    post:
+      tags:
+      - agents
+      summary: Archive Agent
+      operationId: archive_agent_api_agents__agent_id__archive_post
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: agent_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Agent Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentResponse'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+components:
+  schemas:
+    AbortTurnResponse:
+      properties:
+        turn:
+          $ref: '#/components/schemas/TurnResponse'
+        already_stopped:
+          type: boolean
+          title: Already Stopped
+          description: true 表示该回合已处于终态，本次 abort 未产生副作用；重复 abort 仍返回 200
+      type: object
+      required:
+      - turn
+      - already_stopped
+      title: AbortTurnResponse
+      examples:
+      - already_stopped: true
+        turn:
+          agent:
+            id: agt_01
+            name: Primary
+          created_at: '2026-11-09T07:30:00.000Z'
+          finished_at: '2026-11-09T07:30:05.000Z'
+          id: trn_02
+          model:
+            display_name: DeepSeek V3
+            id: mdl_01
+          session_id: ses_01
+          started_at: '2026-11-09T07:30:00.000Z'
+          status: interrupted
+          turn_seq: 3
+    AgentListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/AgentSummary'
+          type: array
+          title: Items
+        next_cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next Cursor
+          description: 下一页游标；null 表示没有更多
+      type: object
+      required:
+      - items
+      - next_cursor
+      title: AgentListResponse
+    AgentRef:
+      properties:
+        id:
+          type: string
+          title: Id
+        name:
+          type: string
+          title: Name
+        kind:
+          type: string
+          enum:
+          - primary
+          - expert
+          title: Kind
+        archived:
+          type: boolean
+          title: Archived
+          description: Agent 已归档；已有 Session 仍保留该选择，但新 Turn 返回 409
+      type: object
+      required:
+      - id
+      - name
+      - kind
+      - archived
+      title: AgentRef
+    AgentResponse:
+      properties:
+        id:
+          type: string
+          title: Id
+        kind:
+          type: string
+          enum:
+          - primary
+          - expert
+          title: Kind
+        name:
+          type: string
+          title: Name
+        description:
+          type: string
+          title: Description
+        source_type:
+          type: string
+          enum:
+          - local
+          - market
+          - preset
+          title: Source Type
+        source_ref:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Ref
+        archived_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Archived At
+        config_updated_at:
+          type: string
+          format: date-time
+          title: Config Updated At
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        updated_at:
+          type: string
+          format: date-time
+          title: Updated At
+        system_prompt:
+          type: string
+          title: System Prompt
+      type: object
+      required:
+      - id
+      - kind
+      - name
+      - description
+      - source_type
+      - config_updated_at
+      - created_at
+      - updated_at
+      - system_prompt
+      title: AgentResponse
+    AgentSummary:
+      properties:
+        id:
+          type: string
+          title: Id
+        kind:
+          type: string
+          enum:
+          - primary
+          - expert
+          title: Kind
+        name:
+          type: string
+          title: Name
+        description:
+          type: string
+          title: Description
+        source_type:
+          type: string
+          enum:
+          - local
+          - market
+          - preset
+          title: Source Type
+        source_ref:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Ref
+        archived_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Archived At
+        config_updated_at:
+          type: string
+          format: date-time
+          title: Config Updated At
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        updated_at:
+          type: string
+          format: date-time
+          title: Updated At
+      type: object
+      required:
+      - id
+      - kind
+      - name
+      - description
+      - source_type
+      - config_updated_at
+      - created_at
+      - updated_at
+      title: AgentSummary
+    CreateAgentRequest:
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          minLength: 1
+          title: Name
+        description:
+          type: string
+          maxLength: 2000
+          title: Description
+          default: ''
+        system_prompt:
+          type: string
+          title: System Prompt
+          default: ''
+      additionalProperties: false
+      type: object
+      required:
+      - name
+      title: CreateAgentRequest
+      description: |-
+        创建 Expert Agent Definition；Primary 由系统种子创建。
+
+        来源（local/market/preset 及引用）是服务端安装事实，由服务端写入，不接受
+        客户端指定。
+    CreateSessionRequest:
+      properties:
+        workspace_id:
+          type: string
+          minLength: 1
+          title: Workspace Id
+        title:
+          anyOf:
+          - type: string
+            maxLength: 255
+            minLength: 1
+          - type: 'null'
+          title: Title
+        agent_id:
+          anyOf:
+          - type: string
+            minLength: 1
+          - type: 'null'
+          title: Agent Id
+          description: 省略或 null 时使用 Workspace 默认 Agent
+        model_id:
+          anyOf:
+          - type: string
+            minLength: 1
+          - type: 'null'
+          title: Model Id
+          description: 省略或 null 时使用 Workspace 默认模型；默认模型也为空时，Session 初始无模型，不会自动选择可用模型
+      additionalProperties: false
+      type: object
+      required:
+      - workspace_id
+      title: CreateSessionRequest
+      description: 只创建 web 来源的 Session；channel/scheduled 来源由进程内入口写入。
+    CreateTurnRequest:
+      properties:
+        parts:
+          items:
+            oneOf:
+            - $ref: '#/components/schemas/TextInputPart'
+            - $ref: '#/components/schemas/FileInputPart'
+            discriminator:
+              propertyName: type
+              mapping:
+                file: '#/components/schemas/FileInputPart'
+                text: '#/components/schemas/TextInputPart'
+          type: array
+          minItems: 1
+          title: Parts
+      additionalProperties: false
+      type: object
+      required:
+      - parts
+      title: CreateTurnRequest
+    CreateWorkspaceRequest:
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          minLength: 1
+          title: Name
+        host_directory:
+          type: string
+          maxLength: 4096
+          minLength: 1
+          title: Host Directory
+          description: 主机上已存在的绝对目录。服务端解析 realpath 后保存，创建后不可修改；该路径不属于响应契约，不在任何响应中返回。
+        sandbox_type:
+          type: string
+          enum:
+          - local_process
+          - docker
+          title: Sandbox Type
+          default: local_process
+        default_agent_id:
+          anyOf:
+          - type: string
+            minLength: 1
+          - type: 'null'
+          title: Default Agent Id
+          description: 省略或 null 时使用未归档 Primary
+        default_model_id:
+          anyOf:
+          - type: string
+            minLength: 1
+          - type: 'null'
+          title: Default Model Id
+          description: 省略或 null 时使用全局默认模型；没有可用模型时为空
+      additionalProperties: false
+      type: object
+      required:
+      - name
+      - host_directory
+      title: CreateWorkspaceRequest
+    ErrorCode:
+      type: string
+      enum:
+      - VALIDATION_ERROR
+      - INVALID_WORKSPACE_PATH
+      - MODEL_REQUIRED
+      - INVALID_CURSOR
+      - CURSOR_SESSION_MISMATCH
+      - UNAUTHORIZED
+      - WORKSPACE_NOT_FOUND
+      - SESSION_NOT_FOUND
+      - TURN_NOT_FOUND
+      - AGENT_NOT_FOUND
+      - MODEL_NOT_FOUND
+      - ENDPOINT_NOT_FOUND
+      - METHOD_NOT_ALLOWED
+      - ACTIVE_TURN_CONFLICT
+      - SESSION_ADMISSION_CLOSED
+      - WORKSPACE_DIRECTORY_CONFLICT
+      - AGENT_NAME_CONFLICT
+      - CONFIG_UPDATE_CONFLICT
+      - CONFIG_PROJECTION_INVALID
+      - PRIMARY_AGENT_IMMUTABLE
+      - AGENT_ARCHIVED
+      - MODEL_DISABLED
+      - INVALID_TURN_OPERATION
+      - ENDPOINT_NOT_IMPLEMENTED
+      - RUNTIME_UNAVAILABLE
+      - CONFIG_PUBLISH_UNAVAILABLE
+      - INTERNAL_ERROR
+      title: ErrorCode
+    ErrorDetail:
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          title: Message
+        details:
+          additionalProperties: true
+          type: object
+          title: Details
+      type: object
+      required:
+      - code
+      - message
+      title: ErrorDetail
+      description: |-
+        details 只含非密信息：字段校验为 `errors`（每项含 `field`、`type`、`reason`；
+        `field` 为空表示整份请求体），状态冲突可含 `active_turn_id`、`allowed_actions`、
+        `current_status`，可用性问题可含 `retry_after`。
+    ErrorEnvelope:
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorDetail'
+      type: object
+      required:
+      - error
+      title: ErrorEnvelope
+      examples:
+      - error:
+          code: SESSION_NOT_FOUND
+          details:
+            session_id: ses_01
+          message: Session was not found.
+    FileInputPart:
+      properties:
+        type:
+          type: string
+          const: file
+          title: Type
+        relative_path:
+          type: string
+          title: Relative Path
+          description: Workspace 内相对路径；绝对路径与 .. 逃逸非法
+        mime:
+          type: string
+          minLength: 1
+          title: Mime
+        filename:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Filename
+      additionalProperties: false
+      type: object
+      required:
+      - type
+      - relative_path
+      - mime
+      title: FileInputPart
+    FileMessagePart:
+      properties:
+        type:
+          type: string
+          const: file
+          title: Type
+          default: file
+        relative_path:
+          type: string
+          title: Relative Path
+          description: Workspace 内相对路径；不回传宿主绝对路径
+        mime:
+          type: string
+          title: Mime
+        filename:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Filename
+      type: object
+      required:
+      - relative_path
+      - mime
+      title: FileMessagePart
+    MessageAttribution:
+      properties:
+        turn_id:
+          type: string
+          title: Turn Id
+        turn_seq:
+          type: integer
+          minimum: 1.0
+          title: Turn Seq
+        agent:
+          $ref: '#/components/schemas/TurnAgentAttribution'
+        model:
+          $ref: '#/components/schemas/TurnModelAttribution'
+      type: object
+      required:
+      - turn_id
+      - turn_seq
+      - agent
+      - model
+      title: MessageAttribution
+    MessageListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/MessageResponse'
+          type: array
+          title: Items
+        next_before:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next Before
+          description: 更早一页的 before 游标；null 表示没有更早的消息
+      type: object
+      required:
+      - items
+      - next_before
+      title: MessageListResponse
+    MessageResponse:
+      properties:
+        id:
+          type: string
+          title: Id
+        role:
+          type: string
+          enum:
+          - user
+          - assistant
+          title: Role
+        attribution:
+          anyOf:
+          - $ref: '#/components/schemas/MessageAttribution'
+          - type: 'null'
+          description: 所属回合的归因；消息尚未关联回合时为 null
+        parts:
+          items:
+            oneOf:
+            - $ref: '#/components/schemas/TextMessagePart'
+            - $ref: '#/components/schemas/ReasoningMessagePart'
+            - $ref: '#/components/schemas/ToolMessagePart'
+            - $ref: '#/components/schemas/FileMessagePart'
+            discriminator:
+              propertyName: type
+              mapping:
+                file: '#/components/schemas/FileMessagePart'
+                reasoning: '#/components/schemas/ReasoningMessagePart'
+                text: '#/components/schemas/TextMessagePart'
+                tool: '#/components/schemas/ToolMessagePart'
+          type: array
+          title: Parts
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      type: object
+      required:
+      - id
+      - role
+      - parts
+      - created_at
+      title: MessageResponse
+      description: 只投影 text/reasoning/tool/file；Runtime 的 step 等未知 part 由投影层丢弃。
+    ModelRef:
+      properties:
+        id:
+          type: string
+          title: Id
+        display_name:
+          type: string
+          title: Display Name
+        provider_id:
+          type: string
+          title: Provider Id
+        provider_model_id:
+          type: string
+          title: Provider Model Id
+        enabled:
+          type: boolean
+          title: Enabled
+          description: 模型已启用；已有 Session 仍保留该选择，但新 Turn 返回 409
+      type: object
+      required:
+      - id
+      - display_name
+      - provider_id
+      - provider_model_id
+      - enabled
+      title: ModelRef
+    ReasoningMessagePart:
+      properties:
+        type:
+          type: string
+          const: reasoning
+          title: Type
+          default: reasoning
+        text:
+          type: string
+          title: Text
+      type: object
+      required:
+      - text
+      title: ReasoningMessagePart
+    SessionListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/SessionResponse'
+          type: array
+          title: Items
+        next_cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next Cursor
+          description: 下一页游标；null 表示没有更多
+      type: object
+      required:
+      - items
+      - next_cursor
+      title: SessionListResponse
+    SessionResponse:
+      properties:
+        id:
+          type: string
+          title: Id
+        workspace_id:
+          type: string
+          title: Workspace Id
+        title:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Title
+        pinned:
+          type: boolean
+          title: Pinned
+        origin:
+          type: string
+          pattern: ^(?:web|scheduled|channel:[A-Za-z0-9_.-]+)$
+          title: Origin
+          description: 会话来源：web、scheduled 或 channel:<渠道标识符>
+        scheduled_task_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Scheduled Task Id
+        current_agent:
+          $ref: '#/components/schemas/AgentRef'
+        current_model:
+          anyOf:
+          - $ref: '#/components/schemas/ModelRef'
+          - type: 'null'
+          description: 当前模型；null 表示系统没有可用模型（未配置或全部禁用），不是加载中，也不是用户主动清空；此时创建 Turn 返回 400 MODEL_REQUIRED
+        active_turn:
+          anyOf:
+          - $ref: '#/components/schemas/TurnSummary'
+          - type: 'null'
+          description: 该会话当前 running 的回合；没有则为 null
+        runtime_status:
+          type: string
+          enum:
+          - stopped
+          - starting
+          - ready
+          - restarting
+          - unavailable
+          title: Runtime Status
+          description: Runtime 可用性；ready 对应 ADR 的 healthy，不是完整进程状态机；非 ready 时历史与产物读取返回 503
+        last_activity_at:
+          type: string
+          format: date-time
+          title: Last Activity At
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        updated_at:
+          type: string
+          format: date-time
+          title: Updated At
+      type: object
+      required:
+      - id
+      - workspace_id
+      - pinned
+      - origin
+      - current_agent
+      - current_model
+      - runtime_status
+      - last_activity_at
+      - created_at
+      - updated_at
+      title: SessionResponse
+    TextInputPart:
+      properties:
+        type:
+          type: string
+          const: text
+          title: Type
+        text:
+          type: string
+          minLength: 1
+          title: Text
+      additionalProperties: false
+      type: object
+      required:
+      - type
+      - text
+      title: TextInputPart
+    TextMessagePart:
+      properties:
+        type:
+          type: string
+          const: text
+          title: Type
+          default: text
+        text:
+          type: string
+          title: Text
+      type: object
+      required:
+      - text
+      title: TextMessagePart
+    ToolMessagePart:
+      properties:
+        type:
+          type: string
+          const: tool
+          title: Type
+          default: tool
+        call_id:
+          type: string
+          title: Call Id
+        name:
+          type: string
+          title: Name
+        status:
+          type: string
+          enum:
+          - pending
+          - running
+          - completed
+          - error
+          title: Status
+        input:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Input
+        output:
+          title: Output
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+      type: object
+      required:
+      - call_id
+      - name
+      - status
+      title: ToolMessagePart
+    TurnAgentAttribution:
+      properties:
+        id:
+          type: string
+          title: Id
+        name:
+          type: string
+          title: Name
+          description: 回合准入时固定的 Agent 展示名
+      type: object
+      required:
+      - id
+      - name
+      title: TurnAgentAttribution
+    TurnError:
+      properties:
+        code:
+          type: string
+          title: Code
+        message:
+          type: string
+          title: Message
+      type: object
+      required:
+      - code
+      - message
+      title: TurnError
+    TurnListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/TurnResponse'
+          type: array
+          title: Items
+        next_cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next Cursor
+          description: 下一页游标；null 表示没有更多
+      type: object
+      required:
+      - items
+      - next_cursor
+      title: TurnListResponse
+    TurnModelAttribution:
+      properties:
+        id:
+          type: string
+          title: Id
+        display_name:
+          type: string
+          title: Display Name
+          description: 回合准入时固定的模型展示名
+      type: object
+      required:
+      - id
+      - display_name
+      title: TurnModelAttribution
+    TurnResponse:
+      properties:
+        id:
+          type: string
+          title: Id
+        session_id:
+          type: string
+          title: Session Id
+        turn_seq:
+          type: integer
+          minimum: 1.0
+          title: Turn Seq
+        status:
+          type: string
+          enum:
+          - running
+          - completed
+          - error
+          - interrupted
+          title: Status
+        agent:
+          $ref: '#/components/schemas/TurnAgentAttribution'
+        model:
+          $ref: '#/components/schemas/TurnModelAttribution'
+        usage:
+          anyOf:
+          - $ref: '#/components/schemas/TurnUsage'
+          - type: 'null'
+          description: 本轮用量；未产生用量时为 null
+        error:
+          anyOf:
+          - $ref: '#/components/schemas/TurnError'
+          - type: 'null'
+        started_at:
+          type: string
+          format: date-time
+          title: Started At
+        finished_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Finished At
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      type: object
+      required:
+      - id
+      - session_id
+      - turn_seq
+      - status
+      - agent
+      - model
+      - started_at
+      - created_at
+      title: TurnResponse
+    TurnSummary:
+      properties:
+        id:
+          type: string
+          title: Id
+        turn_seq:
+          type: integer
+          minimum: 1.0
+          title: Turn Seq
+        status:
+          type: string
+          enum:
+          - running
+          - completed
+          - error
+          - interrupted
+          title: Status
+      type: object
+      required:
+      - id
+      - turn_seq
+      - status
+      title: TurnSummary
+    TurnUsage:
+      properties:
+        input_tokens:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Input Tokens
+        output_tokens:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Output Tokens
+        total_tokens:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Total Tokens
+        cache_read_tokens:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Cache Read Tokens
+        cache_write_tokens:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Cache Write Tokens
+        reasoning_tokens:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Reasoning Tokens
+        total_cost:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Total Cost
+      type: object
+      title: TurnUsage
+      description: 本轮用量（跨 step 累计）；缺项为 null，避免前端显示假 0。
+    UpdateAgentRequest:
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          minLength: 1
+          title: Name
+        description:
+          type: string
+          maxLength: 2000
+          title: Description
+        system_prompt:
+          type: string
+          title: System Prompt
+        expected_config_updated_at:
+          type: string
+          format: date-time
+          title: Expected Config Updated At
+          description: 读取时的 config_updated_at；不一致返回 409 CONFIG_UPDATE_CONFLICT
+      additionalProperties: false
+      type: object
+      required:
+      - name
+      - description
+      - system_prompt
+      - expected_config_updated_at
+      title: UpdateAgentRequest
+      description: 整份编辑定义字段；来源是创建事实，编辑不改变来源。
+    UpdateSessionRequest:
+      properties:
+        title:
+          type: string
+          maxLength: 255
+          minLength: 1
+          title: Title
+        pinned:
+          type: boolean
+          title: Pinned
+      additionalProperties: false
+      type: object
+      minProperties: 1
+      title: UpdateSessionRequest
+    UpdateSessionSelectionRequest:
+      properties:
+        agent_id:
+          type: string
+          minLength: 1
+          title: Agent Id
+        model_id:
+          type: string
+          minLength: 1
+          title: Model Id
+      additionalProperties: false
+      type: object
+      minProperties: 1
+      title: UpdateSessionSelectionRequest
+      description: 只影响后续回合的 Agent/模型选择。
+    UpdateWorkspaceRequest:
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          minLength: 1
+          title: Name
+        default_agent_id:
+          anyOf:
+          - type: string
+            minLength: 1
+          - type: 'null'
+          title: Default Agent Id
+          description: 显式 null 表示重置为未归档 Primary
+        default_model_id:
+          anyOf:
+          - type: string
+            minLength: 1
+          - type: 'null'
+          title: Default Model Id
+          description: 显式 null 表示清空，回到全局默认模型
+      additionalProperties: false
+      type: object
+      minProperties: 1
+      title: UpdateWorkspaceRequest
+    WorkspaceListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/WorkspaceResponse'
+          type: array
+          title: Items
+        next_cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next Cursor
+          description: 下一页游标；null 表示没有更多
+      type: object
+      required:
+      - items
+      - next_cursor
+      title: WorkspaceListResponse
+    WorkspaceResponse:
+      properties:
+        id:
+          type: string
+          title: Id
+        name:
+          type: string
+          title: Name
+        sandbox_type:
+          type: string
+          enum:
+          - local_process
+          - docker
+          title: Sandbox Type
+        is_default:
+          type: boolean
+          title: Is Default
+        default_agent:
+          $ref: '#/components/schemas/AgentRef'
+        default_model:
+          anyOf:
+          - $ref: '#/components/schemas/ModelRef'
+          - type: 'null'
+        session_count:
+          type: integer
+          title: Session Count
+        runtime_status:
+          type: string
+          enum:
+          - stopped
+          - starting
+          - ready
+          - restarting
+          - unavailable
+          title: Runtime Status
+          description: Runtime 可用性；ready 对应 ADR 的 healthy，不是完整进程状态机；非 ready 时历史与产物读取返回 503
+        runtime_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Runtime Reason
+          description: runtime_status 非 ready 时的非密原因
+        last_activity_at:
+          type: string
+          format: date-time
+          title: Last Activity At
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        updated_at:
+          type: string
+          format: date-time
+          title: Updated At
+      type: object
+      required:
+      - id
+      - name
+      - sandbox_type
+      - is_default
+      - default_agent
+      - default_model
+      - session_count
+      - runtime_status
+      - last_activity_at
+      - created_at
+      - updated_at
+      title: WorkspaceResponse
+  securitySchemes:
+    bearerAuth:
+      type: http
+      description: 本机服务的 AUTH_TOKEN
+      scheme: bearer
+servers:
+- url: http://127.0.0.1:8000
+  description: 本机服务默认监听地址；实际端口以启动配置为准
