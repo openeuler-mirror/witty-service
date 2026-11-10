@@ -60,11 +60,10 @@ def _workspace(repos: Repos) -> tuple[str, str]:
     agent = repos.agent.create(
         "Primary",
         AgentKind.primary,
-        "default agent",
-        "prompt",
-        AgentSourceType.preset,
-        None,
         1_000,
+        description="default agent",
+        system_prompt="prompt",
+        source_type=AgentSourceType.preset,
     )
     workspace = repos.workspace.create(
         "Default",
@@ -82,11 +81,10 @@ def test_agent_configuration_uses_expected_version(repos: Repos) -> None:
     agent = repos.agent.create(
         "Primary",
         AgentKind.primary,
-        "default",
-        "prompt",
-        AgentSourceType.preset,
-        None,
         1_000,
+        description="default",
+        system_prompt="prompt",
+        source_type=AgentSourceType.preset,
     )
     assert (
         repos.agent.update_configuration(
@@ -206,7 +204,7 @@ def test_catalog_default_model_and_skill_upsert(repos: Repos) -> None:
     assert repos.catalog.get_default_model() is None
 
     repo = repos.catalog.create_skill_repo(
-        "builtin", "builtin", None, None, "/skills", 1_005
+        "builtin", "builtin", 1_005, local_path="/skills"
     )
     skill = repos.catalog.upsert_skill(
         repo.repo_id, "demo", "demo/SKILL.md", "hash-1", {}, None, None, 1, 1_006
