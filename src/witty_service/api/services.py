@@ -7,6 +7,7 @@ from pathlib import Path
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from witty_service.application.model_catalog_service import ModelCatalogService
 from witty_service.bootstrap import build_workspace_runtime_manager
 from witty_service.config import get_settings
 from witty_service.persistence.consistency import verify_structure
@@ -25,6 +26,7 @@ from witty_service.persistence.seed import seed_defaults
 from witty_service.runtime.manager import WorkspaceRuntimeManager
 from witty_service.sandbox.base import SandboxBackend
 from witty_service.sandbox.factory import create_sandbox_backend
+from witty_service.storage.credentials import ModelCredentialStore
 from witty_service.storage.workspace_store import LocalWorkspaceStore
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,7 @@ class ServiceContainer:
     workspaces: WorkspaceRepository
     sessions: SessionRepository
     runtime_manager: WorkspaceRuntimeManager
+    model_catalog: ModelCatalogService
     sandbox_backends: dict[str, SandboxBackend] = field(default_factory=dict)
 
     def get_sandbox_backend(self, sandbox_type: str) -> SandboxBackend:
@@ -87,14 +90,19 @@ def build_default_services() -> ServiceContainer:
     )
     verify_structure(engine)
     sandbox = create_sandbox_backend("local_process")
+    catalog_repository = CatalogRepository(session_factory)
     return ServiceContainer(
         engine=engine,
         session_factory=session_factory,
-        catalog_repository=CatalogRepository(session_factory),
+        catalog_repository=catalog_repository,
         workspace_store=LocalWorkspaceStore(workspace_root),
         agents=AgentRepository(session_factory),
         workspaces=WorkspaceRepository(session_factory),
         sessions=SessionRepository(session_factory),
         runtime_manager=build_workspace_runtime_manager(sandbox=sandbox),
+        model_catalog=ModelCatalogService(
+            catalog_repository,
+            ModelCredentialStore(settings.model.credentials_dir),
+        ),
         sandbox_backends={"local_process": sandbox},
     )
