@@ -1,6 +1,5 @@
 """Domain primitives for witty service."""
 
-from witty_service.domain.enums import AgentStatus, can_transition
 from witty_service.domain.errors import (
     AgentConfigUpdateForbiddenError,
     AgentContextMismatchError,
@@ -24,7 +23,6 @@ __all__ = [
     "AgentIdNotConfiguredError",
     "AgentNotFoundError",
     "AgentServiceError",
-    "AgentStatus",
     "DomainError",
     "ErrorPayload",
     "FieldValidationError",
@@ -32,5 +30,4 @@ __all__ = [
     "InvalidAgentTransitionError",
     "InvalidSessionMetadataError",
     "SessionNotFoundError",
-    "can_transition",
 ]
