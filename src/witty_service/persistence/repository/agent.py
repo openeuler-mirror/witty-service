@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sqlalchemy import func, update
+
 from witty_service.domain.enums import AgentKind, AgentSourceType
 from witty_service.domain.records import AgentDefinitionRecord
 from witty_service.persistence.entities import AgentDefinitionORM
@@ -109,20 +111,30 @@ class AgentRepository(RepositoryBase):
         now: int,
     ) -> AgentDefinitionRecord | None:
         with self._transaction() as session:
-            row = session.get(AgentDefinitionORM, agent_id)
-            if row is None or row.config_updated_at != expected_config_updated_at:
-                return None
             changes = {
                 "name": name,
                 "description": description,
                 "system_prompt": system_prompt,
             }
-            for field, value in changes.items():
-                if value is not None:
-                    setattr(row, field, value)
-            row.config_updated_at = now
-            row.updated_at = now
-            session.flush()
+            values = {
+                field: value for field, value in changes.items() if value is not None
+            }
+            values["config_updated_at"] = func.max(
+                now, AgentDefinitionORM.config_updated_at + 1
+            )
+            values["updated_at"] = now
+            result = session.execute(
+                update(AgentDefinitionORM)
+                .where(
+                    AgentDefinitionORM.id == agent_id,
+                    AgentDefinitionORM.config_updated_at == expected_config_updated_at,
+                )
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount != 1:
+                return None
+            row = session.get(AgentDefinitionORM, agent_id)
             return record_of(AgentDefinitionRecord, row)
 
     def archive(self, agent_id: str, now: int) -> AgentDefinitionRecord | None:

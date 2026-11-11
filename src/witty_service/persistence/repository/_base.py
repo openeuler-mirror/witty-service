@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from dataclasses import fields
 from enum import StrEnum
 from functools import cache
-from typing import Any, TypeVar, cast, get_type_hints
+from typing import Any, TypeVar, cast, get_args, get_type_hints
 from uuid import uuid4
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -19,11 +19,13 @@ def new_id() -> str:
 
 @cache
 def _enum_fields(record_type: type[object]) -> dict[str, type[StrEnum]]:
-    return {
-        name: hint
-        for name, hint in get_type_hints(record_type).items()
-        if isinstance(hint, type) and issubclass(hint, StrEnum)
-    }
+    enums: dict[str, type[StrEnum]] = {}
+    for name, hint in get_type_hints(record_type).items():
+        for candidate in (hint, *get_args(hint)):
+            if isinstance(candidate, type) and issubclass(candidate, StrEnum):
+                enums[name] = candidate
+                break
+    return enums
 
 
 def record_of(record_type: type[RecordT], row: object) -> RecordT:
