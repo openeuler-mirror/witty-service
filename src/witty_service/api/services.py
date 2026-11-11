@@ -7,6 +7,7 @@ from pathlib import Path
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from witty_service.application.history_service import HistoryService
 from witty_service.application.model_catalog_service import ModelCatalogService
 from witty_service.application.session_service import SessionService
 from witty_service.application.turn_service import TurnService
@@ -55,6 +56,7 @@ class ServiceContainer:
     model_catalog: ModelCatalogService
     session_service: SessionService
     turn_service: TurnService
+    history_service: HistoryService
     sandbox_backends: dict[str, SandboxBackend] = field(default_factory=dict)
 
     def get_sandbox_backend(self, sandbox_type: str) -> SandboxBackend:
@@ -145,5 +147,6 @@ def build_default_services() -> ServiceContainer:
             runtime=runtime_manager,
             runtime_spec_factory=build_workspace_runtime_spec,
         ),
+        history_service=HistoryService(sessions=sessions, runtime=runtime_manager),
         sandbox_backends={"local_process": sandbox},
     )

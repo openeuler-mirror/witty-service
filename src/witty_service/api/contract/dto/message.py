@@ -70,6 +70,9 @@ class MessageResponse(BaseModel):
 
 class MessageListResponse(BaseModel):
     items: list[MessageResponse]
-    next_before: str | None = Field(
-        description="更早一页的 before 游标；null 表示没有更早的消息"
+    next_cursor: str | None = Field(
+        description="更早一页的不透明游标；null 表示没有更早的消息"
+    )
+    previous_cursor: str | None = Field(
+        description="更新一页的不透明游标；null 表示没有更新的消息"
     )

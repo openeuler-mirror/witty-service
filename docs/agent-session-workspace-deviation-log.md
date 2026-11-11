@@ -90,7 +90,7 @@
 - T02 的选择更新只写 `current_agent_id/current_model_id`，仓库层按非空列部分更新；不触碰 `runtime_session_id`、历史 Turn 快照，也不启动 Runtime。
 - T03 保留唯一准入路径 `SessionRepository.start_turn`：Session 当前选择在插入事务内重新读取并校验，调用方传值不一致时拒绝，避免 TOCTOU 归因；seq 分配与 running 插入同事务，冲突映射 409 `ACTIVE_TURN_CONFLICT`。
 - T04 归因快照在准入事务内写入，历史只读 Turn 快照；未用快照重建执行环境。Turn 列表按 `turn_seq` 倒序分页。
-- R06/R07 已合入本分支；T05 起经 Manager 的 `acquire_turn_permit/release_turn_permit/bind_turn_runtime_session`、单条事件链与历史门面接入，不以 Fake 放行。R09 的 `runtime_status` 与 503 `RUNTIME_UNAVAILABLE` 在 T07 接入时校验。
+- R06/R07 已合入本分支；T05 起经 Manager 的 `acquire_turn_permit/release_turn_permit/bind_turn_runtime_session`、单条事件链与历史门面接入，不以 Fake 放行。R09 的 `runtime_status` 与 503 `RUNTIME_UNAVAILABLE` 已在 T07 接入，并由 Session 契约测试与历史 503 契约测试校验。
 
 ## T05 Turn 执行管线
 
@@ -112,3 +112,12 @@
 - Assistant ordinal 取当前已映射消息的 `max(ordinal)+1` 且最小为 1，把 0 永久预留给用户消息；即使 Assistant 边界事件先于用户消息落库也不会占用 0 或与用户消息冲突。
 - 只有 `TurnStatus.running` 的 Turn 接受消息映射；终态后晚到的 `message.started`/`message.completed` 直接丢弃，不复活 Turn、不新增归属。
 - `agent-switched`/`model-switched` 只存在于 v2 历史消息，不会出现在 live 的 text 事件流；本阶段消息映射只消费带 `runtime_message_id` 的文本边界事件，控制消息过滤与映射留给 T07 History Projection。
+
+## T07 v2 History Projection 与 Session 历史/事件读模型
+
+- 新增 `HistoryService`：消息页只读 v2 Runtime 历史，DB 仅用于把 `runtime_message_id` 合并回 `turn_runtime_messages` 获取 Turn 归因；Session 没有 Runtime Session 时返回空页，不读取 DB 消息表。
+- 消息接口改为 `limit/cursor` 入参、`next_cursor/previous_cursor` 出参；对外游标是带 Session 作用域的 base64 不透明串，内部原样携带 v2 的 `cursor.next/previous`，跨 Session 使用返回 400 `CURSOR_SESSION_MISMATCH`，非法游标返回 400 `INVALID_CURSOR`。
+- `agent_switched/model_switched` 控制消息在投影层过滤，不伪装成 user/assistant；过滤只影响当前页条目数，v2 返回的 next/previous 游标原样保留，翻页边界不因过滤而漂移。
+- Runtime 非 ready（含发布中 `restarting`、进程退出 `unavailable`）时返回 503 `RUNTIME_UNAVAILABLE`，不回退 DB 历史；Session 不存在或已删除返回 404。
+- Session 事件流以 `data: <SessionEvent JSON>` 输出，不写 SSE `id:`/`event:`/`retry:`；Turn/消息事件按 Turn 所属 Session 过滤，session 级事件在订阅后 Runtime Session ID 才落库或重启后变化时会重新读取 Session，避免用订阅瞬间的快照漏事件；`RuntimeResyncRequired` 统一映射为 `resync_required`，payload 标记 `full_reload=true` 并携带 `reason/last_durable_seq`，要求客户端全量重读 Turn 与历史。
+- Manager 增加 `read_history` 纯委托门面，并统一用 R09 的 `require_ready()` 作为最后门禁（400/404 判定后调用）；事件重连与 durable seq 去重仍由 Manager 单 Workspace 事件链负责，API 只消费其重放后的 `RuntimeStreamItem`。

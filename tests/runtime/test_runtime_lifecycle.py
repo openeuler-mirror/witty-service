@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 import pytest
 
 from witty_service.runtime.contracts import (
+    HistoryQuery,
     ReplayQuery,
     RuntimeConnection,
     RuntimeEventEnvelope,
@@ -520,6 +521,10 @@ async def test_publishing_maps_to_restarting() -> None:
     assert harness.manager.availability("ws_a").status is RuntimeStatus.RESTARTING
     with pytest.raises(RuntimeUnavailableError):
         harness.manager.require_ready("ws_a")
+    with pytest.raises(RuntimeUnavailableError):
+        await harness.manager.read_history(
+            HistoryQuery(workspace_id="ws_a", runtime_session_id="rt_1", limit=20)
+        )
 
     assert harness.port.verify_gate is not None
     harness.port.verify_gate.set()

@@ -835,14 +835,14 @@ paths:
           minimum: 1
           default: 20
           title: Limit
-      - name: before
+      - name: cursor
         in: query
         required: false
         schema:
           anyOf:
           - type: string
           - type: 'null'
-          title: Before
+          title: Cursor
       responses:
         '200':
           description: Successful Response
@@ -1699,16 +1699,23 @@ components:
             $ref: '#/components/schemas/MessageResponse'
           type: array
           title: Items
-        next_before:
+        next_cursor:
           anyOf:
           - type: string
           - type: 'null'
-          title: Next Before
-          description: 更早一页的 before 游标；null 表示没有更早的消息
+          title: Next Cursor
+          description: 更早一页的不透明游标；null 表示没有更早的消息
+        previous_cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Previous Cursor
+          description: 更新一页的不透明游标；null 表示没有更新的消息
       type: object
       required:
       - items
-      - next_before
+      - next_cursor
+      - previous_cursor
       title: MessageListResponse
     MessageResponse:
       properties:

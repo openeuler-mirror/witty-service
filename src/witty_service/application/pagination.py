@@ -10,9 +10,7 @@ from witty_service.domain.errors import DomainError
 _CURSOR_VERSION = 1
 
 
-def encode_cursor(
-    *, scope: str, scope_id: str, position: dict[str, str | int]
-) -> str:
+def encode_cursor(*, scope: str, scope_id: str, position: dict[str, str | int]) -> str:
     payload = {"v": _CURSOR_VERSION, "scope": scope, "id": scope_id, **position}
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
@@ -41,7 +39,7 @@ def decode_cursor(
     for name, expected in fields.items():
         value = payload.get(name)
         if not isinstance(value, expected) or isinstance(value, bool):
-            raise _cursor_error(mismatch_code)
+            raise _cursor_error(ErrorCode.INVALID_CURSOR)
         position[name] = value
     return position
 

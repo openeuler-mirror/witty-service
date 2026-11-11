@@ -68,6 +68,7 @@ def _container(events: list[str], *, failing_runtime: bool = False) -> ServiceCo
         model_catalog=MagicMock(),
         session_service=MagicMock(),
         turn_service=turns,  # type: ignore[arg-type]
+        history_service=MagicMock(),
         sandbox_backends={"local_process": Backend()},  # type: ignore[dict-item]
     )
 

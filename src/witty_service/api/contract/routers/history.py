@@ -1,14 +1,25 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+import contextlib
+from collections.abc import AsyncGenerator, AsyncIterator
+from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Query
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import Response, StreamingResponse
 
 from witty_service.api.contract.dto.event import SessionEvent
 from witty_service.api.contract.dto.message import MessageListResponse
-from witty_service.api.contract.routers._stub import not_implemented
+from witty_service.api.contract.presenters import (
+    message_response,
+    session_event,
+    session_resync,
+)
 from witty_service.api.errors import error_responses
+from witty_service.application.history_service import (
+    EventStreamItem,
+    HistoryService,
+    SessionResyncView,
+)
 
 router = APIRouter()
 
@@ -24,18 +35,31 @@ _EVENT_STREAM_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 
+def _service(request: Request) -> HistoryService:
+    return cast(HistoryService, request.app.state.services.history_service)
+
+
+Service = Annotated[HistoryService, Depends(_service)]
+
+
 @router.get(
     "/sessions/{session_id}/messages",
     response_model=MessageListResponse,
     tags=["messages"],
     responses=error_responses(400, 404, 503),
 )
-def list_session_messages(
+async def list_session_messages(
     session_id: str,
+    service: Service,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
-    before: str | None = None,
+    cursor: str | None = None,
 ) -> MessageListResponse:
-    not_implemented()
+    page = await service.list_messages(session_id, limit=limit, cursor=cursor)
+    return MessageListResponse(
+        items=[message_response(item) for item in page.items],
+        next_cursor=page.next_cursor,
+        previous_cursor=page.previous_cursor,
+    )
 
 
 @router.get(
@@ -44,5 +68,23 @@ def list_session_messages(
     tags=["events"],
     responses=_EVENT_STREAM_RESPONSES,
 )
-def stream_session_events(session_id: str) -> Response:
-    not_implemented()
+async def stream_session_events(session_id: str, service: Service) -> Response:
+    events = await service.stream_events(session_id)
+    return StreamingResponse(
+        _event_frames(session_id, events),
+        media_type="text/event-stream",
+    )
+
+
+async def _event_frames(
+    session_id: str, events: AsyncIterator[EventStreamItem]
+) -> AsyncIterator[str]:
+    stream = cast(AsyncGenerator[EventStreamItem, None], events)
+    async with contextlib.aclosing(stream):
+        async for item in stream:
+            event = (
+                session_resync(session_id, item)
+                if isinstance(item, SessionResyncView)
+                else session_event(item)
+            )
+            yield f"data: {event.model_dump_json()}\n\n"

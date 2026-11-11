@@ -13,6 +13,8 @@ from uuid import uuid4
 
 from witty_service.runtime.contracts import (
     EnsureSessionRequest,
+    HistoryPage,
+    HistoryQuery,
     ReplayQuery,
     RuntimeConnection,
     RuntimeEventEnvelope,
@@ -454,6 +456,11 @@ class WorkspaceRuntimeManager:
         """显式携带 Agent/model/Parts 提交 admission；adapter 内部先做 prepare。"""
         self._require_healthy(request.workspace_id)
         return await self._port.admit_turn(request)
+
+    async def read_history(self, query: HistoryQuery) -> HistoryPage:
+        """只在 Runtime ready 时读取 v2 历史；不可用时由 API 返回 503。"""
+        self.require_ready(query.workspace_id)
+        return await self._port.read_history(query)
 
     def _require_healthy(self, workspace_id: str) -> _ManagedWorkspace:
         entry = self._entries.get(workspace_id)
