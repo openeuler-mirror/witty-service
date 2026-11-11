@@ -1,0 +1,253 @@
+from __future__ import annotations
+
+from sqlalchemy.dialects.sqlite import insert
+
+from witty_service.domain.enums import SkillDiscoverStatus
+from witty_service.domain.records import (
+    McpServerRecord,
+    ModelRecord,
+    SkillRecord,
+    SkillRepoRecord,
+)
+from witty_service.persistence.entities import (
+    McpServerORM,
+    ModelORM,
+    SkillORM,
+    SkillRepoORM,
+)
+from witty_service.persistence.repository._base import RepositoryBase, new_id, record_of
+
+
+class CatalogRepository(RepositoryBase):
+    def create_model(
+        self,
+        display_name: str,
+        provider_id: str,
+        provider_model_id: str,
+        compatibility: str | None,
+        api_base_url: str | None,
+        credential_ref: str | None,
+        max_tokens: int,
+        temperature: float,
+        now: int,
+    ) -> ModelRecord:
+        with self._transaction() as session:
+            row = ModelORM(
+                id=new_id(),
+                display_name=display_name,
+                provider_id=provider_id,
+                provider_model_id=provider_model_id,
+                compatibility=compatibility,
+                api_base_url=api_base_url,
+                credential_ref=credential_ref,
+                enabled=1,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                is_default=0,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            session.flush()
+            return record_of(ModelRecord, row)
+
+    def get_model(self, model_id: str) -> ModelRecord | None:
+        with self._read() as session:
+            row = session.get(ModelORM, model_id)
+            return None if row is None else record_of(ModelRecord, row)
+
+    def list_models(self, include_disabled: bool) -> list[ModelRecord]:
+        with self._read() as session:
+            query = session.query(ModelORM)
+            if not include_disabled:
+                query = query.filter(ModelORM.enabled == 1)
+            rows = query.order_by(
+                ModelORM.is_default.desc(),
+                ModelORM.created_at.desc(),
+                ModelORM.id,
+            ).all()
+            return [record_of(ModelRecord, row) for row in rows]
+
+    def get_default_model(self) -> ModelRecord | None:
+        with self._read() as session:
+            row = (
+                session.query(ModelORM)
+                .filter(ModelORM.is_default == 1, ModelORM.enabled == 1)
+                .one_or_none()
+            )
+            return None if row is None else record_of(ModelRecord, row)
+
+    def set_default_model(self, model_id: str, now: int) -> ModelRecord | None:
+        with self._transaction() as session:
+            row = session.get(ModelORM, model_id)
+            if row is None or row.enabled != 1:
+                return None
+            session.query(ModelORM).filter(
+                ModelORM.is_default == 1, ModelORM.id != model_id
+            ).update({"is_default": 0, "updated_at": now}, synchronize_session=False)
+            row.is_default = 1
+            row.updated_at = now
+            session.flush()
+            return record_of(ModelRecord, row)
+
+    def disable_model(self, model_id: str, now: int) -> ModelRecord | None:
+        with self._transaction() as session:
+            row = session.get(ModelORM, model_id)
+            if row is None:
+                return None
+            row.enabled = 0
+            row.is_default = 0
+            row.updated_at = now
+            session.flush()
+            return record_of(ModelRecord, row)
+
+    def create_skill_repo(
+        self,
+        repo_name: str,
+        source_type: str,
+        branch: str | None,
+        url: str | None,
+        local_path: str | None,
+        now: int,
+    ) -> SkillRepoRecord:
+        with self._transaction() as session:
+            row = SkillRepoORM(
+                repo_id=new_id(),
+                repo_name=repo_name,
+                source_type=source_type,
+                branch=branch,
+                url=url,
+                local_path=local_path,
+                skill_discover_status=SkillDiscoverStatus.init.value,
+                skill_count=0,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            session.flush()
+            return record_of(SkillRepoRecord, row)
+
+    def get_skill_repo(self, repo_id: str) -> SkillRepoRecord | None:
+        with self._read() as session:
+            row = session.get(SkillRepoORM, repo_id)
+            return None if row is None else record_of(SkillRepoRecord, row)
+
+    def get_skill_repo_by_name(self, repo_name: str) -> SkillRepoRecord | None:
+        with self._read() as session:
+            row = (
+                session.query(SkillRepoORM)
+                .filter(SkillRepoORM.repo_name == repo_name)
+                .one_or_none()
+            )
+            return None if row is None else record_of(SkillRepoRecord, row)
+
+    def list_skill_repos(self) -> list[SkillRepoRecord]:
+        with self._read() as session:
+            rows = session.query(SkillRepoORM).order_by(SkillRepoORM.repo_name).all()
+            return [record_of(SkillRepoRecord, row) for row in rows]
+
+    def upsert_skill(
+        self,
+        repo_id: str,
+        skill_name: str,
+        relative_path: str,
+        content_sha256: str,
+        metadata_json: dict[str, object],
+        skill_source: str | None,
+        skill_md_url: str | None,
+        enabled: int,
+        now: int,
+    ) -> SkillRecord:
+        with self._transaction() as session:
+            statement = insert(SkillORM).values(
+                skill_id=new_id(),
+                repo_id=repo_id,
+                skill_name=skill_name,
+                relative_path=relative_path,
+                content_sha256=content_sha256,
+                metadata_json=metadata_json,
+                skill_source=skill_source,
+                skill_md_url=skill_md_url,
+                enabled=enabled,
+                created_at=now,
+                updated_at=now,
+            )
+            session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["repo_id", "relative_path"],
+                    set_={
+                        "skill_name": statement.excluded.skill_name,
+                        "content_sha256": statement.excluded.content_sha256,
+                        "metadata_json": statement.excluded.metadata_json,
+                        "skill_source": statement.excluded.skill_source,
+                        "skill_md_url": statement.excluded.skill_md_url,
+                        "enabled": statement.excluded.enabled,
+                        "updated_at": now,
+                    },
+                )
+            )
+            row = (
+                session.query(SkillORM)
+                .filter(
+                    SkillORM.repo_id == repo_id,
+                    SkillORM.relative_path == relative_path,
+                )
+                .one()
+            )
+            return record_of(SkillRecord, row)
+
+    def list_skills(self, repo_id: str) -> list[SkillRecord]:
+        with self._read() as session:
+            rows = (
+                session.query(SkillORM)
+                .filter(SkillORM.repo_id == repo_id)
+                .order_by(SkillORM.skill_name)
+                .all()
+            )
+            return [record_of(SkillRecord, row) for row in rows]
+
+    def upsert_mcp_server(
+        self,
+        mcp_server_name: str,
+        config_json: dict[str, object],
+        credential_ref: str | None,
+        enabled: int,
+        now: int,
+    ) -> McpServerRecord:
+        with self._transaction() as session:
+            statement = insert(McpServerORM).values(
+                id=new_id(),
+                mcp_server_name=mcp_server_name,
+                config_json=config_json,
+                credential_ref=credential_ref,
+                enabled=enabled,
+                secret_revision=0,
+                created_at=now,
+                updated_at=now,
+            )
+            session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["mcp_server_name"],
+                    set_={
+                        "config_json": statement.excluded.config_json,
+                        "credential_ref": statement.excluded.credential_ref,
+                        "enabled": statement.excluded.enabled,
+                        "secret_revision": McpServerORM.secret_revision + 1,
+                        "updated_at": now,
+                    },
+                )
+            )
+            row = (
+                session.query(McpServerORM)
+                .filter(McpServerORM.mcp_server_name == mcp_server_name)
+                .one()
+            )
+            return record_of(McpServerRecord, row)
+
+    def list_mcp_servers(self, include_disabled: bool) -> list[McpServerRecord]:
+        with self._read() as session:
+            query = session.query(McpServerORM)
+            if not include_disabled:
+                query = query.filter(McpServerORM.enabled == 1)
+            rows = query.order_by(McpServerORM.mcp_server_name).all()
+            return [record_of(McpServerRecord, row) for row in rows]
