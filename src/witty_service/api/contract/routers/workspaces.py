@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Request, status
 
 from witty_service.api.contract.dto.session import SessionListResponse
 from witty_service.api.contract.dto.workspace import (
@@ -11,8 +11,10 @@ from witty_service.api.contract.dto.workspace import (
     WorkspaceListResponse,
     WorkspaceResponse,
 )
+from witty_service.api.contract.presenters import session_response
 from witty_service.api.contract.routers._stub import not_implemented
 from witty_service.api.errors import error_responses
+from witty_service.application.session_service import SessionService
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -62,7 +64,13 @@ def update_workspace(
 )
 def list_workspace_sessions(
     workspace_id: str,
+    request: Request,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> SessionListResponse:
-    not_implemented()
+    service: SessionService = request.app.state.services.session_service
+    page = service.list_sessions(workspace_id, cursor=cursor, limit=limit)
+    return SessionListResponse(
+        items=[session_response(item) for item in page.items],
+        next_cursor=page.next_cursor,
+    )
