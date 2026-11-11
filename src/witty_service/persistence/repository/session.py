@@ -27,6 +27,36 @@ from witty_service.persistence.entities import (
 from witty_service.persistence.repository._base import RepositoryBase, new_id, record_of
 
 
+class TurnAdmissionError(LookupError):
+    pass
+
+
+class SessionAdmissionError(TurnAdmissionError):
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"session {session_id} is not open for admission")
+        self.session_id = session_id
+
+
+class AgentNotAvailableError(TurnAdmissionError):
+    def __init__(self, agent_id: str, *, archived: bool) -> None:
+        super().__init__(f"agent {agent_id} is not available")
+        self.agent_id = agent_id
+        self.archived = archived
+
+
+class ModelNotAvailableError(TurnAdmissionError):
+    def __init__(self, model_id: str, *, disabled: bool) -> None:
+        super().__init__(f"model {model_id} is not available")
+        self.model_id = model_id
+        self.disabled = disabled
+
+
+class SelectionChangedError(TurnAdmissionError):
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"session {session_id} selection changed during admission")
+        self.session_id = session_id
+
+
 class SessionRepository(RepositoryBase):
     def create(
         self,
@@ -242,15 +272,37 @@ class SessionRepository(RepositoryBase):
             return True
 
     def start_turn(
-        self, session_id: str, agent_id: str, model_id: str, now: int
+        self,
+        session_id: str,
+        agent_id: str | None,
+        model_id: str | None,
+        now: int,
+        *,
+        turn_id: str | None = None,
     ) -> TurnRecord:
         with self._transaction() as session:
+            session_row = session.get(SessionORM, session_id)
+            if session_row is None or session_row.deleted_at is not None:
+                raise SessionAdmissionError(session_id)
+            if agent_id is not None and agent_id != session_row.current_agent_id:
+                raise SelectionChangedError(session_id)
+            if model_id is not None and model_id != session_row.current_model_id:
+                raise SelectionChangedError(session_id)
+            agent_id = session_row.current_agent_id
+            model_id = session_row.current_model_id
+
             agent = session.get(AgentDefinitionORM, agent_id)
-            if agent is None or agent.archived_at is not None:
-                raise LookupError(f"agent {agent_id} is not available")
+            if agent is None:
+                raise AgentNotAvailableError(agent_id, archived=False)
+            if agent.archived_at is not None:
+                raise AgentNotAvailableError(agent_id, archived=True)
+            if model_id is None:
+                raise ModelNotAvailableError("", disabled=False)
             model = session.get(ModelORM, model_id)
-            if model is None or model.enabled != 1:
-                raise LookupError(f"model {model_id} is not available")
+            if model is None:
+                raise ModelNotAvailableError(model_id, disabled=False)
+            if model.enabled != 1:
+                raise ModelNotAvailableError(model_id, disabled=True)
 
             next_seq = session.execute(
                 update(SessionORM)
@@ -266,10 +318,10 @@ class SessionRepository(RepositoryBase):
                 .returning(SessionORM.last_turn_seq)
             ).scalar_one_or_none()
             if next_seq is None:
-                raise LookupError(f"session {session_id} not found")
+                raise SessionAdmissionError(session_id)
 
             row = TurnORM(
-                id=new_id(),
+                id=turn_id or new_id(),
                 session_id=session_id,
                 turn_seq=next_seq,
                 agent_id=agent_id,

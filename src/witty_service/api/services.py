@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from witty_service.application.model_catalog_service import ModelCatalogService
 from witty_service.application.session_service import SessionService
+from witty_service.application.turn_service import TurnService
 from witty_service.application.workspace_projection import (
     CatalogCredentialResolver,
     WorkspaceProjectionSource,
@@ -50,6 +51,7 @@ class ServiceContainer:
     runtime_manager: WorkspaceRuntimeManager
     model_catalog: ModelCatalogService
     session_service: SessionService
+    turn_service: TurnService
     sandbox_backends: dict[str, SandboxBackend] = field(default_factory=dict)
 
     def get_sandbox_backend(self, sandbox_type: str) -> SandboxBackend:
@@ -128,6 +130,11 @@ def build_default_services() -> ServiceContainer:
             agents=agents,
             catalog=catalog_repository,
             runtime_manager=runtime_manager,
+        ),
+        turn_service=TurnService(
+            sessions=sessions,
+            agents=agents,
+            catalog=catalog_repository,
         ),
         sandbox_backends={"local_process": sandbox},
     )
