@@ -26,6 +26,19 @@ from witty_service.sandbox.base import (
 from witty_service.sandbox.ports import find_free_port, port_is_bindable
 
 AGENT_SERVER_MARKER = "witty_agent_server.app:create_app"
+WORKSPACE_SERVER_MARKERS = (AGENT_SERVER_MARKER, "opencode")
+
+
+def _workspace_server_marker(cmdline: list[str] | None) -> str | None:
+    if not cmdline:
+        return None
+    for marker in WORKSPACE_SERVER_MARKERS:
+        if marker not in cmdline:
+            continue
+        if marker == "opencode" and "serve" not in cmdline:
+            continue
+        return marker
+    return None
 
 
 def read_proc_stat(pid: int, *, strict: bool = False) -> tuple[str, str, str] | None:
@@ -107,7 +120,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
     def start(
         self,
         *,
-        agent_id: str,
+        workspace_id: str,
         workspace_path: str,
         env: dict[str, str] | None = None,
         **kwargs: Any,
@@ -119,18 +132,20 @@ class LocalProcessSandboxBackend(SandboxBackend):
         进程树收敛掉再新建。否则每恢复一次就多留一棵孤儿进程树，它们占着端口，正是
         后续恢复失败的直接原因。
         """
-        logger.info(f"[LocalProcessSandbox] Starting sandbox for agent_id: {agent_id}")
+        logger.info(
+            f"[LocalProcessSandbox] Starting sandbox for workspace_id: {workspace_id}"
+        )
         previous_handle = kwargs.get("previous_handle")
         if isinstance(previous_handle, SandboxHandle):
             # 兜底校验归属：句柄串号时宁可多留一个孤儿，也不能误杀别的 agent。
-            if previous_handle.agent_id == agent_id:
+            if previous_handle.workspace_id == workspace_id:
                 self._stop_previous_sandbox(previous_handle)
             else:
                 logger.warning(
                     "[LocalProcessSandbox] Ignore previous_handle of another agent: "
                     "expected=%s got=%s",
-                    agent_id,
-                    previous_handle.agent_id,
+                    workspace_id,
+                    previous_handle.workspace_id,
                 )
         # 端口优先复用调用方记录的上一次取值（旧进程树此时已收敛）；只有真的被别的
         # 进程占着才退回随机端口——否则每次重启/恢复都会把沙箱端口换掉。
@@ -238,7 +253,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
         )
         handle = SandboxHandle(
             sandbox_id=sandbox_id,
-            agent_id=agent_id,
+            workspace_id=workspace_id,
             workspace_path=workspace_path,
             metadata={
                 "pid": process.pid,
@@ -329,24 +344,26 @@ class LocalProcessSandboxBackend(SandboxBackend):
             return SandboxStatus.running
         return SandboxStatus.stopped
 
-    def find_handle_by_agent_id(
-        self, *, agent_id: str, workspace_path: str
+    def find_handle_by_workspace(
+        self, *, workspace_id: str, workspace_path: str
     ) -> SandboxHandle | None:
-        """按 agent_id 回查执行体：None 表示已确证不存在，扫描失败必须抛错。
+        """按 workspace_id 回查执行体：None 表示已确证不存在，扫描失败必须抛错。
 
-        登记表未命中时扫描 /proc（cmdline 为 witty-agent-server 且 cwd 属于该 workspace）。
+        登记表未命中时扫描 /proc（cmdline 命中 workspace server 标记且 cwd 属于该 workspace）。
         """
         for handle in self._handles.values():
-            if handle.agent_id == agent_id:
+            if handle.workspace_id == workspace_id:
                 return handle
 
         root = Path(workspace_path).expanduser().resolve()
+        candidates: list[tuple[int, str, str, str]] = []
         for entry in os.listdir("/proc"):
             if not entry.isdigit():
                 continue
             pid = int(entry)
             cmdline = read_proc_cmdline(pid, strict=True)
-            if not cmdline or "witty_agent_server.app:create_app" not in cmdline:
+            marker = _workspace_server_marker(cmdline)
+            if marker is None:
                 continue
             if not self._cwd_under(pid, root, strict=True):
                 continue
@@ -354,17 +371,25 @@ class LocalProcessSandboxBackend(SandboxBackend):
             if stat is None:
                 continue
             _state, pgrp, start_time = stat
-            return SandboxHandle(
-                sandbox_id=f"untracked-{pid}",
-                agent_id=agent_id,
-                workspace_path=workspace_path,
-                metadata={
-                    "pid": pid,
-                    "pgid": int(pgrp) if pgrp.isdigit() else pid,
-                    "process_start_time": start_time,
-                },
-            )
-        return None
+            candidates.append((pid, pgrp, start_time, marker))
+        if not candidates:
+            return None
+
+        # 优先返回自成进程组的 leader：只有 leader 才能安全地整组回收。
+        leaders = [item for item in candidates if item[1] == str(item[0])]
+        leaders.sort(key=lambda item: item[3] != AGENT_SERVER_MARKER)
+        pid, pgrp, start_time, marker = (leaders or candidates)[0]
+        return SandboxHandle(
+            sandbox_id=f"untracked-{pid}",
+            workspace_id=workspace_id,
+            workspace_path=workspace_path,
+            metadata={
+                "pid": pid,
+                "pgid": int(pgrp) if pgrp.isdigit() else pid,
+                "process_start_time": start_time,
+                "process_marker": marker,
+            },
+        )
 
     def endpoint(self, handle: SandboxHandle | str, **kwargs: Any) -> AdapterEndpoint:
         sandbox_handle = self._resolve_handle(handle)
@@ -380,6 +405,21 @@ class LocalProcessSandboxBackend(SandboxBackend):
     # ======================================================================
     # 进程树收敛：按进程组停止，并能在服务重启后清理残留
     # ======================================================================
+
+    @staticmethod
+    def _pgrp_has_registered_leader(
+        pgrp: str, registered: dict[int, str | None]
+    ) -> bool:
+        if not pgrp.isdigit():
+            return False
+        leader_pid = int(pgrp)
+        if leader_pid not in registered:
+            return False
+        registered_start_time = registered[leader_pid]
+        if registered_start_time is None:
+            return True
+        stat = read_proc_stat(leader_pid)
+        return stat is not None and stat[2] == registered_start_time
 
     @staticmethod
     def _read_process_start_time(pid: int) -> str | None:
@@ -547,19 +587,19 @@ class LocalProcessSandboxBackend(SandboxBackend):
         pgid = self._verified_process_group(handle)
         if pgid is not None:
             logger.info(
-                "[LocalProcessSandbox] Reaping orphan process group %s (agent_id=%s)",
+                "[LocalProcessSandbox] Reaping orphan process group %s (workspace_id=%s)",
                 pgid,
-                handle.agent_id,
+                handle.workspace_id,
             )
             self._reap_process_group(pgid, timeout=self.stop_timeout)
             return
 
         if not self._pid_is_our_agent_server(pid, metadata):
             logger.warning(
-                "[LocalProcessSandbox] Skip reaping pid=%s for agent_id=%s: "
+                "[LocalProcessSandbox] Skip reaping pid=%s for workspace_id=%s: "
                 "process is gone or is not our agent server",
                 pid,
-                handle.agent_id,
+                handle.workspace_id,
             )
             return
 
@@ -582,7 +622,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
                 details={"pid": pid},
             )
 
-    def reap_orphan_agent_servers(
+    def reap_orphan_servers(
         self,
         *,
         registered: dict[int, str | None],
@@ -614,7 +654,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
                 continue
             pid = int(entry)
             cmdline = read_proc_cmdline(pid)
-            if not cmdline or "witty_agent_server.app:create_app" not in cmdline:
+            if _workspace_server_marker(cmdline) is None:
                 continue
             stat = read_proc_stat(pid)
             if stat is None:
@@ -628,6 +668,10 @@ class LocalProcessSandboxBackend(SandboxBackend):
                 # 新句柄：pid 与 process_start_time 双重精确匹配（防 pid 复用误杀）
                 if registered_start_time == start_time:
                     continue
+            if self._pgrp_has_registered_leader(pgrp, registered):
+                # opencode serve 等子进程不在 registered（只登记 leader pid），
+                # 但同组的已登记 leader 还活着，整组必须豁免。
+                continue
             if not self._cwd_under(pid, root):
                 logger.info(
                     "[LocalProcessSandbox] Skip pid=%s: cwd is outside workspace root",

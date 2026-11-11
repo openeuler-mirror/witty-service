@@ -122,7 +122,7 @@ def test_docker_runtime_start_mounts_workspace_to_witty_workspace(
     workspace_path = _workspace_dir(tmp_path)
 
     handle = backend.start(
-        agent_id="agent-1",
+        workspace_id="agent-1",
         workspace_path=workspace_path,
         port=18080,
         image_tag="test",
@@ -177,7 +177,7 @@ def test_docker_runtime_start_with_environment_vars(tmp_path: Path) -> None:
     workspace_path = _workspace_dir(tmp_path)
 
     backend.start(
-        agent_id="agent-env",
+        workspace_id="agent-env",
         workspace_path=workspace_path,
         port=18090,
         image_tag="test",
@@ -202,7 +202,7 @@ def test_docker_runtime_stop_cleanup_and_endpoint(tmp_path: Path) -> None:
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
     workspace_path = _workspace_dir(tmp_path)
     handle = backend.start(
-        agent_id="agent-2",
+        workspace_id="agent-2",
         workspace_path=workspace_path,
         image_tag="test",
     )
@@ -248,7 +248,7 @@ def test_docker_runtime_status_maps_container_state(
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
     workspace_path = _workspace_dir(tmp_path)
     handle = backend.start(
-        agent_id="agent-3",
+        workspace_id="agent-3",
         workspace_path=workspace_path,
         port=18082,
         image_tag="test",
@@ -267,7 +267,7 @@ def test_docker_runtime_status_returns_stopped_when_no_container(
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
     workspace_path = _workspace_dir(tmp_path)
     handle = backend.start(
-        agent_id="agent-no-container",
+        workspace_id="agent-no-container",
         workspace_path=workspace_path,
         port=18100,
         image_tag="test",
@@ -287,7 +287,7 @@ def test_docker_runtime_status_finds_container_by_name_after_handle_loss(
     client = FakeDockerClient(container)
     backend = DockerSandboxBackend(client=client)
     handle = backend.start(
-        agent_id="agent-reconnect",
+        workspace_id="agent-reconnect",
         workspace_path=_workspace_dir(tmp_path),
         port=18101,
         image_tag="test",
@@ -310,7 +310,7 @@ def test_docker_runtime_status_raises_when_name_lookup_fails(
     backend = DockerSandboxBackend(client=client)
     handle = SandboxHandle(
         sandbox_id="sandbox-lookup-error",
-        agent_id="agent-lookup-error",
+        workspace_id="agent-lookup-error",
         workspace_path=str(tmp_path),
         metadata={},
     )
@@ -329,7 +329,7 @@ def test_docker_runtime_status_raises_domain_error_when_docker_api_fails(
     container = ReloadErrorContainer()
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
     handle = backend.start(
-        agent_id="agent-4",
+        workspace_id="agent-4",
         workspace_path=_workspace_dir(tmp_path),
         port=18083,
         image_tag="test",
@@ -356,7 +356,7 @@ def test_docker_runtime_cleanup_attempts_remove_when_stop_fails(
     container = StopErrorContainer()
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
     handle = backend.start(
-        agent_id="agent-5",
+        workspace_id="agent-5",
         workspace_path=_workspace_dir(tmp_path),
         port=18084,
         image_tag="test",
@@ -380,7 +380,7 @@ def test_docker_runtime_cleanup_when_remove_fails(
     container = RemoveErrorContainer()
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
     handle = backend.start(
-        agent_id="agent-6",
+        workspace_id="agent-6",
         workspace_path=_workspace_dir(tmp_path),
         port=18085,
         image_tag="test",
@@ -405,7 +405,7 @@ def test_docker_runtime_cleanup_silent_when_no_container(
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
     workspace_path = _workspace_dir(tmp_path)
     handle = backend.start(
-        agent_id="agent-cleanup-none",
+        workspace_id="agent-cleanup-none",
         workspace_path=workspace_path,
         port=18101,
         image_tag="test",
@@ -430,7 +430,7 @@ def test_docker_runtime_stop_raises_domain_error_when_docker_api_fails(
     container = StopErrorContainer()
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
     handle = backend.start(
-        agent_id="agent-stop",
+        workspace_id="agent-stop",
         workspace_path=_workspace_dir(tmp_path),
         port=18086,
         image_tag="test",
@@ -454,7 +454,7 @@ def test_docker_runtime_stop_skips_when_no_container(
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
     workspace_path = _workspace_dir(tmp_path)
     handle = backend.start(
-        agent_id="agent-stop-none",
+        workspace_id="agent-stop-none",
         workspace_path=workspace_path,
         port=18102,
         image_tag="test",
@@ -475,7 +475,7 @@ def test_docker_runtime_start_rejects_invalid_workspace_path() -> None:
     backend = DockerSandboxBackend(client=FakeDockerClient(FakeContainer()))
 
     with pytest.raises(DomainError) as exc_info:
-        backend.start(agent_id="agent-7", workspace_path="relative/workspace")
+        backend.start(workspace_id="agent-7", workspace_path="relative/workspace")
 
     assert exc_info.value.code == "SANDBOX_START_FAILED"
     assert exc_info.value.details["path"] == "relative/workspace"
@@ -488,7 +488,7 @@ def test_docker_runtime_start_rejects_missing_workspace_path(tmp_path: Path) -> 
     missing_path = str((tmp_path / "missing").resolve())
 
     with pytest.raises(DomainError) as exc_info:
-        backend.start(agent_id="agent-8", workspace_path=missing_path)
+        backend.start(workspace_id="agent-8", workspace_path=missing_path)
 
     assert exc_info.value.code == "SANDBOX_START_FAILED"
     assert exc_info.value.details["path"] == missing_path
@@ -502,17 +502,17 @@ def test_docker_runtime_start_rejects_file_as_workspace_path(tmp_path: Path) -> 
     file_path.write_text("content")
 
     with pytest.raises(DomainError) as exc_info:
-        backend.start(agent_id="agent-9", workspace_path=str(file_path.resolve()))
+        backend.start(workspace_id="agent-9", workspace_path=str(file_path.resolve()))
 
     assert exc_info.value.code == "SANDBOX_START_FAILED"
 
 
 # =============================================================================
-# start() — agent_id deduplication & container reconnection
+# start() — workspace_id deduplication & container reconnection
 # =============================================================================
 
 
-def test_docker_runtime_start_returns_existing_handle_for_same_agent_id(
+def test_docker_runtime_start_returns_existing_handle_for_same_workspace_id(
     tmp_path: Path,
 ) -> None:
     from witty_service.sandbox.docker import DockerSandboxBackend
@@ -522,13 +522,13 @@ def test_docker_runtime_start_returns_existing_handle_for_same_agent_id(
     workspace_path = _workspace_dir(tmp_path)
 
     handle1 = backend.start(
-        agent_id="agent-dup",
+        workspace_id="agent-dup",
         workspace_path=workspace_path,
         port=18110,
         image_tag="test",
     )
     handle2 = backend.start(
-        agent_id="agent-dup",
+        workspace_id="agent-dup",
         workspace_path=workspace_path,
         port=18111,
     )
@@ -560,7 +560,7 @@ def test_docker_runtime_start_reconnects_existing_running_container(
     workspace_path = _workspace_dir(tmp_path)
 
     handle = backend.start(
-        agent_id="agent-reconnect",
+        workspace_id="agent-reconnect",
         workspace_path=workspace_path,
         port=18112,
     )
@@ -587,7 +587,7 @@ def test_docker_runtime_start_ignores_non_running_existing_container(
     workspace_path = _workspace_dir(tmp_path)
 
     handle = backend.start(
-        agent_id="agent-stopped",
+        workspace_id="agent-stopped",
         workspace_path=workspace_path,
         port=18113,
         image_tag="test",
@@ -613,7 +613,7 @@ def test_docker_runtime_start_propagates_container_get_error(
 
     with pytest.raises(APIError, match="docker daemon error"):
         backend.start(
-            agent_id="agent-get-error",
+            workspace_id="agent-get-error",
             workspace_path=workspace_path,
         )
 
@@ -708,7 +708,7 @@ def test_docker_runtime_endpoint_ws_url(tmp_path: Path) -> None:
     backend = DockerSandboxBackend(client=FakeDockerClient(container))
     workspace_path = _workspace_dir(tmp_path)
     handle = backend.start(
-        agent_id="agent-ws",
+        workspace_id="agent-ws",
         workspace_path=workspace_path,
         image_tag="test",
     )
@@ -829,7 +829,7 @@ def test_docker_runtime_start_raises_domain_error_when_run_fails(
 
     with pytest.raises(DomainError) as exc_info:
         backend.start(
-            agent_id="agent-run-fail",
+            workspace_id="agent-run-fail",
             workspace_path=workspace_path,
             port=18170,
             image_tag="test",
@@ -859,7 +859,7 @@ def test_docker_runtime_start_uses_custom_container_name_prefix(
     workspace_path = _workspace_dir(tmp_path)
 
     backend.start(
-        agent_id="agent-custom-prefix",
+        workspace_id="agent-custom-prefix",
         workspace_path=workspace_path,
         port=18180,
         image_tag="test",
@@ -881,7 +881,7 @@ def test_docker_runtime_start_requires_image_tag(tmp_path: Path) -> None:
 
     with pytest.raises(DomainError) as exc_info:
         backend.start(
-            agent_id="agent-no-tag",
+            workspace_id="agent-no-tag",
             workspace_path=workspace_path,
             port=18090,
         )
@@ -901,7 +901,7 @@ def test_docker_runtime_start_with_image_tag_concatenates_image(
     workspace_path = _workspace_dir(tmp_path)
 
     backend.start(
-        agent_id="agent-custom-tag",
+        workspace_id="agent-custom-tag",
         workspace_path=workspace_path,
         port=18190,
         image_tag="v2.0.1",
@@ -921,7 +921,7 @@ def test_docker_runtime_start_falls_back_to_default_base_image(
     workspace_path = _workspace_dir(tmp_path)
 
     backend.start(
-        agent_id="agent-default-image",
+        workspace_id="agent-default-image",
         workspace_path=workspace_path,
         port=18200,
         image_tag="latest",
@@ -949,7 +949,7 @@ def test_docker_runtime_start_with_memory_limit_override(
     workspace_path = _workspace_dir(tmp_path)
 
     backend.start(
-        agent_id="agent-mem-override",
+        workspace_id="agent-mem-override",
         workspace_path=workspace_path,
         port=18210,
         image_tag="test",
@@ -970,7 +970,7 @@ def test_docker_runtime_start_uses_instance_memory_limit_by_default(
     workspace_path = _workspace_dir(tmp_path)
 
     backend.start(
-        agent_id="agent-mem-default",
+        workspace_id="agent-mem-default",
         workspace_path=workspace_path,
         port=18220,
         image_tag="test",
@@ -993,7 +993,7 @@ def test_docker_runtime_start_with_env_parameter(tmp_path: Path) -> None:
     workspace_path = _workspace_dir(tmp_path)
 
     backend.start(
-        agent_id="agent-env-param",
+        workspace_id="agent-env-param",
         workspace_path=workspace_path,
         image_tag="test",
         env={"CUSTOM_VAR": "hello"},
@@ -1013,7 +1013,7 @@ def test_docker_runtime_start_with_empty_env_not_overwritten(
     workspace_path = _workspace_dir(tmp_path)
 
     backend.start(
-        agent_id="agent-empty-env",
+        workspace_id="agent-empty-env",
         workspace_path=workspace_path,
         image_tag="test",
         env={},
@@ -1031,7 +1031,7 @@ def test_docker_runtime_start_default_env_is_empty(tmp_path: Path) -> None:
     workspace_path = _workspace_dir(tmp_path)
 
     backend.start(
-        agent_id="agent-no-env",
+        workspace_id="agent-no-env",
         workspace_path=workspace_path,
         image_tag="test",
     )

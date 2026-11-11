@@ -52,6 +52,56 @@ class TimeoutOnWaitProcess(FakeProcess):
         return self._poll_result
 
 
+def test_registered_leader_exempts_its_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.read_proc_stat",
+        lambda pid: ("S", str(pid), "start-1") if pid == 4321 else None,
+    )
+
+    assert LocalProcessSandboxBackend._pgrp_has_registered_leader(
+        "4321", {4321: "start-1"}
+    )
+    assert not LocalProcessSandboxBackend._pgrp_has_registered_leader(
+        "4321", {4321: "old"}
+    )
+    assert not LocalProcessSandboxBackend._pgrp_has_registered_leader(
+        "9999", {4321: "start-1"}
+    )
+
+
+def test_stopping_one_workspace_does_not_touch_another(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    processes = iter([FakeProcess(pid=5101), FakeProcess(pid=5102)])
+    ports = iter([41001, 41002])
+
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.find_free_port", lambda: next(ports)
+    )
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.subprocess.Popen",
+        lambda command, **kwargs: next(processes),
+    )
+    monkeypatch.setattr(
+        LocalProcessSandboxBackend,
+        "_read_process_start_time",
+        staticmethod(lambda pid: "start"),
+    )
+    backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path))
+
+    handle_a = backend.start(workspace_id="ws_a", workspace_path=str(tmp_path / "a"))
+    handle_b = backend.start(workspace_id="ws_b", workspace_path=str(tmp_path / "b"))
+    backend.stop(handle_a)
+
+    assert handle_a.workspace_id == "ws_a"
+    assert handle_b.workspace_id == "ws_b"
+    assert backend._processes[handle_a.sandbox_id].terminate_called is True
+    assert backend._processes[handle_b.sandbox_id].terminate_called is False
+
+
 def test_local_runtime_honors_workspace_command(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -76,7 +126,7 @@ def test_local_runtime_honors_workspace_command(
     backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path / "unused"))
 
     handle = backend.start(
-        agent_id="ws_a",
+        workspace_id="ws_a",
         workspace_path=str(workspace),
         command=("opencode", "serve", "--port", "{port}"),
         stderr_log_path=str(log_path),
@@ -114,7 +164,7 @@ def test_local_runtime_start_builds_expected_command_and_handle(
 
     backend = LocalProcessSandboxBackend(agent_server_app_dir=str(app_dir))
 
-    handle = backend.start(agent_id="agent-1", workspace_path="/tmp/workspace")
+    handle = backend.start(workspace_id="agent-1", workspace_path="/tmp/workspace")
 
     assert popen_calls["command"] == [
         sys.executable,
@@ -139,7 +189,7 @@ def test_local_runtime_start_builds_expected_command_and_handle(
     # stderr 传入的是日志文件,不是 subprocess.PIPE
     assert "stderr" in popen_calls["kwargs"]
     assert popen_calls["kwargs"]["stderr"] is not subprocess.PIPE
-    assert handle.agent_id == "agent-1"
+    assert handle.workspace_id == "agent-1"
     assert handle.workspace_path == "/tmp/workspace"
     assert handle.metadata["pid"] == 9876
     assert handle.metadata["port"] == 43123
@@ -166,7 +216,7 @@ def test_local_runtime_stop_terminates_process(
         agent_server_app_dir=str(app_dir),
         stop_timeout=0.5,
     )
-    handle = backend.start(agent_id="agent-2", workspace_path="/tmp/workspace")
+    handle = backend.start(workspace_id="agent-2", workspace_path="/tmp/workspace")
 
     backend.stop(handle)
 
@@ -196,7 +246,7 @@ def test_local_runtime_stop_kills_process_after_timeout(
         agent_server_app_dir=str(app_dir),
         stop_timeout=0.25,
     )
-    handle = backend.start(agent_id="agent-3", workspace_path="/tmp/workspace")
+    handle = backend.start(workspace_id="agent-3", workspace_path="/tmp/workspace")
 
     backend.stop(handle)
 
@@ -222,7 +272,7 @@ def test_local_runtime_status_endpoint_and_cleanup(
     )
 
     backend = LocalProcessSandboxBackend(agent_server_app_dir=str(app_dir))
-    handle = backend.start(agent_id="agent-4", workspace_path="/tmp/workspace")
+    handle = backend.start(workspace_id="agent-4", workspace_path="/tmp/workspace")
 
     assert backend.status(handle) is SandboxStatus.running
     assert backend.endpoint(handle).base_url == "http://127.0.0.1:43126"
@@ -254,7 +304,7 @@ def test_local_runtime_cleanup_keeps_handle_when_stop_fails(
     )
 
     backend = LocalProcessSandboxBackend(agent_server_app_dir=str(app_dir))
-    handle = backend.start(agent_id="agent-4b", workspace_path="/tmp/workspace")
+    handle = backend.start(workspace_id="agent-4b", workspace_path="/tmp/workspace")
 
     def fail_stop(*_: object, **__: object) -> None:
         raise RuntimeError("stop failed")
@@ -298,7 +348,7 @@ def test_local_runtime_start_raises_when_process_exits_immediately(
     backend = LocalProcessSandboxBackend(agent_server_app_dir=str(app_dir))
 
     with pytest.raises(DomainError) as exc_info:
-        backend.start(agent_id="agent-5", workspace_path="/tmp/workspace")
+        backend.start(workspace_id="agent-5", workspace_path="/tmp/workspace")
 
     assert exc_info.value.code == "SANDBOX_START_FAILED"
     assert exc_info.value.details["stderr"] == "startup boom"
@@ -358,7 +408,7 @@ def test_local_runtime_start_raises_when_app_dir_missing(
     backend = LocalProcessSandboxBackend()
 
     with pytest.raises(DomainError) as exc_info:
-        backend.start(agent_id="agent-6", workspace_path="/tmp/workspace")
+        backend.start(workspace_id="agent-6", workspace_path="/tmp/workspace")
 
     assert exc_info.value.code == "SANDBOX_START_FAILED"
     assert "WITTY_AGENT_SERVER_APP_DIR" in exc_info.value.message
@@ -381,7 +431,7 @@ def test_local_runtime_factory_returns_backend(
     assert backend.agent_server_app_dir == str(app_dir.resolve())
 
 
-def test_find_handle_by_agent_id_scans_proc_and_confirms_absence(
+def test_find_handle_by_workspace_scans_proc_and_confirms_absence(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     """登记表为空时按 /proc 归属回查；扫描成功但无匹配才算已确证不存在。"""
@@ -405,8 +455,8 @@ def test_find_handle_by_agent_id_scans_proc_and_confirms_absence(
         staticmethod(lambda pid, root, *, strict=False: True),
     )
 
-    handle = backend.find_handle_by_agent_id(
-        agent_id="agent-1", workspace_path=str(tmp_path)
+    handle = backend.find_handle_by_workspace(
+        workspace_id="agent-1", workspace_path=str(tmp_path)
     )
 
     assert handle is not None
@@ -415,6 +465,7 @@ def test_find_handle_by_agent_id_scans_proc_and_confirms_absence(
         "pid": 1234,
         "pgid": 1234,
         "process_start_time": "start-1",
+        "process_marker": "witty_agent_server.app:create_app",
     }
 
     monkeypatch.setattr(
@@ -422,14 +473,14 @@ def test_find_handle_by_agent_id_scans_proc_and_confirms_absence(
         lambda pid, *, strict=False: None,
     )
     assert (
-        backend.find_handle_by_agent_id(
-            agent_id="agent-1", workspace_path=str(tmp_path)
+        backend.find_handle_by_workspace(
+            workspace_id="agent-1", workspace_path=str(tmp_path)
         )
         is None
     )
 
 
-def test_find_handle_by_agent_id_raises_when_proc_scan_fails(
+def test_find_handle_by_workspace_raises_when_proc_scan_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     """扫描失败必须抛错，不能把「看不到进程」当成「没有进程」。"""
@@ -441,12 +492,12 @@ def test_find_handle_by_agent_id_raises_when_proc_scan_fails(
     monkeypatch.setattr("witty_service.sandbox.local_process.os.listdir", _boom)
 
     with pytest.raises(OSError):
-        backend.find_handle_by_agent_id(
-            agent_id="agent-1", workspace_path=str(tmp_path)
+        backend.find_handle_by_workspace(
+            workspace_id="agent-1", workspace_path=str(tmp_path)
         )
 
 
-def test_find_handle_by_agent_id_raises_when_cmdline_unreadable(
+def test_find_handle_by_workspace_raises_when_cmdline_unreadable(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     """进程存在但读不到 cmdline 时是 unknown，不能当成已确证不存在。"""
@@ -461,12 +512,12 @@ def test_find_handle_by_agent_id_raises_when_cmdline_unreadable(
     monkeypatch.setattr(Path, "read_bytes", _denied)
 
     with pytest.raises(PermissionError):
-        backend.find_handle_by_agent_id(
-            agent_id="agent-1", workspace_path=str(tmp_path)
+        backend.find_handle_by_workspace(
+            workspace_id="agent-1", workspace_path=str(tmp_path)
         )
 
 
-def test_find_handle_by_agent_id_raises_when_cwd_unreadable(
+def test_find_handle_by_workspace_raises_when_cwd_unreadable(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     """进程存在但读不到 cwd 时是 unknown，不能当成已确证不存在。"""
@@ -485,8 +536,8 @@ def test_find_handle_by_agent_id_raises_when_cwd_unreadable(
     monkeypatch.setattr("witty_service.sandbox.local_process.os.readlink", _denied)
 
     with pytest.raises(PermissionError):
-        backend.find_handle_by_agent_id(
-            agent_id="agent-1", workspace_path=str(tmp_path)
+        backend.find_handle_by_workspace(
+            workspace_id="agent-1", workspace_path=str(tmp_path)
         )
 
 
@@ -517,7 +568,7 @@ def test_status_probes_pid_for_untracked_handle(
     backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path))
     handle = SandboxHandle(
         sandbox_id="untracked-1234",
-        agent_id="agent-1",
+        workspace_id="agent-1",
         workspace_path=str(tmp_path),
         metadata={"pid": 1234, "process_start_time": "start-1"},
     )

@@ -354,7 +354,7 @@ class SandboxBackend(Protocol):
     def start(
         self,
         *,
-        agent_id: str,
+        workspace_id: str,
         workspace_path: str,
         env: dict[str, str] | None = None,
         **kwargs: Any,
@@ -368,10 +368,10 @@ class SandboxBackend(Protocol):
 
     def cleanup(self, handle: SandboxHandle | str, **kwargs: Any) -> None: ...
 
-    def find_handle_by_agent_id(
-        self, *, agent_id: str, workspace_path: str
+    def find_handle_by_workspace(
+        self, *, workspace_id: str, workspace_path: str
     ) -> SandboxHandle | None:
-        """按 agent 身份回查仍在运行的执行体句柄。
+        """按工作区身份回查仍在运行的执行体句柄。
 
         返回 handle 表示存在；None 表示已确证不存在；回查失败必须抛错，
         调用方会把异常视为 unknown 并阻断磁盘删除。
@@ -849,7 +849,7 @@ class AgentManager:
             logger.info(f"{prefix}Agent record created, starting sandbox...")
             runtime_config = self._get_runtime_config(request.adapter_type)
             sandbox_handle = self._sandbox_backend.start(
-                agent_id=agent_id,
+                workspace_id=agent_id,
                 workspace_path=workspace_path,
                 env=runtime_config.build_env(),
                 image_tag=runtime_config.adapter_type,
@@ -1239,7 +1239,7 @@ class AgentManager:
 
         # 传旧句柄：backend 会先按身份自证把旧进程树/容器收敛掉，再决定端口。
         sandbox_handle = self._sandbox_backend.start(
-            agent_id=agent_id,
+            workspace_id=agent_id,
             workspace_path=agent.workspace_path,
             env=runtime_config.build_env(),
             image_tag=runtime_config.adapter_type,
@@ -2554,8 +2554,8 @@ class AgentManager:
                 cleanup_errors.append(self._cleanup_error("sandbox_state", exc))
         else:
             try:
-                sandbox_handle = self._sandbox_backend.find_handle_by_agent_id(
-                    agent_id=agent_id,
+                sandbox_handle = self._sandbox_backend.find_handle_by_workspace(
+                    workspace_id=agent_id,
                     workspace_path=agent.workspace_path,
                 )
             except Exception as exc:
@@ -3407,7 +3407,7 @@ class AgentManager:
     def _sandbox_handle_payload(handle: SandboxHandle) -> dict[str, Any]:
         return {
             "sandbox_id": handle.sandbox_id,
-            "agent_id": handle.agent_id,
+            "workspace_id": handle.workspace_id,
             "workspace_path": handle.workspace_path,
             "metadata": dict(handle.metadata),
         }

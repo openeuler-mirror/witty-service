@@ -199,7 +199,7 @@ class WorkspaceRuntimeManager:
         try:
             handle = await asyncio.to_thread(
                 self._sandbox.start,
-                agent_id=entry.spec.workspace.workspace_id,
+                workspace_id=entry.spec.workspace.workspace_id,
                 workspace_path=entry.spec.host_directory,
                 env=dict(entry.spec.env),
                 command=list(entry.spec.command),

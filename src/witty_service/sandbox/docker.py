@@ -115,26 +115,26 @@ class DockerSandboxBackend(SandboxBackend):
     def start(
         self,
         *,
-        agent_id: str,
+        workspace_id: str,
         workspace_path: str,
         env: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> SandboxHandle:
         resolved_workspace_path = self._validate_workspace_path(workspace_path)
 
-        existing_handle = self._find_handle_by_agent_id(agent_id)
+        existing_handle = self._find_handle_by_workspace(workspace_id)
         if existing_handle is not None:
             return existing_handle
 
-        container_name = f"{self.CONTAINER_NAME_PREFIX}-{agent_id}"
+        container_name = f"{self.CONTAINER_NAME_PREFIX}-{workspace_id}"
         existing_container = self._try_find_container(container_name)
         if existing_container is not None:
             handle = self._build_handle_from_container(
-                existing_container, agent_id, resolved_workspace_path
+                existing_container, workspace_id, resolved_workspace_path
             )
             handle = SandboxHandle(
                 sandbox_id=handle.sandbox_id,
-                agent_id=handle.agent_id,
+                workspace_id=handle.workspace_id,
                 workspace_path=handle.workspace_path,
                 metadata={**handle.metadata, "reconnected": True},
             )
@@ -201,29 +201,29 @@ class DockerSandboxBackend(SandboxBackend):
             ) from exc
 
         return self._build_handle_from_container(
-            container, agent_id, resolved_workspace_path
+            container, workspace_id, resolved_workspace_path
         )
 
-    def _find_handle_by_agent_id(self, agent_id: str) -> SandboxHandle | None:
+    def _find_handle_by_workspace(self, workspace_id: str) -> SandboxHandle | None:
         for handle in self._handles.values():
-            if handle.agent_id == agent_id:
+            if handle.workspace_id == workspace_id:
                 return handle
         return None
 
-    def find_handle_by_agent_id(
-        self, *, agent_id: str, workspace_path: str
+    def find_handle_by_workspace(
+        self, *, workspace_id: str, workspace_path: str
     ) -> SandboxHandle | None:
         """按容器名回查执行体；容器不存在返回 None，查询失败向上抛。
 
         与内存句柄的回查不同，这里必须区分"确定没有容器"和"查不到状态"：
         后者由 ``_find_container_for_status`` 抛错，交给删除流程阻断。
         """
-        handle = self._find_handle_by_agent_id(agent_id)
+        handle = self._find_handle_by_workspace(workspace_id)
         if handle is not None:
             return handle
         probe = SandboxHandle(
-            sandbox_id=f"lookup-{agent_id}",
-            agent_id=agent_id,
+            sandbox_id=f"lookup-{workspace_id}",
+            workspace_id=workspace_id,
             workspace_path=workspace_path,
         )
         if self._find_container_for_status(probe) is None:
@@ -253,7 +253,7 @@ class DockerSandboxBackend(SandboxBackend):
     def _build_handle_from_container(
         self,
         container: Any,
-        agent_id: str,
+        workspace_id: str,
         workspace_path: str,
         host_port: int | None = None,
     ) -> SandboxHandle:
@@ -263,7 +263,7 @@ class DockerSandboxBackend(SandboxBackend):
         sandbox_id = str(uuid4())
         handle = SandboxHandle(
             sandbox_id=sandbox_id,
-            agent_id=agent_id,
+            workspace_id=workspace_id,
             workspace_path=workspace_path,
             metadata={
                 "container_id": str(container.id),
@@ -308,15 +308,15 @@ class DockerSandboxBackend(SandboxBackend):
     def stop(self, handle: SandboxHandle | str, **kwargs: Any) -> None:
         """停止并移除沙箱容器，同时注销内存句柄。
 
-        容器名 ``witty-sandbox-<agent_id>`` 与 agent_id 一一绑定，停止后必须
-        连容器一起移除；否则后续 start() 会经 _find_handle_by_agent_id /
+        容器名 ``witty-sandbox-<workspace_id>`` 与 workspace_id 一一绑定，停止后必须
+        连容器一起移除；否则后续 start() 会经 _find_handle_by_workspace /
         _try_find_container 认领到 exited 容器，探活永远失败，pause→resume
         通道就此断裂。服务重启后内存句柄丢失，此时按容器名兜底查找。
         """
         sandbox_handle = self._resolve_handle(handle)
         container = self._containers.get(sandbox_handle.sandbox_id)
         if container is None:
-            container = self._try_find_container_by_name(sandbox_handle.agent_id)
+            container = self._try_find_container_by_name(sandbox_handle.workspace_id)
 
         if container is not None:
             timeout = int(kwargs.get("timeout", self.stop_timeout))
@@ -340,8 +340,8 @@ class DockerSandboxBackend(SandboxBackend):
         self._containers.pop(sandbox_handle.sandbox_id, None)
         self._handles.pop(sandbox_handle.sandbox_id, None)
 
-    def _try_find_container_by_name(self, agent_id: str) -> Any | None:
-        container_name = f"{self.CONTAINER_NAME_PREFIX}-{agent_id}"
+    def _try_find_container_by_name(self, workspace_id: str) -> Any | None:
+        container_name = f"{self.CONTAINER_NAME_PREFIX}-{workspace_id}"
         try:
             return _with_retry(
                 lambda: self._get_client().containers.get(container_name)
@@ -355,7 +355,7 @@ class DockerSandboxBackend(SandboxBackend):
         与 ``_try_find_container_by_name`` 的区别：这里不能把 API 错误吞成
         "没有容器"——状态无法确认必须让调用方保留数据。
         """
-        container_name = f"{self.CONTAINER_NAME_PREFIX}-{sandbox_handle.agent_id}"
+        container_name = f"{self.CONTAINER_NAME_PREFIX}-{sandbox_handle.workspace_id}"
         try:
             return _with_retry(
                 lambda: self._get_client().containers.get(container_name)
@@ -429,7 +429,7 @@ class DockerSandboxBackend(SandboxBackend):
         sandbox_handle = self._resolve_handle(handle)
         container = self._containers.get(sandbox_handle.sandbox_id)
         if container is None:
-            container = self._try_find_container_by_name(sandbox_handle.agent_id)
+            container = self._try_find_container_by_name(sandbox_handle.workspace_id)
 
         stop_error: Exception | None = None
         remove_error: Exception | None = None
