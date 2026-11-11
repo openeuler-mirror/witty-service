@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +18,7 @@ from witty_service.api.services import ServiceContainer, build_default_services
 from witty_service.config import SUPPORTED_RUNTIME_TYPES, get_settings
 from witty_service.logger import configure_logging
 from witty_service.persistence.db import checkpoint_database
+from witty_service.sandbox.local_process import LocalProcessSandboxBackend
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,17 @@ def create_app(services: ServiceContainer | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         stop_event = threading.Event()
+
+        backend = app.state.services.get_sandbox_backend("local_process")
+        if isinstance(backend, LocalProcessSandboxBackend):
+            try:
+                await asyncio.to_thread(
+                    backend.reap_orphan_servers,
+                    registered={},
+                    workspace_root=Path(get_settings().workspace.root).expanduser(),
+                )
+            except Exception:
+                logger.exception("Failed to reap orphan workspace runtimes")
 
         def checkpoint_forever() -> None:
             while not stop_event.wait(_CHECKPOINT_INTERVAL_S):
