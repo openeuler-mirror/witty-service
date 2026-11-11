@@ -8,7 +8,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from witty_service.application.turn_service import TurnService
-from witty_service.domain.enums import AgentKind, SandboxType, SessionOrigin, TurnStatus
+from witty_service.domain.enums import (
+    AgentKind,
+    MessageRole,
+    SandboxType,
+    SessionOrigin,
+    TurnStatus,
+)
 from witty_service.domain.errors import DomainError
 from witty_service.persistence.entities import Base
 from witty_service.persistence.repository import (
@@ -22,8 +28,11 @@ from witty_service.runtime.contracts import (
     RuntimeEmptyPayload,
     RuntimeErrorPayload,
     RuntimeEventEnvelope,
+    RuntimeEventPayload,
     RuntimeEventType,
     RuntimeFilePart,
+    RuntimeMessageCompletedPayload,
+    RuntimeMessageDeltaPayload,
     RuntimeSession,
     RuntimeTextPart,
     RuntimeWorkspace,
@@ -563,6 +572,172 @@ async def test_runtime_exited_interrupts_running_turn(env) -> None:
         assert updated.status is TurnStatus.interrupted
         assert updated.error_code == "RUNTIME_RESYNC_REQUIRED"
         assert env.runtime.released == [turn.id]
+    finally:
+        await env.service.close()
+
+
+def _message_event(
+    workspace_id: str,
+    turn_id: str,
+    event_type: RuntimeEventType,
+    message_id: str | None,
+    seq: int,
+) -> RuntimeTurnEvent:
+    if event_type is RuntimeEventType.MESSAGE_DELTA:
+        payload: RuntimeEventPayload = RuntimeMessageDeltaPayload(delta="chunk")
+    elif event_type is RuntimeEventType.MESSAGE_COMPLETED:
+        payload = RuntimeMessageCompletedPayload()
+    else:
+        payload = RuntimeEmptyPayload()
+    return RuntimeTurnEvent(
+        workspace_id=workspace_id,
+        turn_id=turn_id,
+        event=RuntimeEventEnvelope(
+            workspace_id=workspace_id,
+            runtime_session_id="rt_1",
+            event_id=f"evt_{seq}",
+            type=event_type,
+            durable_seq=seq,
+            occurred_at=1_100,
+            payload=payload,
+            runtime_message_id=message_id,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_turn_maps_user_message_at_ordinal_zero(env) -> None:
+    session = _create_session(
+        env.sessions, env.workspace_id, env.agent_id, env.model_id
+    )
+    try:
+        turn = await env.service.execute_turn(
+            session.id, parts=(RuntimeTextPart(text="hello"),)
+        )
+
+        messages = env.sessions.list_runtime_messages(turn.id)
+        assert [
+            (message.runtime_message_id, message.role, message.ordinal)
+            for message in messages
+        ] == [(f"msg_{turn.id}", MessageRole.user, 0)]
+    finally:
+        await env.service.close()
+
+
+@pytest.mark.asyncio
+async def test_message_events_map_assistant_message_once(env) -> None:
+    session = _create_session(
+        env.sessions, env.workspace_id, env.agent_id, env.model_id
+    )
+    try:
+        turn = await env.service.execute_turn(
+            session.id, parts=(RuntimeTextPart(text="hello"),)
+        )
+        for event_type, seq in (
+            (RuntimeEventType.MESSAGE_STARTED, 2),
+            (RuntimeEventType.MESSAGE_DELTA, 3),
+            (RuntimeEventType.MESSAGE_COMPLETED, 4),
+        ):
+            await env.runtime.events.put(
+                _message_event(
+                    env.workspace_id, turn.id, event_type, "msg_assistant", seq
+                )
+            )
+        await env.runtime.events.put(_completed_event(env.workspace_id, turn.id))
+
+        updated = turn
+        for _ in range(100):
+            updated = env.sessions.get_turn(turn.id)
+            if updated.status is TurnStatus.completed:
+                break
+            await asyncio.sleep(0.01)
+
+        assert updated.status is TurnStatus.completed
+        messages = env.sessions.list_runtime_messages(turn.id)
+        assert [
+            (message.runtime_message_id, message.role, message.ordinal)
+            for message in messages
+        ] == [
+            (f"msg_{turn.id}", MessageRole.user, 0),
+            ("msg_assistant", MessageRole.assistant, 1),
+        ]
+    finally:
+        await env.service.close()
+
+
+@pytest.mark.asyncio
+async def test_assistant_message_before_user_message_uses_ordinal_one(env) -> None:
+    session = _create_session(
+        env.sessions, env.workspace_id, env.agent_id, env.model_id
+    )
+    try:
+        turn = env.service.start_turn(session.id)
+        await env.service._apply_event(
+            _message_event(
+                env.workspace_id,
+                turn.id,
+                RuntimeEventType.MESSAGE_STARTED,
+                "msg_assistant",
+                2,
+            )
+        )
+
+        messages = env.sessions.list_runtime_messages(turn.id)
+        assert [
+            (message.runtime_message_id, message.ordinal) for message in messages
+        ] == [("msg_assistant", 1)]
+    finally:
+        await env.service.close()
+
+
+@pytest.mark.asyncio
+async def test_late_message_event_does_not_revive_finished_turn(env) -> None:
+    session = _create_session(
+        env.sessions, env.workspace_id, env.agent_id, env.model_id
+    )
+    try:
+        turn = await env.service.execute_turn(
+            session.id, parts=(RuntimeTextPart(text="hello"),)
+        )
+        env.sessions.finish_turn(turn.id, TurnStatus.completed, None, None, 1_200)
+        await env.service._apply_event(
+            _message_event(
+                env.workspace_id,
+                turn.id,
+                RuntimeEventType.MESSAGE_STARTED,
+                "msg_late",
+                5,
+            )
+        )
+
+        assert env.sessions.get_turn(turn.id).status is TurnStatus.completed
+        assert [
+            message.runtime_message_id
+            for message in env.sessions.list_runtime_messages(turn.id)
+        ] == [f"msg_{turn.id}"]
+    finally:
+        await env.service.close()
+
+
+@pytest.mark.asyncio
+async def test_message_event_without_runtime_message_id_is_ignored(env) -> None:
+    session = _create_session(
+        env.sessions, env.workspace_id, env.agent_id, env.model_id
+    )
+    try:
+        turn = await env.service.execute_turn(
+            session.id, parts=(RuntimeTextPart(text="hello"),)
+        )
+        await env.service._apply_event(
+            _message_event(
+                env.workspace_id, turn.id, RuntimeEventType.MESSAGE_STARTED, None, 2
+            )
+        )
+
+        assert [
+            message.runtime_message_id
+            for message in env.sessions.list_runtime_messages(turn.id)
+        ] == [f"msg_{turn.id}"]
     finally:
         await env.service.close()
 
