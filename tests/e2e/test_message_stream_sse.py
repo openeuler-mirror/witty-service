@@ -31,7 +31,7 @@ class FakeSandboxState:
     def handle(self) -> SandboxHandle:
         return SandboxHandle(
             sandbox_id=self.sandbox_payload_json["sandbox_id"],
-            agent_id=self.sandbox_payload_json["agent_id"],
+            workspace_id=self.sandbox_payload_json["workspace_id"],
             workspace_path=self.sandbox_payload_json["workspace_path"],
             metadata=self.sandbox_payload_json.get("metadata", {}),
         )
@@ -274,14 +274,14 @@ class FakeSandboxBackend:
     def start(
         self,
         *,
-        agent_id: str,
+        workspace_id: str,
         workspace_path: str,
         env: dict[str, str] | None = None,
         **_: Any,
     ) -> SandboxHandle:
         return SandboxHandle(
-            sandbox_id=f"sandbox-{agent_id}",
-            agent_id=agent_id,
+            sandbox_id=f"sandbox-{workspace_id}",
+            workspace_id=workspace_id,
             workspace_path=workspace_path,
             metadata={},
         )

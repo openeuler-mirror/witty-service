@@ -158,7 +158,9 @@ class SandboxStateRecord:
         payload = dict(self.sandbox_payload_json)
         return SandboxHandle(
             sandbox_id=str(payload["sandbox_id"]),
-            agent_id=str(payload.get("agent_id", self.agent_id)),
+            workspace_id=str(
+                payload.get("workspace_id", payload.get("agent_id", self.agent_id))
+            ),
             workspace_path=str(payload["workspace_path"]),
             metadata=dict(payload.get("metadata", {})),
         )

@@ -50,7 +50,7 @@ class FakeSandboxState:
     def handle(self) -> SandboxHandle:
         return SandboxHandle(
             sandbox_id=self.sandbox_payload_json["sandbox_id"],
-            agent_id=self.sandbox_payload_json["agent_id"],
+            workspace_id=self.sandbox_payload_json["workspace_id"],
             workspace_path=self.sandbox_payload_json["workspace_path"],
             metadata=self.sandbox_payload_json.get("metadata", {}),
         )
@@ -334,8 +334,10 @@ class FakeSandboxBackend:
         self.lookup_calls: list[tuple[str, str]] = []
         self.cleaned_handles: list[Any] = []
 
-    def find_handle_by_agent_id(self, *, agent_id: str, workspace_path: str) -> Any:
-        self.lookup_calls.append((agent_id, workspace_path))
+    def find_handle_by_workspace(
+        self, *, workspace_id: str, workspace_path: str
+    ) -> Any:
+        self.lookup_calls.append((workspace_id, workspace_path))
         if self.lookup_error is not None:
             raise self.lookup_error
         return self.lookup_handle
@@ -343,7 +345,7 @@ class FakeSandboxBackend:
     def start(
         self,
         *,
-        agent_id: str,
+        workspace_id: str,
         workspace_path: str,
         env: dict[str, Any] | None = None,
         **_: Any,
@@ -351,12 +353,12 @@ class FakeSandboxBackend:
         from witty_service.sandbox.base import SandboxHandle
 
         handle = SandboxHandle(
-            sandbox_id=f"sandbox-{agent_id}",
-            agent_id=agent_id,
+            sandbox_id=f"sandbox-{workspace_id}",
+            workspace_id=workspace_id,
             workspace_path=workspace_path,
             metadata={},
         )
-        self.handles[agent_id] = handle
+        self.handles[workspace_id] = handle
         return handle
 
     def stop(self, handle: Any, **_: Any) -> None:
@@ -490,7 +492,7 @@ def _bootstrap_running_agent_and_session(repository: FakeRepository) -> tuple[An
         agent.id,
         sandbox_payload_json={
             "sandbox_id": f"sandbox-{agent.id}",
-            "agent_id": agent.id,
+            "workspace_id": agent.id,
             "workspace_path": agent.workspace_path,
             "metadata": {},
         },
@@ -958,7 +960,7 @@ def test_get_adaptor_endpoint_converts_http_to_ws():
         agent.id,
         sandbox_payload_json={
             "sandbox_id": "sandbox-test",
-            "agent_id": agent.id,
+            "workspace_id": agent.id,
             "workspace_path": "/tmp",
         },
         adapter_base_url="https://adapter.example.com",
@@ -984,7 +986,7 @@ def test_get_adaptor_endpoint_converts_http_without_scheme():
         agent.id,
         sandbox_payload_json={
             "sandbox_id": "sandbox-test",
-            "agent_id": agent.id,
+            "workspace_id": agent.id,
             "workspace_path": "/tmp",
         },
         adapter_base_url="http://adapter.local",
@@ -1345,7 +1347,7 @@ def test_delete_agent_cleans_up_unregistered_sandbox_found_by_identity() -> None
         agent = _bootstrap_agent_without_sandbox_state(repository)
         handle = SandboxHandle(
             sandbox_id=f"sandbox-{agent.id}",
-            agent_id=agent.id,
+            workspace_id=agent.id,
             workspace_path=agent.workspace_path,
             metadata={},
         )
@@ -1378,7 +1380,7 @@ def test_delete_agent_keeps_data_when_unregistered_sandbox_still_running() -> No
         agent = _bootstrap_agent_without_sandbox_state(repository)
         handle = SandboxHandle(
             sandbox_id=f"sandbox-{agent.id}",
-            agent_id=agent.id,
+            workspace_id=agent.id,
             workspace_path=agent.workspace_path,
             metadata={},
         )

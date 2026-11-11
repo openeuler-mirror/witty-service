@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -40,23 +42,34 @@ class OpenCodeRuntimeAdapter:
         self,
         *,
         client_factory: Callable[[str], OpenCodeV2Client] | None = None,
+        startup_timeout: float = 30.0,
+        poll_interval: float = 0.2,
     ) -> None:
         self._client_factory = client_factory or OpenCodeV2Client
         self._clients: dict[str, OpenCodeV2Client] = {}
         self._directories: dict[str, str] = {}
+        self._startup_timeout = startup_timeout
+        self._poll_interval = poll_interval
 
     async def connect(self, connection: RuntimeConnection) -> RuntimeHealth:
         workspace_id = connection.workspace.workspace_id
         client = self._client_factory(connection.base_url)
         self._clients[workspace_id] = client
         self._directories[workspace_id] = connection.workspace.runtime_directory
-        health = await self._probe_health(workspace_id)
-        if not health.ready:
+        deadline = time.monotonic() + self._startup_timeout
+        try:
+            while True:
+                health = await self._probe_health(workspace_id)
+                if health.ready:
+                    return health
+                if time.monotonic() >= deadline:
+                    raise RuntimeUnavailableError(
+                        workspace_id=workspace_id, detail=health.detail
+                    )
+                await asyncio.sleep(self._poll_interval)
+        except BaseException:
             await self._close(workspace_id)
-            raise RuntimeUnavailableError(
-                workspace_id=workspace_id, detail=health.detail
-            )
-        return health
+            raise
 
     async def disconnect(self, workspace_id: str) -> None:
         await self._close(workspace_id)

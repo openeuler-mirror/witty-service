@@ -23,7 +23,7 @@ class SandboxStatus(StrEnum):
 @dataclass(slots=True, frozen=True)
 class SandboxHandle:
     sandbox_id: str
-    agent_id: str
+    workspace_id: str
     workspace_path: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -52,11 +52,17 @@ class SandboxBackend(ABC):
     def start(
         self,
         *,
-        agent_id: str,
+        workspace_id: str,
         workspace_path: str,
         env: dict[str, str] | None = None,
+        replace_env: bool = False,
         **kwargs: Any,
     ) -> SandboxHandle:
+        """启动 Workspace 执行体。
+
+        ``replace_env=True`` 表示 ``env`` 是完整环境，不透传宿主进程环境；
+        Runtime Home 的 HOME/XDG 隔离依赖该语义。
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -83,8 +89,8 @@ class SandboxBackend(ABC):
         """
         return None
 
-    def find_handle_by_agent_id(
-        self, *, agent_id: str, workspace_path: str
+    def find_handle_by_workspace(
+        self, *, workspace_id: str, workspace_path: str
     ) -> SandboxHandle | None:
         """按 agent 身份回查仍在运行的执行体句柄。
 

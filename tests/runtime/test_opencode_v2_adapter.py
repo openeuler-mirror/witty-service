@@ -32,8 +32,15 @@ def _client(handler: Callable[[httpx.Request], httpx.Response]) -> OpenCodeV2Cli
 
 def _adapter(
     handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    startup_timeout: float = 30.0,
+    poll_interval: float = 0.2,
 ) -> OpenCodeRuntimeAdapter:
-    return OpenCodeRuntimeAdapter(client_factory=lambda _url: _client(handler))
+    return OpenCodeRuntimeAdapter(
+        client_factory=lambda _url: _client(handler),
+        startup_timeout=startup_timeout,
+        poll_interval=poll_interval,
+    )
 
 
 def _connection() -> RuntimeConnection:
@@ -49,13 +56,30 @@ async def test_connect_requires_healthy_runtime() -> None:
         assert request.url.path == "/api/health"
         return _json(200, {"healthy": False})
 
-    adapter = _adapter(handler)
+    adapter = _adapter(handler, startup_timeout=0)
 
     with pytest.raises(RuntimeUnavailableError):
         await adapter.connect(_connection())
 
     health = await adapter.health("ws_a")
     assert health.ready is False
+
+
+@pytest.mark.asyncio
+async def test_connect_polls_until_healthy() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return _json(200, {"healthy": attempts >= 3})
+
+    adapter = _adapter(handler, startup_timeout=5, poll_interval=0.01)
+
+    health = await adapter.connect(_connection())
+
+    assert health.ready is True
+    assert attempts == 3
 
 
 @pytest.mark.asyncio

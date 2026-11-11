@@ -70,7 +70,7 @@ class FakeSandbox(SandboxBackend):
     def start(
         self,
         *,
-        agent_id: str,
+        workspace_id: str,
         workspace_path: str,
         env: dict[str, str] | None = None,
         **kwargs: object,
@@ -81,7 +81,7 @@ class FakeSandbox(SandboxBackend):
                 time.sleep(self.start_delay)
             self.started.append(
                 {
-                    "agent_id": agent_id,
+                    "workspace_id": workspace_id,
                     "workspace_path": workspace_path,
                     "env": env,
                     **kwargs,
@@ -90,10 +90,10 @@ class FakeSandbox(SandboxBackend):
         if self.start_error is not None:
             raise self.start_error
         return SandboxHandle(
-            sandbox_id=f"sbx-{agent_id}",
-            agent_id=agent_id,
+            sandbox_id=f"sbx-{workspace_id}",
+            workspace_id=workspace_id,
             workspace_path=workspace_path,
-            metadata={"base_url": f"http://127.0.0.1:4100/{agent_id}"},
+            metadata={"base_url": f"http://127.0.0.1:4100/{workspace_id}"},
         )
 
     def stop(self, handle: SandboxHandle | str, **kwargs: object) -> None:
