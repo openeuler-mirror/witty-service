@@ -215,32 +215,72 @@ class WorkspaceRuntimeManager:
         runtime_session_id: str | None = None,
     ) -> TurnPermit:
         """在同一临界区确认投影已发布并登记活动 Turn；发布期间暂停放行。"""
-        self._require_publication_configured(spec.workspace.workspace_id)
+        workspace_id = spec.workspace.workspace_id
+        self._require_publication_configured(workspace_id)
         entry = self._ensure_entry(spec)
-        projection = await self._ensure_published(entry)
-        async with entry.permit_lock:
-            if entry.phase is not RuntimePhase.HEALTHY:
-                raise RuntimeUnavailableError(
-                    workspace_id=entry.spec.workspace.workspace_id,
-                    detail=entry.last_error or "workspace runtime is not healthy",
-                )
-            if entry.published_hash != projection.projection_hash:
+        deadline = time.monotonic() + self._publish_timeout
+        await self._published_hash(entry)
+        waited = False
+        while True:
+            async with entry.permit_lock:
+                task = entry.publish_task
+                if task is not None and not task.done():
+                    publish = task
+                else:
+                    projection = await self._load_projection(entry)
+                    if (
+                        entry.publication is PublicationPhase.IDLE
+                        and entry.published_hash == projection.projection_hash
+                    ):
+                        self._check_config_isolation(entry)
+                        if entry.phase is not RuntimePhase.HEALTHY:
+                            raise RuntimeUnavailableError(
+                                workspace_id=workspace_id,
+                                detail=entry.last_error
+                                or "workspace runtime is not healthy",
+                            )
+                        permit_id = f"permit_{uuid4().hex}"
+                        entry.active_turns[permit_id] = _ActiveTurn(
+                            turn_id=turn_id, runtime_session_id=runtime_session_id
+                        )
+                        entry.drained.clear()
+                        entry.last_activity = self._clock()
+                        return TurnPermit(
+                            permit_id=permit_id,
+                            workspace_id=workspace_id,
+                            turn_id=turn_id,
+                            published_projection_hash=projection.projection_hash,
+                        )
+                    if waited:
+                        raise RuntimePublishUnavailableError(
+                            workspace_id=workspace_id,
+                            detail="workspace configuration changed during publish",
+                        )
+                    publish = asyncio.create_task(
+                        self._publish(entry, projection, deadline)
+                    )
+                    entry.publish_task = publish
+                    publish.add_done_callback(
+                        lambda done: self._on_publish_done(entry, done)
+                    )
+            remaining = max(0.001, deadline - time.monotonic())
+            try:
+                await asyncio.wait_for(asyncio.shield(publish), remaining)
+            except TimeoutError as exc:
                 raise RuntimePublishUnavailableError(
-                    workspace_id=entry.spec.workspace.workspace_id,
-                    detail="workspace configuration changed during publish",
-                )
-            permit_id = f"permit_{uuid4().hex}"
-            entry.active_turns[permit_id] = _ActiveTurn(
-                turn_id=turn_id, runtime_session_id=runtime_session_id
-            )
-            entry.drained.clear()
-            entry.last_activity = self._clock()
-            return TurnPermit(
-                permit_id=permit_id,
-                workspace_id=entry.spec.workspace.workspace_id,
-                turn_id=turn_id,
-                published_projection_hash=projection.projection_hash,
-            )
+                    workspace_id=workspace_id,
+                    detail="workspace configuration publish is still running",
+                ) from exc
+            except RuntimeUnavailableError as exc:
+                raise RuntimePublishUnavailableError(
+                    workspace_id=workspace_id, detail=exc.message
+                ) from exc
+            except Exception as exc:
+                raise RuntimePublishUnavailableError(
+                    workspace_id=workspace_id,
+                    detail="workspace configuration publish failed",
+                ) from exc
+            waited = True
 
     async def bind_turn_runtime_session(
         self, *, workspace_id: str, turn_id: str, runtime_session_id: str
@@ -274,43 +314,6 @@ class WorkspaceRuntimeManager:
                 workspace_id=workspace_id,
                 detail="workspace projection publication is not configured",
             )
-
-    async def _ensure_published(self, entry: _ManagedWorkspace) -> RuntimeProjection:
-        workspace_id = entry.spec.workspace.workspace_id
-        deadline = time.monotonic() + self._publish_timeout
-        projection = await self._load_projection(entry)
-        if await self._published_hash(entry) == projection.projection_hash:
-            return projection
-        async with entry.permit_lock:
-            task = entry.publish_task
-            if task is None or task.done():
-                task = asyncio.create_task(self._publish(entry, projection, deadline))
-                entry.publish_task = task
-                task.add_done_callback(lambda done: self._on_publish_done(entry, done))
-        remaining = max(0.001, deadline - time.monotonic())
-        try:
-            await asyncio.wait_for(asyncio.shield(task), remaining)
-        except TimeoutError as exc:
-            raise RuntimePublishUnavailableError(
-                workspace_id=workspace_id,
-                detail="workspace configuration publish is still running",
-            ) from exc
-        except RuntimeUnavailableError as exc:
-            raise RuntimePublishUnavailableError(
-                workspace_id=workspace_id, detail=exc.message
-            ) from exc
-        except Exception as exc:
-            raise RuntimePublishUnavailableError(
-                workspace_id=workspace_id,
-                detail="workspace configuration publish failed",
-            ) from exc
-        latest = await self._load_projection(entry)
-        if entry.published_hash != latest.projection_hash:
-            raise RuntimePublishUnavailableError(
-                workspace_id=workspace_id,
-                detail="workspace configuration changed during publish",
-            )
-        return latest
 
     async def _publish(
         self,
@@ -495,8 +498,10 @@ class WorkspaceRuntimeManager:
             task = entry.publish_task
             if task is not None and not task.done():
                 task.cancel()
-                with contextlib.suppress(BaseException):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+                entry.publication = PublicationPhase.IDLE
+                entry.pending_hash = None
             try:
                 await self.stop(workspace_id)
             except RuntimeUnavailableError:

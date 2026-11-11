@@ -13,7 +13,11 @@ from witty_service.runtime.contracts import (
     RuntimeWorkspace,
 )
 from witty_service.runtime.errors import RuntimePublishUnavailableError
-from witty_service.runtime.manager import WorkspaceRuntimeManager, WorkspaceRuntimeSpec
+from witty_service.runtime.manager import (
+    RuntimePhase,
+    WorkspaceRuntimeManager,
+    WorkspaceRuntimeSpec,
+)
 from witty_service.runtime.projection import (
     ProjectionAgent,
     ProjectionInputs,
@@ -412,6 +416,57 @@ async def test_permit_requires_publication_ports() -> None:
 
     with pytest.raises(RuntimePublishUnavailableError, match="not configured"):
         await manager.acquire_turn_permit(_spec(), turn_id="turn-1")
+
+
+@pytest.mark.asyncio
+async def test_acquires_are_blocked_while_publish_drains() -> None:
+    harness = Harness()
+    spec = _spec()
+    await harness.manager.ensure_started(spec)
+    first = await harness.manager.acquire_turn_permit(spec, turn_id="turn-1")
+    harness.change_projection("Changed prompt.")
+
+    publishing = asyncio.create_task(
+        harness.manager.acquire_turn_permit(spec, turn_id="turn-2")
+    )
+    await asyncio.sleep(0.05)
+    late = asyncio.create_task(
+        harness.manager.acquire_turn_permit(spec, turn_id="turn-3")
+    )
+    await asyncio.sleep(0.05)
+
+    assert not publishing.done()
+    assert not late.done()
+    assert harness.manager.publication_state("ws_a").active_turns == 1
+    assert len(harness.sandbox.started) == 2
+
+    await harness.manager.release_turn_permit(first)
+    await asyncio.gather(publishing, late)
+
+    assert harness.manager.publication_state("ws_a").active_turns == 2
+    assert len(harness.sandbox.started) == 3
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_publish_and_stops_runtime() -> None:
+    harness = Harness()
+    spec = _spec()
+    await harness.manager.ensure_started(spec)
+    first = await harness.manager.acquire_turn_permit(spec, turn_id="turn-1")
+    harness.change_projection("Changed prompt.")
+    publisher = asyncio.create_task(
+        harness.manager.acquire_turn_permit(spec, turn_id="turn-2")
+    )
+    await asyncio.sleep(0.05)
+
+    await harness.manager.shutdown()
+
+    assert harness.sandbox.cleaned
+    assert harness.manager.get_state("ws_a").phase is RuntimePhase.STOPPED
+    assert harness.manager.publication_state("ws_a").phase is PublicationPhase.IDLE
+    with pytest.raises(asyncio.CancelledError):
+        await publisher
+    await harness.manager.release_turn_permit(first)
 
 
 @pytest.mark.asyncio

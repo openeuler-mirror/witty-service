@@ -49,3 +49,4 @@
 - location 预热会创建真实 warm-up session 并提交一轮真实 prompt，等待 durable 历史中出现 `session.next.step.started`；OpenCode 1.17.13 要求 message id 以 `msg_` 开头，否则 prompt 直接 400。warm-up 会话当前无法删除（T08 才提供 delete），会残留在 Runtime data 中且产生一次真实模型调用。
 - 预热只执行投影中第一个 agent/model 的回合，其余 agent、model、skill 仅做 location 可见性核对，避免每次发布对所有组合发起真实调用。
 - 已发布 hash 的读取与保存由 `WorkspaceProjectionStore` 落在 Workspace 聚合（`published_projection_hash`），Manager 不 import persistence，也不新增配置版本表/`publish_id`/`config_generation`。
+- R05 投影只携带 Skill 名称与内容摘要，不携带内容，因此 R06 无法物化 Skill 文件；发布仍把 Skill 纳入 location 可见性校验，未物化时发布失败（503）而不是静默跳过。Skill 落盘属于 E05（M3），R10 依赖 E05；在 E05 合入前，启用 Skill 的 Workspace 无法发布 Turn 属于已知边界。

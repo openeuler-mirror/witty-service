@@ -66,7 +66,9 @@ async def _run(env: ProbeEnv) -> None:
 
         missing = await adapter.verify_location(
             RuntimeLocationVerification(
-                workspace_id=_WORKSPACE_ID, agents=("missing-agent",)
+                workspace_id=_WORKSPACE_ID,
+                agents=("missing-agent",),
+                models=(_MODEL,),
             )
         )
         assert not missing.ready

@@ -82,12 +82,14 @@ class WorkspaceProjectionStore:
     async def save_published_hash(
         self, workspace_id: str, projection_hash: str
     ) -> None:
-        await asyncio.to_thread(
+        record = await asyncio.to_thread(
             self._workspaces.set_published_projection_hash,
             workspace_id,
             projection_hash,
             utc_ms_now(),
         )
+        if record is None:
+            raise LookupError(f"Workspace {workspace_id!r} does not exist")
 
 
 class CatalogCredentialResolver:
