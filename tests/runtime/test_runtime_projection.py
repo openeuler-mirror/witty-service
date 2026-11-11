@@ -159,3 +159,4 @@ def test_projection_changes_with_secret_revision_and_skill_digest() -> None:
 
     assert build_projection(rotated).projection_hash != _GOLDEN_HASH
     assert build_projection(updated_skill).projection_hash != _GOLDEN_HASH
+    assert "credential_ref" not in build_projection(inputs).canonical_json

@@ -95,22 +95,19 @@ def upgrade() -> None:
     sa.Column('max_tokens', sa.Integer(), server_default='32768', nullable=False),
     sa.Column('temperature', sa.REAL(), server_default='0.7', nullable=False),
     sa.Column('is_default', sa.Integer(), server_default='0', nullable=False),
+    sa.Column('secret_revision', sa.Integer(), server_default='0', nullable=False),
     sa.Column('created_at', sa.Integer(), nullable=False),
     sa.Column('updated_at', sa.Integer(), nullable=False),
     sa.CheckConstraint('enabled IN (0, 1)', name='ck_models_enabled'),
     sa.CheckConstraint('is_default IN (0, 1)', name='ck_models_is_default'),
     sa.CheckConstraint('max_tokens > 0', name='ck_models_max_tokens'),
     sa.CheckConstraint('temperature >= 0.0 AND temperature <= 2.0', name='ck_models_temperature'),
-    sa.PrimaryKeyConstraint('id', name='pk_models')
+    sa.CheckConstraint('secret_revision >= 0', name='ck_models_secret_revision'),
+    sa.PrimaryKeyConstraint('id', name='pk_models'),
+    sa.UniqueConstraint('provider_id', 'provider_model_id', name='uq_models_provider_model')
     )
     op.create_index('ix_models_catalog', 'models', ['enabled', sa.literal_column('is_default DESC'), sa.literal_column('created_at DESC'), 'id'], unique=False)
     op.create_index('uq_models_single_default', 'models', ['is_default'], unique=True, sqlite_where=sa.text('is_default = 1'))
-    op.create_index(
-        'uq_models_provider_endpoint_model',
-        'models',
-        ['provider_id', sa.text("coalesce(api_base_url, '')"), 'provider_model_id'],
-        unique=True,
-    )
     op.create_table('skill_repo',
     sa.Column('repo_id', sa.String(length=36), nullable=False),
     sa.Column('repo_name', sa.String(length=255, collation='NOCASE'), nullable=False),
@@ -452,7 +449,6 @@ def downgrade() -> None:
     op.drop_index('ix_skill_repo_status', table_name='skill_repo')
     op.drop_table('skill_repo')
     op.drop_index('uq_models_single_default', table_name='models', sqlite_where=sa.text('is_default = 1'))
-    op.drop_index('uq_models_provider_endpoint_model', table_name='models')
     op.drop_index('ix_models_catalog', table_name='models')
     op.drop_table('models')
     op.drop_index('ix_mcp_servers_enabled_name', table_name='mcp_servers')

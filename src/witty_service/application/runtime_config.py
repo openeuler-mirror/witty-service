@@ -3,29 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from witty_service.domain.model_providers import DEFAULT_API_BASE_URLS
+
+__all__ = ["DEFAULT_API_BASE_URLS", "RuntimeConfig", "UnsupportedModelProviderError"]
+
 
 class UnsupportedModelProviderError(ValueError):
     """模型与 runtime 不兼容（provider 不支持 / 端点缺失或未实值化）。
 
     调用方应只捕获本类型，避免把 runtime 抛出的其它 ``ValueError`` 误判为模型问题。
     """
-
-
-# 注册表 provider 的默认端点：仅当创建/更新模型未传 api_base_url（None）时兜底
-# （api/models.py）。
-DEFAULT_API_BASE_URLS: dict[str, str] = {
-    "openai": "https://api.openai.com/v1",
-    "anthropic": "https://api.anthropic.com/v1",
-    "google": "https://generativelanguage.googleapis.com/v1beta",
-    "xai": "https://api.x.ai/v1",
-    "ollama": "http://localhost:11434/v1",
-    "azure": "https://{resource}.openai.azure.com",
-    "deepseek": "https://api.deepseek.com/v1",
-    "glm": "https://open.bigmodel.cn/api/paas/v4",
-    "minimax": "https://api.minimax.com/v1",
-    "kimi": "https://api.moonshot.cn/v1",
-    "custom": "",  # 用户自定义，需通过 api_base_url 指定
-}
 
 
 class RuntimeConfig(Protocol):

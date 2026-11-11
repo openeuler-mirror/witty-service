@@ -218,6 +218,101 @@ def test_catalog_default_model_and_skill_upsert(repos: Repos) -> None:
     assert repos.catalog.get_skill_repo(repo.repo_id).skill_count == 1
 
 
+def test_catalog_provider_credential_is_shared_across_models(repos: Repos) -> None:
+    first = repos.catalog.create_model(
+        "First",
+        "provider",
+        "m1",
+        "openai",
+        "https://example.com/v1",
+        "mdl_shared",
+        1024,
+        0.2,
+        1_000,
+        secret_revision=1,
+    )
+    second = repos.catalog.create_model(
+        "Second",
+        "provider",
+        "m2",
+        "openai",
+        "https://example.com/v1",
+        "mdl_shared",
+        1024,
+        0.2,
+        1_001,
+        secret_revision=1,
+    )
+
+    assert [model.id for model in repos.catalog.list_provider_models("provider")] == [
+        first.id,
+        second.id,
+    ]
+    assert repos.catalog.count_models_for_provider("provider") == 2
+    assert repos.catalog.get_provider_credential("provider") == ("mdl_shared", 1)
+    assert (
+        repos.catalog.replace_provider_credential(
+            "provider", "mdl_rotated", 2, 1_002, expected_revision=1
+        )
+        == 2
+    )
+    assert repos.catalog.get_provider_credential("provider") == ("mdl_rotated", 2)
+    assert (
+        repos.catalog.replace_provider_credential(
+            "provider", "mdl_stale", 3, 1_003, expected_revision=1
+        )
+        == 0
+    )
+    other = repos.catalog.create_model(
+        "Other",
+        "other-provider",
+        "m1",
+        None,
+        None,
+        "mdl_other",
+        1024,
+        0.2,
+        1_004,
+        secret_revision=1,
+    )
+    assert (
+        repos.catalog.replace_provider_credential("provider", "mdl_forced", 4, 1_005)
+        == 2
+    )
+    assert repos.catalog.get_provider_credential("other-provider") == ("mdl_other", 1)
+    assert repos.catalog.get_model(other.id).secret_revision == 1
+    assert repos.catalog.count_model_references(first.id) == {
+        "workspaces": 0,
+        "sessions": 0,
+        "turns": 0,
+        "scheduled_tasks": 0,
+        "channel_instances": 0,
+        "channel_provisionings": 0,
+    }
+
+
+def test_list_enabled_skills_excludes_disabled_and_sorts_stably(repos: Repos) -> None:
+    repo = repos.catalog.create_skill_repo("builtin", "builtin", 1_000)
+    for name, enabled in [("Zeta", 1), ("alpha", 1), ("中文技能", 1), ("Beta", 0)]:
+        repos.catalog.upsert_skill(
+            repo.repo_id,
+            name,
+            f"{name}/SKILL.md",
+            "hash",
+            {},
+            None,
+            None,
+            enabled,
+            1_001,
+        )
+
+    assert [skill.skill_name for skill in repos.catalog.list_enabled_skills()] == [
+        "alpha",
+        "Zeta",
+        "中文技能",
+    ]
+
+
 def test_mcp_upsert_increments_secret_revision(repos: Repos) -> None:
     first = repos.catalog.upsert_mcp_server("Search", {"url": "a"}, "ref-1", 1, 1_000)
     second = repos.catalog.upsert_mcp_server("search", {"url": "b"}, "ref-2", 1, 1_001)

@@ -55,9 +55,7 @@ def _schema_snapshot(db_path: Path) -> dict[str, object]:
         ]
         snapshot: dict[str, object] = {}
         for table in tables:
-            columns = connection.execute(
-                f'PRAGMA table_info("{table}")'
-            ).fetchall()
+            columns = connection.execute(f'PRAGMA table_info("{table}")').fetchall()
             foreign_keys = sorted(
                 row[1:]
                 for row in connection.execute(
@@ -123,9 +121,18 @@ def test_single_baseline_revision() -> None:
 def test_upgrade_is_repeatable(migrated_db: Path) -> None:
     command.upgrade(_alembic_config(migrated_db), "head")
     command.upgrade(_alembic_config(migrated_db), "head")
-    assert set(inspect(create_engine(f"sqlite:///{migrated_db}")).get_table_names()) == (
-        set(Base.metadata.tables) | {"alembic_version"}
-    )
+    assert set(
+        inspect(create_engine(f"sqlite:///{migrated_db}")).get_table_names()
+    ) == (set(Base.metadata.tables) | {"alembic_version"})
+
+
+def test_downgrade_to_base_succeeds(migrated_db: Path) -> None:
+    command.downgrade(_alembic_config(migrated_db), "base")
+    engine = create_engine(f"sqlite:///{migrated_db}")
+    try:
+        assert set(inspect(engine).get_table_names()) == {"alembic_version"}
+    finally:
+        engine.dispose()
 
 
 def test_schema_matches_orm_metadata(migrated_db: Path, metadata_db: Path) -> None:
@@ -159,12 +166,31 @@ def test_nocase_columns_keep_collation(
     assert pattern.search(_table_sql(metadata_db, table))
 
 
-def test_expression_indexes_are_physical(migrated_db: Path) -> None:
+def test_models_schema_includes_secret_revision_and_provider_unique(
+    migrated_db: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{migrated_db}")
+    try:
+        inspector = inspect(engine)
+        columns = {column["name"] for column in inspector.get_columns("models")}
+        checks = {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("models")
+        }
+        uniques = {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints("models")
+        }
+    finally:
+        engine.dispose()
+
+    assert "secret_revision" in columns
+    assert "ck_models_secret_revision" in checks
+    assert "uq_models_provider_model" in uniques
+
+
+def test_channel_waiting_expression_index_is_physical(migrated_db: Path) -> None:
     indexes = _index_sql(migrated_db)
-    assert indexes["uq_models_provider_endpoint_model"] == (
-        "CREATE UNIQUE INDEX uq_models_provider_endpoint_model ON models "
-        "(provider_id, coalesce(api_base_url, ''), provider_model_id)"
-    )
     assert indexes["uq_channel_provisionings_waiting"] == (
         "CREATE UNIQUE INDEX uq_channel_provisionings_waiting ON channel_provisionings "
         "(channel, coalesce(owner_ref, '')) WHERE status = 'waiting'"

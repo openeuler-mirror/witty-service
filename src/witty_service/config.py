@@ -43,6 +43,7 @@ Witty Service 统一配置管理
     WITTY_CHANNEL_QUEUE_DEPTH             每会话队列深度(排队等待中的条数) (默认: 3)
     WITTY_CHANNEL_EDIT_THROTTLE_MS        占位消息节流更新间隔(毫秒; 0 表示只更新开始与结束两次)
     WITTY_CHANNEL_INBOUND_RETENTION_DAYS  入站去重记录保留天数 (默认: 7)
+    WITTY_MODEL_CREDENTIALS_DIR           模型凭据目录 (默认: ~/.witty/model-credentials)
 
 使用示例:
     from witty_service.config import get_settings
@@ -393,6 +394,7 @@ class SchedulerSettings:
 #: 渠道凭据目录的默认位置：与默认数据库同属 `~/.witty`，但**不在库文件旁边**——
 #: 备份/同步主库时不会顺带带走凭据（ADR 0004）
 DEFAULT_CREDENTIALS_DIR = Path("~/.witty/channel-credentials")
+DEFAULT_MODEL_CREDENTIALS_DIR = Path("~/.witty/model-credentials")
 
 
 @dataclass(frozen=True)
@@ -448,6 +450,20 @@ class ChannelSettings:
         )
 
 
+@dataclass(frozen=True)
+class ModelSettings:
+    """模型 provider 凭据目录；凭据本体只存在 0600 文件里。"""
+
+    credentials_dir: str = str(DEFAULT_MODEL_CREDENTIALS_DIR)
+
+    @classmethod
+    def from_env(cls) -> "ModelSettings":
+        credentials_dir = (os.getenv("WITTY_MODEL_CREDENTIALS_DIR") or "").strip()
+        return cls(
+            credentials_dir=credentials_dir or str(DEFAULT_MODEL_CREDENTIALS_DIR)
+        )
+
+
 # ==============================================================================
 # 主配置类
 # ==============================================================================
@@ -473,6 +489,8 @@ class Settings:
     scheduler: SchedulerSettings
     #: IM Channel 渠道配置；带默认值是为了让既有测试的显式构造保持可用
     channel: ChannelSettings = field(default_factory=ChannelSettings)
+    #: 模型目录与凭据目录；带默认值同样为了既有显式构造保持可用
+    model: ModelSettings = field(default_factory=ModelSettings)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -489,6 +507,7 @@ class Settings:
             runtime=RuntimeSettings.from_env(),
             scheduler=SchedulerSettings.from_env(),
             channel=ChannelSettings.from_env(),
+            model=ModelSettings.from_env(),
         )
 
 

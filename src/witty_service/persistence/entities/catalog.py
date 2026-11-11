@@ -11,8 +11,6 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    func,
-    literal,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -30,6 +28,10 @@ class ModelORM(Base):
         CheckConstraint(
             "temperature >= 0.0 AND temperature <= 2.0",
             name="ck_models_temperature",
+        ),
+        CheckConstraint("secret_revision >= 0", name="ck_models_secret_revision"),
+        UniqueConstraint(
+            "provider_id", "provider_model_id", name="uq_models_provider_model"
         ),
         Index(
             "uq_models_single_default",
@@ -58,19 +60,15 @@ class ModelORM(Base):
     is_default: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    secret_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=utc_ms_now)
     updated_at: Mapped[int] = mapped_column(
         Integer, nullable=False, default=utc_ms_now, onupdate=utc_ms_now
     )
 
 
-Index(
-    "uq_models_provider_endpoint_model",
-    ModelORM.provider_id,
-    func.coalesce(ModelORM.api_base_url, literal("", literal_execute=True)),
-    ModelORM.provider_model_id,
-    unique=True,
-)
 Index(
     "ix_models_catalog",
     ModelORM.enabled,
