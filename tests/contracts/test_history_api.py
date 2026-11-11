@@ -14,7 +14,7 @@ from witty_service.application.history_service import (
     SessionResyncView,
 )
 from witty_service.config import get_settings
-from witty_service.domain.enums import SessionOrigin
+from witty_service.domain.enums import MessageRole, SessionOrigin
 from witty_service.main import create_app
 from witty_service.runtime.contracts import (
     RuntimeHistoryMessage,
@@ -124,6 +124,24 @@ def test_list_messages_rejects_invalid_cursor(api) -> None:
 def test_list_messages_returns_503_when_runtime_unavailable(api) -> None:
     client, container = api
     session_id = _session(container, runtime_session_id="rt_1")
+
+    response = client.get(f"/api/sessions/{session_id}/messages", headers=_auth())
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "RUNTIME_UNAVAILABLE"
+
+
+def test_list_messages_has_no_db_fallback_when_runtime_unavailable(api) -> None:
+    client, container = api
+    session_id = _session(container, runtime_session_id="rt_1")
+    session = container.sessions.get(session_id)
+    assert session is not None
+    turn = container.sessions.start_turn(
+        session_id, session.current_agent_id, session.current_model_id, 1_100
+    )
+    container.sessions.add_runtime_message(
+        "msg_user", turn.id, MessageRole.user, 0, 1_100
+    )
 
     response = client.get(f"/api/sessions/{session_id}/messages", headers=_auth())
 

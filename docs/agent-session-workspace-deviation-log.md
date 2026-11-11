@@ -121,3 +121,9 @@
 - Runtime 非 ready（含发布中 `restarting`、进程退出 `unavailable`）时返回 503 `RUNTIME_UNAVAILABLE`，不回退 DB 历史；Session 不存在或已删除返回 404。
 - Session 事件流以 `data: <SessionEvent JSON>` 输出，不写 SSE `id:`/`event:`/`retry:`；Turn/消息事件按 Turn 所属 Session 过滤，session 级事件在订阅后 Runtime Session ID 才落库或重启后变化时会重新读取 Session，避免用订阅瞬间的快照漏事件；`RuntimeResyncRequired` 统一映射为 `resync_required`，payload 标记 `full_reload=true` 并携带 `reason/last_durable_seq`，要求客户端全量重读 Turn 与历史。
 - Manager 增加 `read_history` 纯委托门面，并统一用 R09 的 `require_ready()` 作为最后门禁（400/404 判定后调用）；事件重连与 durable seq 去重仍由 Manager 单 Workspace 事件链负责，API 只消费其重放后的 `RuntimeStreamItem`。
+
+## T10 删除 DB 消息写入与跨源游标残留
+
+- D07 已清理旧 `messages`/`message_events` 表、旧消息 ORM/Repository 和旧入口，本轮符号扫描在 `src/witty_service` 未发现 `MessageRepository`、`message_events`、`next_before`、`compare`、`cross_source` 或 `messages` 表定义残留，因此无代码可删。
+- 新增结构回归测试守住 schema 不重新引入 `messages`/`message_events` 表；新增“Runtime 不可用时即使存在 Turn 消息归属也返回 503”的契约测试，证明历史主路径不存在 DB 正文回退。
+- 消息正文、Parts、Delta、Tool 副本只存在 OpenCode；本服务 DB 仅保留 Session/Turn 元数据、Turn 归因与 `turn_runtime_messages` 的消息 ID 归属。
