@@ -55,8 +55,14 @@ class SandboxBackend(ABC):
         workspace_id: str,
         workspace_path: str,
         env: dict[str, str] | None = None,
+        replace_env: bool = False,
         **kwargs: Any,
     ) -> SandboxHandle:
+        """启动 Workspace 执行体。
+
+        ``replace_env=True`` 表示 ``env`` 是完整环境，不透传宿主进程环境；
+        Runtime Home 的 HOME/XDG 隔离依赖该语义。
+        """
         raise NotImplementedError
 
     @abstractmethod

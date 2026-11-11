@@ -190,7 +190,8 @@ class LocalProcessSandboxBackend(SandboxBackend):
 
         # 透传调用方注入的额外环境变量；单 runtime 下不再注入 Runtime 选择变量，
         # 父进程里遗留的 WITTY_RUNTIME_* 也不会改变 agent-server 的装配。
-        env_vars = os.environ.copy()
+        replace_env = bool(kwargs.get("replace_env", False))
+        env_vars = {} if replace_env else os.environ.copy()
         if env:
             env_vars.update(env)
             logger.info(

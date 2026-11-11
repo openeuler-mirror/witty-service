@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time
@@ -43,6 +44,7 @@ class WorkspaceRuntimeSpec:
     command: tuple[str, ...]
     env: Mapping[str, str] = field(default_factory=dict)
     preferred_port: int | None = None
+    stderr_log_path: str | None = None
 
     def __post_init__(self) -> None:
         if not self.host_directory.strip():
@@ -197,14 +199,24 @@ class WorkspaceRuntimeManager:
                 entry.last_error = exc.message
                 raise
         try:
-            handle = await asyncio.to_thread(
-                self._sandbox.start,
-                workspace_id=entry.spec.workspace.workspace_id,
-                workspace_path=entry.spec.host_directory,
-                env=dict(entry.spec.env),
-                command=list(entry.spec.command),
-                port=entry.spec.preferred_port,
+            start = asyncio.ensure_future(
+                asyncio.to_thread(
+                    self._sandbox.start,
+                    workspace_id=entry.spec.workspace.workspace_id,
+                    workspace_path=entry.spec.host_directory,
+                    env=dict(entry.spec.env),
+                    replace_env=True,
+                    command=list(entry.spec.command),
+                    port=entry.spec.preferred_port,
+                    stderr_log_path=entry.spec.stderr_log_path,
+                )
             )
+            handle = await asyncio.shield(start)
+        except asyncio.CancelledError:
+            with contextlib.suppress(BaseException):
+                entry.handle = await start
+            await self._abort_start(entry, "workspace runtime start cancelled")
+            raise
         except Exception as exc:
             entry.reset(RuntimePhase.ERROR)
             entry.last_error = str(exc)
@@ -217,12 +229,14 @@ class WorkspaceRuntimeManager:
         try:
             endpoint = await asyncio.to_thread(self._sandbox.endpoint, handle)
             health = await self._connect(entry, endpoint)
-        except Exception as exc:
+        except BaseException as exc:
             await self._abort_start(entry, f"failed to bind workspace runtime: {exc}")
-            raise RuntimeUnavailableError(
-                workspace_id=entry.spec.workspace.workspace_id,
-                detail="failed to bind workspace runtime",
-            ) from exc
+            if isinstance(exc, Exception):
+                raise RuntimeUnavailableError(
+                    workspace_id=entry.spec.workspace.workspace_id,
+                    detail="failed to bind workspace runtime",
+                ) from exc
+            raise
         if not health.ready:
             message = health.detail or "workspace runtime is not ready"
             await self._abort_start(entry, message)
