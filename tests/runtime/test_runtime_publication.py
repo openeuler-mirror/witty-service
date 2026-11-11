@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 
 import pytest
 
 from witty_service.runtime.contracts import (
+    ReplayQuery,
     RuntimeConnection,
+    RuntimeEventEnvelope,
+    RuntimeEventReplay,
     RuntimeHealth,
     RuntimeLocationReadiness,
     RuntimeLocationVerification,
@@ -109,6 +112,7 @@ class FakePort:
         self.verify_calls: list[RuntimeLocationVerification] = []
         self.verify_ready = True
         self.verify_detail: str | None = None
+        self.streams: dict[str, asyncio.Queue[RuntimeEventEnvelope]] = {}
 
     async def connect(self, connection: RuntimeConnection) -> RuntimeHealth:
         self.connections.append(connection)
@@ -119,6 +123,22 @@ class FakePort:
 
     async def health(self, workspace_id: str) -> RuntimeHealth:
         return RuntimeHealth(workspace_id=workspace_id, ready=True)
+
+    def subscribe(self, workspace_id: str) -> AsyncIterator[RuntimeEventEnvelope]:
+        return self._stream(workspace_id)
+
+    async def _stream(self, workspace_id: str) -> AsyncIterator[RuntimeEventEnvelope]:
+        queue: asyncio.Queue[RuntimeEventEnvelope] = asyncio.Queue()
+        self.streams[workspace_id] = queue
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            if self.streams.get(workspace_id) is queue:
+                del self.streams[workspace_id]
+
+    async def replay_events(self, query: ReplayQuery) -> RuntimeEventReplay:
+        return RuntimeEventReplay(events=(), has_more=False)
 
     async def verify_location(
         self, request: RuntimeLocationVerification
