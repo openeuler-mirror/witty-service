@@ -165,6 +165,42 @@ class SessionService:
             raise _session_not_found(session_id)
         return self._view_for_session(updated)
 
+    def update_selection(
+        self, session_id: str, *, agent_id: str | None, model_id: str | None
+    ) -> SessionView:
+        session = self._require_session(session_id)
+        agent = None
+        model = None
+        if agent_id is not None:
+            agent = self._load_agent(agent_id)
+        if model_id is not None:
+            model = self._catalog.get_model(model_id)
+            if model is None:
+                raise _model_not_found(model_id)
+        if agent is not None and agent.archived_at is not None:
+            raise DomainError(
+                code=ErrorCode.AGENT_ARCHIVED,
+                message="Agent is archived.",
+                status_code=409,
+                details={"agent_id": agent.id},
+            )
+        if model is not None and not model.enabled:
+            raise DomainError(
+                code=ErrorCode.MODEL_DISABLED,
+                message="Model is disabled.",
+                status_code=409,
+                details={"model_id": model.id},
+            )
+        updated = self._sessions.update_current_settings(
+            session.id,
+            agent.id if agent is not None else None,
+            model.id if model is not None else None,
+            self._clock(),
+        )
+        if updated is None:
+            raise _session_not_found(session_id)
+        return self._view_for_session(updated)
+
     def _view_for_session(self, session: SessionRecord) -> SessionView:
         agent = self._load_agent(session.current_agent_id)
         model = (

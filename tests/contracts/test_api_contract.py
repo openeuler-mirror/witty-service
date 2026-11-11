@@ -10,7 +10,6 @@ from fastapi.testclient import TestClient
 from openapi_spec_validator import validate
 
 from witty_service.api.contract.openapi import (
-    build_contract_app,
     render_contract_openapi,
     render_contract_openapi_yaml,
 )
@@ -73,7 +72,6 @@ def test_generated_contract_is_valid_openapi(spec: dict[str, Any]) -> None:
         ),
         ("GET", "/api/workspaces/ws_01", None),
         ("PATCH", "/api/workspaces/ws_01", {"name": "renamed"}),
-        ("PATCH", "/api/sessions/ses_01/selection", {"agent_id": "agt_01"}),
         ("DELETE", "/api/sessions/ses_01", None),
         (
             "POST",

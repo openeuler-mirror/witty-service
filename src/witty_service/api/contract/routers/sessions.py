@@ -71,10 +71,12 @@ def update_session(
     responses=error_responses(400, 404, 409),
 )
 def update_session_selection(
-    session_id: str, payload: UpdateSessionSelectionRequest
+    session_id: str, payload: UpdateSessionSelectionRequest, service: Service
 ) -> SessionResponse:
-    del session_id, payload
-    not_implemented()
+    view = service.update_selection(
+        session_id, agent_id=payload.agent_id, model_id=payload.model_id
+    )
+    return session_response(view)
 
 
 @router.delete(

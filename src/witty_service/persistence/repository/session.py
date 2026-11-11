@@ -171,14 +171,20 @@ class SessionRepository(RepositoryBase):
             )
 
     def update_current_settings(
-        self, session_id: str, agent_id: str, model_id: str | None, now: int
+        self,
+        session_id: str,
+        agent_id: str | None,
+        model_id: str | None,
+        now: int,
     ) -> SessionRecord | None:
         with self._transaction() as session:
             row = session.get(SessionORM, session_id)
-            if row is None:
+            if row is None or row.deleted_at is not None:
                 return None
-            row.current_agent_id = agent_id
-            row.current_model_id = model_id
+            if agent_id is not None:
+                row.current_agent_id = agent_id
+            if model_id is not None:
+                row.current_model_id = model_id
             row.updated_at = now
             session.flush()
             return record_of(SessionRecord, row)

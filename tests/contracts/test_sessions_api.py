@@ -158,6 +158,134 @@ def test_create_session_prefers_missing_model_over_archived_agent(api) -> None:
     assert response.json()["error"]["code"] == "MODEL_NOT_FOUND"
 
 
+def test_update_selection_changes_only_session_defaults(api) -> None:
+    client, container = api
+    workspace_id = _workspace(container)
+    model = container.catalog_repository.create_model(
+        "Model", "openai", "gpt-5", None, None, None, 1024, 0.2, 1_000
+    )
+    expert = container.agents.create("Expert", AgentKind.expert, 1_000)
+    primary = container.agents.get_primary()
+    assert primary is not None
+    session = container.sessions.create(
+        workspace_id,
+        primary.id,
+        model.id,
+        SessionOrigin.web,
+        "Session",
+        None,
+        "rts_existing",
+        1_000,
+    )
+
+    response = client.patch(
+        f"/api/sessions/{session.id}/selection",
+        json={"agent_id": expert.id, "model_id": model.id},
+        headers=_auth(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["current_agent"]["id"] == expert.id
+    assert body["current_model"]["id"] == model.id
+    stored = container.sessions.get(session.id)
+    assert stored.current_agent_id == expert.id
+    assert stored.runtime_session_id == "rts_existing"
+
+
+def test_update_selection_rejects_invalid_targets(api) -> None:
+    client, container = api
+    workspace_id = _workspace(container)
+    model = container.catalog_repository.create_model(
+        "Disabled", "openai", "gpt-5", None, None, None, 1024, 0.2, 1_000
+    )
+    container.catalog_repository.disable_model(model.id, 2_000)
+    expert = container.agents.create("Archived", AgentKind.expert, 1_000)
+    container.agents.archive(expert.id, 2_000)
+    session_id = client.post(
+        "/api/sessions", json={"workspace_id": workspace_id}, headers=_auth()
+    ).json()["id"]
+
+    missing_agent = client.patch(
+        f"/api/sessions/{session_id}/selection",
+        json={"agent_id": "agt_missing"},
+        headers=_auth(),
+    )
+    assert missing_agent.status_code == 404
+    assert missing_agent.json()["error"]["code"] == "AGENT_NOT_FOUND"
+
+    archived_agent = client.patch(
+        f"/api/sessions/{session_id}/selection",
+        json={"agent_id": expert.id},
+        headers=_auth(),
+    )
+    assert archived_agent.status_code == 409
+    assert archived_agent.json()["error"]["code"] == "AGENT_ARCHIVED"
+
+    disabled_model = client.patch(
+        f"/api/sessions/{session_id}/selection",
+        json={"model_id": model.id},
+        headers=_auth(),
+    )
+    assert disabled_model.status_code == 409
+    assert disabled_model.json()["error"]["code"] == "MODEL_DISABLED"
+
+    missing_model = client.patch(
+        f"/api/sessions/{session_id}/selection",
+        json={"model_id": "mdl_missing"},
+        headers=_auth(),
+    )
+    assert missing_model.status_code == 404
+    assert missing_model.json()["error"]["code"] == "MODEL_NOT_FOUND"
+
+
+def test_update_selection_partial_writes_do_not_clobber(api) -> None:
+    _, container = api
+    workspace_id = _workspace(container)
+    primary = container.agents.get_primary()
+    assert primary is not None
+    first_model = container.catalog_repository.create_model(
+        "First", "openai", "gpt-5", None, None, None, 1024, 0.2, 1_000
+    )
+    second_model = container.catalog_repository.create_model(
+        "Second", "openai", "gpt-5-mini", None, None, None, 1024, 0.2, 1_000
+    )
+    expert = container.agents.create("Expert", AgentKind.expert, 1_000)
+    session = container.sessions.create(
+        workspace_id,
+        primary.id,
+        first_model.id,
+        SessionOrigin.web,
+        "Session",
+        None,
+        None,
+        1_000,
+    )
+
+    container.sessions.update_current_settings(session.id, expert.id, None, 2_000)
+    updated = container.sessions.update_current_settings(
+        session.id, None, second_model.id, 3_000
+    )
+
+    assert updated is not None
+    assert updated.current_agent_id == expert.id
+    assert updated.current_model_id == second_model.id
+
+
+def test_update_selection_rejects_empty_patch(api) -> None:
+    client, container = api
+    session_id = client.post(
+        "/api/sessions", json={"workspace_id": _workspace(container)}, headers=_auth()
+    ).json()["id"]
+
+    response = client.patch(
+        f"/api/sessions/{session_id}/selection", json={}, headers=_auth()
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
 def test_list_sessions_is_pinned_then_recent_with_cursor(api) -> None:
     client, container = api
     workspace_id = _workspace(container)
