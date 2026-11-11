@@ -405,4 +405,4 @@ def test_service_app_mounts_contract_without_422_docs(monkeypatch) -> None:
     paths = app.openapi()["paths"]
     assert "/api/sessions/{session_id}/turns" in paths
     assert "422" not in paths["/api/workspaces"]["get"]["responses"]
-    assert "422" in paths["/agents"]["post"]["responses"]
+    assert "/agents" not in paths

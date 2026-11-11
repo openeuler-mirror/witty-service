@@ -1,11 +1,9 @@
 import argparse
 import logging
-import os
 import sys
 
 from uvicorn import run
 
-from witty_service.channels.gateway import WORKER_COUNT_ENV
 from witty_service.main import create_app
 from witty_service.workspace_init import init_workspace
 
@@ -66,10 +64,6 @@ def main() -> None:
 
     logger.info(f"Starting Witty Service on {args.host}:{args.port}")
     logger.info(f"Log level: {args.log_level.upper()}")
-
-    # 渠道网关的 worker 守卫依赖该变量（框架设计 §7.1）：子进程继承它，
-    # 因此必须在 uvicorn.run 之前写入。
-    os.environ[WORKER_COUNT_ENV] = str(args.workers)
 
     try:
         init_workspace()
