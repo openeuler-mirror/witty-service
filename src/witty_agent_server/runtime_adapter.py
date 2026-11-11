@@ -4,6 +4,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -25,6 +26,7 @@ from witty_service.runtime.contracts import (
     RuntimeHealth,
     RuntimeHistoryMessage,
     RuntimeLocationReadiness,
+    RuntimeLocationVerification,
     RuntimeMessageCompletedPayload,
     RuntimeMessageDeltaPayload,
     RuntimeMessageKind,
@@ -131,6 +133,66 @@ class OpenCodeRuntimeAdapter:
             health=health,
             location=readiness,
         )
+
+    async def verify_location(
+        self, request: RuntimeLocationVerification
+    ) -> RuntimeLocationReadiness:
+        """预热目标 location 直到出现 ``step.started``，并核对可见性。"""
+        deadline = time.monotonic() + request.timeout
+        while True:
+            snapshot = await self.inspect_workspace(request.workspace_id)
+            location = snapshot.location
+            missing = _missing_requirements(request, location)
+            if location.ready and missing is None:
+                return await self._warm_location(request, location, deadline)
+            if time.monotonic() >= deadline:
+                return _readiness(location, detail=missing or location.detail)
+            await asyncio.sleep(self._poll_interval)
+
+    async def _warm_location(
+        self,
+        request: RuntimeLocationVerification,
+        location: RuntimeLocationReadiness,
+        deadline: float,
+    ) -> RuntimeLocationReadiness:
+        if not location.agents or not location.models:
+            return _readiness(
+                location, detail="location catalog has no agents or models"
+            )
+        agent = request.agents[0] if request.agents else location.agents[0]
+        model = request.models[0] if request.models else location.models[0]
+        client = self._client(request.workspace_id)
+        workspace_id = request.workspace_id
+        try:
+            created = await client.create_session(
+                directory=self._directory(workspace_id),
+                agent=agent,
+                model={"providerID": model.provider_id, "id": model.model_id},
+            )
+        except (OpenCodeV2Error, httpx.HTTPError) as exc:
+            return _readiness(location, detail=f"failed to open warm-up session: {exc}")
+        runtime_session_id = created.get("id")
+        if not isinstance(runtime_session_id, str) or not runtime_session_id:
+            return _readiness(location, detail="warm-up session has no id")
+        try:
+            await client.prompt(
+                runtime_session_id,
+                message_id=f"warmup_{uuid4().hex}",
+                text="warm up",
+            )
+            while True:
+                events, _ = await client.history(
+                    runtime_session_id, after_seq=0, limit=100
+                )
+                if any(_is_turn_started(workspace_id, raw) for raw in events):
+                    return _readiness(location, ready=True)
+                if time.monotonic() >= deadline:
+                    return _readiness(
+                        location, detail="warm-up turn did not start at the location"
+                    )
+                await asyncio.sleep(self._poll_interval)
+        except (OpenCodeV2Error, httpx.HTTPError) as exc:
+            return _readiness(location, detail=f"warm-up turn failed: {exc}")
 
     async def ensure_session(self, request: EnsureSessionRequest) -> RuntimeSession:
         workspace_id = request.workspace.workspace_id
@@ -637,3 +699,44 @@ def _models(entries: list[dict[str, Any]]) -> tuple[RuntimeModelRef, ...]:
         if isinstance(model_id, str) and isinstance(provider_id, str):
             models.append(RuntimeModelRef(provider_id=provider_id, model_id=model_id))
     return tuple(sorted(models, key=lambda model: (model.provider_id, model.model_id)))
+
+
+def _missing_requirements(
+    request: RuntimeLocationVerification, location: RuntimeLocationReadiness
+) -> str | None:
+    missing_agents = [name for name in request.agents if name not in location.agents]
+    if missing_agents:
+        return f"agents are not visible at the location: {', '.join(missing_agents)}"
+    available = {(model.provider_id, model.model_id) for model in location.models}
+    missing_models = [
+        f"{model.provider_id}/{model.model_id}"
+        for model in request.models
+        if (model.provider_id, model.model_id) not in available
+    ]
+    if missing_models:
+        return f"models are not visible at the location: {', '.join(missing_models)}"
+    missing_skills = [name for name in request.skills if name not in location.skills]
+    if missing_skills:
+        return f"skills are not visible at the location: {', '.join(missing_skills)}"
+    return None
+
+
+def _readiness(
+    location: RuntimeLocationReadiness,
+    *,
+    ready: bool = False,
+    detail: str | None = None,
+) -> RuntimeLocationReadiness:
+    return RuntimeLocationReadiness(
+        workspace_id=location.workspace_id,
+        ready=ready,
+        agents=location.agents,
+        models=location.models,
+        skills=location.skills,
+        detail=None if ready else detail,
+    )
+
+
+def _is_turn_started(workspace_id: str, raw: dict[str, Any]) -> bool:
+    envelope = _map_event(workspace_id, raw)
+    return envelope is not None and envelope.type is RuntimeEventType.TURN_STARTED

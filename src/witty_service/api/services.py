@@ -8,6 +8,11 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from witty_service.application.model_catalog_service import ModelCatalogService
+from witty_service.application.workspace_projection import (
+    CatalogCredentialResolver,
+    WorkspaceProjectionSource,
+    WorkspaceProjectionStore,
+)
 from witty_service.bootstrap import build_workspace_runtime_manager
 from witty_service.config import get_settings
 from witty_service.persistence.consistency import verify_structure
@@ -91,18 +96,27 @@ def build_default_services() -> ServiceContainer:
     verify_structure(engine)
     sandbox = create_sandbox_backend("local_process")
     catalog_repository = CatalogRepository(session_factory)
+    agents = AgentRepository(session_factory)
+    workspaces = WorkspaceRepository(session_factory)
+    credential_store = ModelCredentialStore(settings.model.credentials_dir)
     return ServiceContainer(
         engine=engine,
         session_factory=session_factory,
         catalog_repository=catalog_repository,
         workspace_store=LocalWorkspaceStore(workspace_root),
-        agents=AgentRepository(session_factory),
-        workspaces=WorkspaceRepository(session_factory),
+        agents=agents,
+        workspaces=workspaces,
         sessions=SessionRepository(session_factory),
-        runtime_manager=build_workspace_runtime_manager(sandbox=sandbox),
-        model_catalog=ModelCatalogService(
-            catalog_repository,
-            ModelCredentialStore(settings.model.credentials_dir),
+        runtime_manager=build_workspace_runtime_manager(
+            sandbox=sandbox,
+            projection_source=WorkspaceProjectionSource(
+                agents=agents, catalog=catalog_repository
+            ),
+            projection_store=WorkspaceProjectionStore(workspaces),
+            credential_resolver=CatalogCredentialResolver(
+                catalog=catalog_repository, store=credential_store
+            ),
         ),
+        model_catalog=ModelCatalogService(catalog_repository, credential_store),
         sandbox_backends={"local_process": sandbox},
     )
