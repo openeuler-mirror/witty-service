@@ -25,3 +25,16 @@
 - 本地进程启动后 opencode 需要数秒才 healthy，adapter `connect` 改成有界轮询（默认 30s，仍以 `/api/health` 为唯一判据）；超时、取消或异常都会关闭 client，`start` 阶段被取消则先等待沙箱返回句柄再清理，避免遗留进程。
 - 偏差：Runtime Home 目录预创建在组合根完成，R06 发布配置内容时仍由 sandbox 原子写入，届时再统一下沉；legacy `workspace_paths.py` 与 `opencode_lifecycle_service` 保留给旧链路，U09 再删；Docker 的 Runtime Home 挂载与容器内路径映射留到 R10，本阶段只保证 `SandboxBackend.start(env=..., replace_env=...)` 契约对两种 backend 一致。
 - `resolve_workspace_path`/`workspace_relative_path` 已提供产物相对路径转换与 `..`、符号链接逃逸校验，实际调用点在 R04/R07。
+
+## R04 v2 client/adapter 垂直链路
+
+- `prompt` 的 200 只表示 admission 被接受：`TurnAdmission` 只携带 `admittedSeq/delivery`，执行开始仍以事件流里的 `step.started` 为准；真实探针 `tests/probes/test_opencode_v2_seam.py` 按此断言。
+- agent/model 在 admission 前用 location catalog 校验，并按会话当前值按需切换；无效 model 在 v2 会静默停住，不能等 OpenCode 报错。
+- 真实 `/api/event` 的 `session.next.text.delta` 是 ephemeral（`durable: null`），durable 历史不保留 delta。因此 `RuntimeEventEnvelope.durable_seq` 改为 `int | None`：delta 为 `None`，不参与重放与按 seq 去重；逐字增量只能来自 `subscribe`，`replay_events` 只返回 durable 事件。
+- 非 delta 事件若缺少 `durable.seq` 直接丢弃，避免产生不可重放、不可去重的“伪 durable”事件；`session.idle`/`session.error` 属于通知类事件，允许没有 seq，按实时事件转发但不参与重放。
+- 1.17.13 的 `text.ended` 不携带 `finish`（`finish` 只在 `step.ended`），因此实时 `message.completed` 的 `finish` 恒为 `None`；回合成败以 `step.ended`/`step.failed` 表达，历史消息的 `finish` 仍取自 message 投影。
+- `/history` 与 `/message` 的 `limit` 上限为 100，client 统一 clamp；`history` 的 `after` 是 durable seq，非法值返回 400。
+- 历史 cursor 由 v2 的不透明 token 包装成 `<session_id>:<token>`：解码时校验会话身份，避免跨会话游标互换；`cursor` 原样透传，不解析其内部结构。
+- 历史投影只保留 `user`/`assistant`/`agent-switched`/`model-switched`，`system` 等消息直接过滤；assistant 只映射 text/reasoning part，tool/file part 留待产物链路接入时再补。
+- 本阶段 prompt 只接受文本 part，遇到 file part 显式返回 400；文件输入在 C04/R05 的产物链路里另行设计。
+- `interrupt_session`/`revert`/`delete_session`/`inspect_session` 仍返回 501，按任务计划留到 T08 扩展操作时实现，不在 R04 扩大范围。

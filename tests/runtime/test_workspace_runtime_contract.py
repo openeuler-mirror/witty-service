@@ -167,6 +167,7 @@ def test_admission_does_not_imply_started() -> None:
 
 def test_event_envelope_uses_durable_seq_for_replay() -> None:
     assert _event(durable_seq=3).durable_seq == 3
+    assert _event(durable_seq=None).durable_seq is None
     assert contracts.RuntimeEventType.TURN_STARTED.value == "turn.started"
     with pytest.raises(RuntimeContractValidationError):
         _event(durable_seq=-1)

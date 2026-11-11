@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
 _JSON_TYPES = {"application/json", "application/problem+json"}
+_MAX_PAGE_LIMIT = 100
 
 
 class OpenCodeV2Error(Exception):
@@ -42,7 +45,11 @@ class OpenCodeV2Client:
         return body.get("healthy") is True
 
     async def create_session(
-        self, *, directory: str, agent: str | None = None, model: str | None = None
+        self,
+        *,
+        directory: str,
+        agent: str | None = None,
+        model: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"location": {"directory": directory}}
         if agent is not None:
@@ -51,6 +58,83 @@ class OpenCodeV2Client:
             payload["model"] = model
         body = await self._post_json("/api/session", json=payload)
         return _data_object(body)
+
+    async def prompt(
+        self,
+        session_id: str,
+        *,
+        message_id: str,
+        text: str,
+        resume: bool | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"id": message_id, "prompt": {"text": text}}
+        if resume is not None:
+            payload["resume"] = resume
+        body = await self._post_json(f"/api/session/{session_id}/prompt", json=payload)
+        return _data_object(body)
+
+    async def switch_agent(self, session_id: str, *, agent: str) -> None:
+        await self._post_no_content(
+            f"/api/session/{session_id}/agent", json={"agent": agent}
+        )
+
+    async def switch_model(self, session_id: str, *, model: dict[str, str]) -> None:
+        await self._post_no_content(
+            f"/api/session/{session_id}/model", json={"model": model}
+        )
+
+    async def history(
+        self, session_id: str, *, after_seq: int, limit: int
+    ) -> tuple[list[dict[str, Any]], bool]:
+        body = await self._get_json(
+            f"/api/session/{session_id}/history",
+            params={
+                "after": str(after_seq),
+                "limit": str(max(1, min(limit, _MAX_PAGE_LIMIT))),
+            },
+        )
+        return _data_list(body, "/api/session/history"), body.get("hasMore") is True
+
+    async def messages(
+        self, session_id: str, *, limit: int, cursor: str | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        params: dict[str, str] = {"limit": str(max(1, min(limit, _MAX_PAGE_LIMIT)))}
+        if cursor is not None:
+            params["cursor"] = cursor
+        body = await self._get_json(f"/api/session/{session_id}/message", params=params)
+        cursors = body.get("cursor")
+        return _data_list(body, "/api/session/message"), {
+            key: value
+            for key, value in (cursors.items() if isinstance(cursors, dict) else ())
+            if isinstance(value, str) and value
+        }
+
+    async def stream_events(
+        self, *, after_seq: int | None = None
+    ) -> AsyncIterator[dict[str, Any]]:
+        params = {"after": str(after_seq)} if after_seq is not None else None
+        async with self._http.stream(
+            "GET", "/api/event", params=params, timeout=httpx.Timeout(5.0, read=None)
+        ) as response:
+            if response.status_code >= 400:
+                await response.aread()
+                raise OpenCodeV2Error(
+                    status_code=response.status_code,
+                    tag=None,
+                    message="event stream was rejected",
+                )
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                chunk = line[len("data:") :].strip()
+                if not chunk:
+                    continue
+                try:
+                    payload = json.loads(chunk)
+                except ValueError:
+                    continue
+                if isinstance(payload, dict):
+                    yield payload
 
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
         try:
@@ -79,14 +163,7 @@ class OpenCodeV2Client:
         self, path: str, *, directory: str
     ) -> list[dict[str, Any]]:
         body = await self._get_json(path, params={"location[directory]": directory})
-        data = body.get("data")
-        if not isinstance(data, list):
-            raise OpenCodeV2Error(
-                status_code=502,
-                tag=None,
-                message=f"{path} returned an invalid data payload",
-            )
-        return [item for item in data if isinstance(item, dict)]
+        return _data_list(body, path)
 
     async def _get_json(
         self, path: str, *, params: dict[str, str] | None = None
@@ -99,6 +176,13 @@ class OpenCodeV2Client:
     ) -> dict[str, Any]:
         response = await self._http.post(path, json=json)
         return _decode_json(response)
+
+    async def _post_no_content(
+        self, path: str, *, json: dict[str, Any] | None = None
+    ) -> None:
+        response = await self._http.post(path, json=json)
+        if response.status_code >= 400:
+            _decode_json(response)
 
 
 def _decode_json(response: httpx.Response) -> dict[str, Any]:
@@ -140,6 +224,17 @@ def _data_object(body: dict[str, Any]) -> dict[str, Any]:
             status_code=502, tag=None, message="response did not contain a data object"
         )
     return data
+
+
+def _data_list(body: dict[str, Any], path: str) -> list[dict[str, Any]]:
+    data = body.get("data")
+    if not isinstance(data, list):
+        raise OpenCodeV2Error(
+            status_code=502,
+            tag=None,
+            message=f"{path} returned an invalid data payload",
+        )
+    return [item for item in data if isinstance(item, dict)]
 
 
 def _optional_text(value: object) -> str | None:
