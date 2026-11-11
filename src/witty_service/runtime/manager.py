@@ -86,6 +86,14 @@ _CLOSING_RESYNC_REASONS = frozenset(
     }
 )
 _EVENT_BUFFER_SIZE = 256
+_IN_FLIGHT_PUBLICATIONS = frozenset(
+    {
+        PublicationPhase.PUBLISHING,
+        PublicationPhase.DRAINING,
+        PublicationPhase.RESTARTING,
+        PublicationPhase.VERIFYING,
+    }
+)
 
 
 class RuntimePhase(StrEnum):
@@ -95,6 +103,35 @@ class RuntimePhase(StrEnum):
     UNHEALTHY = "unhealthy"
     STOPPING = "stopping"
     ERROR = "error"
+
+
+class RuntimeStatus(StrEnum):
+    """对外 ``runtime_status``；只有 ``ready`` 允许读 Runtime 历史与产物。"""
+
+    STOPPED = "stopped"
+    STARTING = "starting"
+    READY = "ready"
+    RESTARTING = "restarting"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceAvailability:
+    workspace_id: str
+    status: RuntimeStatus
+    detail: str | None = None
+
+    @property
+    def ready(self) -> bool:
+        return self.status is RuntimeStatus.READY
+
+
+_STATUS_DETAILS = {
+    RuntimeStatus.STARTING: "workspace runtime is starting",
+    RuntimeStatus.RESTARTING: "workspace runtime is restarting",
+    RuntimeStatus.STOPPED: "workspace runtime is stopped",
+    RuntimeStatus.UNAVAILABLE: "workspace runtime is unavailable",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +303,39 @@ class WorkspaceRuntimeManager:
                 workspace_id=workspace_id, phase=PublicationPhase.IDLE
             )
         return entry.publication_state()
+
+    def availability(self, workspace_id: str) -> WorkspaceAvailability:
+        """纯内存读模型：不探测进程、不 await，可安全用于列表标注。
+
+        崩溃后到下一次对账（``lifecycle_interval``）之前仍可能返回 ``ready``；
+        ``detail`` 只给固定非密原因，底层错误留在 ``get_state().last_error``。
+        """
+        entry = self._entries.get(workspace_id)
+        if entry is None:
+            return WorkspaceAvailability(
+                workspace_id=workspace_id,
+                status=RuntimeStatus.STOPPED,
+                detail=_STATUS_DETAILS[RuntimeStatus.STOPPED],
+            )
+        status = _status_of(entry)
+        return WorkspaceAvailability(
+            workspace_id=workspace_id,
+            status=status,
+            detail=_STATUS_DETAILS.get(status),
+        )
+
+    def require_ready(self, workspace_id: str) -> WorkspaceAvailability:
+        """Runtime 读入口的最后一道门禁：先完成 400/404/409 校验再调用。
+
+        仅用于确已有 ``runtime_session_id`` 的历史与产物读取；未建立 Runtime
+        Session 的会话不应因为 Runtime 未启动而被判为不可用。
+        """
+        availability = self.availability(workspace_id)
+        if not availability.ready:
+            raise RuntimeUnavailableError(
+                workspace_id=workspace_id, detail=availability.detail
+            )
+        return availability
 
     async def acquire_turn_permit(
         self,
@@ -1086,3 +1156,15 @@ def _error_text(exc: BaseException) -> str:
 
 def _has_exited(status: SandboxStatus) -> bool:
     return status is SandboxStatus.stopped or status is SandboxStatus.error
+
+
+def _status_of(entry: _ManagedWorkspace) -> RuntimeStatus:
+    if entry.phase is RuntimePhase.UNHEALTHY or entry.phase is RuntimePhase.ERROR:
+        return RuntimeStatus.UNAVAILABLE
+    if entry.publish_task is not None or entry.publication in _IN_FLIGHT_PUBLICATIONS:
+        return RuntimeStatus.RESTARTING
+    if entry.phase is RuntimePhase.STARTING:
+        return RuntimeStatus.STARTING
+    if entry.phase is RuntimePhase.HEALTHY:
+        return RuntimeStatus.READY
+    return RuntimeStatus.STOPPED

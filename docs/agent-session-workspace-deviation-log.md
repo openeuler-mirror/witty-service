@@ -73,3 +73,12 @@
 - 空闲停止在 `permit_lock` 内二次确认后置 `stopping`，再停链、断连、`sandbox.cleanup`；停止完成置 `stopped` 并向订阅者发 `runtime_stopped` 关闭流，因此重复对账无副作用、端口立即释放、下一次 `ensure_started` 复用 `preferred_port`。
 - 停止失败置 `error` 并保留句柄，下一轮对账直接重试回收（幂等），不会因一次沙箱抖动永久泄漏进程与端口。
 - 空闲超时默认 900s、对账间隔默认 30s，均为构造参数；配置化空闲策略属 I04，本阶段不引入设置项。
+
+## R09 健康、故障隔离与可用性读模型
+
+- `runtime_status` 读模型由 Manager 独占：`RuntimeStatus`（stopped/starting/ready/restarting/unavailable）是 `RuntimePhase` 与 `PublicationPhase` 的投影，`availability()` 同步、纯内存、不探测进程，可被纯 DB 列表逐条调用；明细错误只留在 `get_state().last_error`，对外 `detail` 是固定非密文案，避免绝对路径、命令行或上游错误文本外泄。
+- 映射优先级：`unhealthy`/`error` → unavailable；发布在飞（`publish_task` 或 publishing/draining/restarting/verifying）→ restarting，即使此时进程正处于 stopping/starting 也对外统一显示 restarting；`starting` → starting；`healthy` → ready；其余（含显式停止中的 stopping）→ stopped。发布 `failed` 不算在飞，仍为 ready，历史可读。
+- 崩溃发现依赖 R08 对账，`availability()` 不阻塞探测，因此在下次对账（默认 30s）前可能仍报 ready；这是纯内存读模型的已知滞后，读请求失败会由 Port 侧返回 503 兜底。
+- `require_ready()` 是 Runtime 读入口的最后一道门禁：400/404/409 校验完成后调用，非 ready 抛 `RuntimeUnavailableError`（503 / `RUNTIME_UNAVAILABLE`），错误优先级沿用 `api.errors.ERROR_PRIORITY` 的 400→404→409→503，不新增错误码。
+- 该门禁只适用于确已有 `runtime_session_id` 的历史与产物读取；未建立 Runtime Session 的会话应返回空历史，不因 Runtime 未启动被判 503（由 B 线在调用门禁前判定）。
+- 单 Workspace 故障不扩散：`availability()` 只做单键内存读取、未知 Workspace 返回 stopped，不抛异常；故障 Workspace 的 unavailable 不影响其他 Workspace 的 ready 判定，纯 DB 列表可照常返回。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator, Callable, Mapping
 
 import pytest
@@ -15,9 +16,14 @@ from witty_service.runtime.contracts import (
     RuntimeLocationVerification,
     RuntimeWorkspace,
 )
+from witty_service.runtime.errors import (
+    RuntimePublishUnavailableError,
+    RuntimeUnavailableError,
+)
 from witty_service.runtime.events import RuntimeResyncReason, RuntimeResyncRequired
 from witty_service.runtime.manager import (
     RuntimePhase,
+    RuntimeStatus,
     WorkspaceRuntimeManager,
     WorkspaceRuntimeSpec,
 )
@@ -52,6 +58,7 @@ class FakePort:
     def __init__(self) -> None:
         self.streams: dict[str, list[asyncio.Queue[RuntimeEventEnvelope]]] = {}
         self.verify_gate: asyncio.Event | None = None
+        self.verify_error: Exception | None = None
 
     async def connect(self, connection: RuntimeConnection) -> RuntimeHealth:
         return RuntimeHealth(workspace_id=connection.workspace.workspace_id, ready=True)
@@ -82,6 +89,8 @@ class FakePort:
     async def verify_location(
         self, request: RuntimeLocationVerification
     ) -> RuntimeLocationReadiness:
+        if self.verify_error is not None:
+            raise self.verify_error
         if self.verify_gate is not None:
             await self.verify_gate.wait()
         return RuntimeLocationReadiness(
@@ -102,6 +111,9 @@ class FakeSandbox(SandboxBackend):
         self.starts: list[str] = []
         self.cleanups: list[str] = []
         self.cleanup_failures = 0
+        self.status_calls = 0
+        self.start_gate: threading.Event | None = None
+        self.cleanup_gate: threading.Event | None = None
 
     def start(
         self,
@@ -115,6 +127,8 @@ class FakeSandbox(SandboxBackend):
         port = kwargs.get("port")
         if not isinstance(port, int):
             raise AssertionError("runtime spec must pin a preferred port")
+        if self.start_gate is not None:
+            self.start_gate.wait(timeout=2)
         if port in self.ports.values():
             raise AssertionError(f"port {port} is already taken")
         self.starts.append(workspace_id)
@@ -131,6 +145,7 @@ class FakeSandbox(SandboxBackend):
         self.cleanup(handle)
 
     def status(self, handle: SandboxHandle | str, **kwargs: object) -> SandboxStatus:
+        self.status_calls += 1
         if _workspace_id(handle) in self.running:
             return SandboxStatus.running
         return SandboxStatus.stopped
@@ -142,6 +157,8 @@ class FakeSandbox(SandboxBackend):
         return AdapterEndpoint(base_url=str(handle.metadata["base_url"]))
 
     def cleanup(self, handle: SandboxHandle | str, **kwargs: object) -> None:
+        if self.cleanup_gate is not None:
+            self.cleanup_gate.wait(timeout=2)
         if self.cleanup_failures:
             self.cleanup_failures -= 1
             raise RuntimeError("cleanup failed")
@@ -421,4 +438,119 @@ async def test_failed_idle_stop_is_retried_on_next_reconcile() -> None:
     await harness.manager.reconcile()
     assert harness.manager.get_state("ws_a").phase is RuntimePhase.STOPPED
     assert harness.sandbox.ports == {}
+    await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_availability_reads_memory_and_isolates_workspaces() -> None:
+    harness = Harness()
+    await harness.manager.ensure_started(_spec("ws_a", 4100))
+    await harness.manager.ensure_started(_spec("ws_b", 4101))
+    assert harness.manager.availability("ws_a").status is RuntimeStatus.READY
+    assert harness.manager.availability("ws_a").ready
+
+    harness.sandbox.crash("ws_a")
+    assert harness.sandbox.status_calls == 0
+    assert harness.manager.availability("ws_a").status is RuntimeStatus.READY
+    assert harness.sandbox.status_calls == 0
+
+    await harness.manager.reconcile()
+    crashed = harness.manager.availability("ws_a")
+    assert crashed.status is RuntimeStatus.UNAVAILABLE
+    assert crashed.detail == "workspace runtime is unavailable"
+    assert "sandbox" not in crashed.detail
+    assert harness.manager.availability("ws_b").status is RuntimeStatus.READY
+
+    unknown = harness.manager.availability("ws_missing")
+    assert unknown.status is RuntimeStatus.STOPPED
+    assert not unknown.ready
+    await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_require_ready_gates_runtime_reads() -> None:
+    harness = Harness(idle_timeout=60.0)
+    spec = _spec("ws_a", 4100)
+    await harness.manager.ensure_started(spec)
+    assert harness.manager.require_ready("ws_a").status is RuntimeStatus.READY
+
+    harness.clock.advance(61)
+    await harness.manager.reconcile()
+    with pytest.raises(RuntimeUnavailableError) as excinfo:
+        harness.manager.require_ready("ws_a")
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.code == "RUNTIME_UNAVAILABLE"
+    await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_publishing_maps_to_restarting() -> None:
+    harness = Harness(published=False)
+    spec = _spec("ws_a", 4100)
+    harness.port.verify_gate = asyncio.Event()
+    permit_task = asyncio.create_task(
+        harness.manager.acquire_turn_permit(spec, turn_id="turn-1")
+    )
+    await _wait_until(
+        lambda: (
+            harness.manager.publication_state("ws_a").phase
+            is PublicationPhase.VERIFYING
+        )
+    )
+
+    assert harness.manager.availability("ws_a").status is RuntimeStatus.RESTARTING
+    with pytest.raises(RuntimeUnavailableError):
+        harness.manager.require_ready("ws_a")
+
+    assert harness.port.verify_gate is not None
+    harness.port.verify_gate.set()
+    permit = await asyncio.wait_for(permit_task, timeout=1)
+    await harness.manager.release_turn_permit(permit)
+    assert harness.manager.availability("ws_a").status is RuntimeStatus.READY
+    await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_availability_reports_starting_and_starting_is_not_ready() -> None:
+    harness = Harness()
+    harness.sandbox.start_gate = threading.Event()
+    task = asyncio.create_task(harness.manager.ensure_started(_spec("ws_a", 4100)))
+    await _wait_until(
+        lambda: harness.manager.availability("ws_a").status is RuntimeStatus.STARTING
+    )
+    with pytest.raises(RuntimeUnavailableError):
+        harness.manager.require_ready("ws_a")
+
+    harness.sandbox.start_gate.set()
+    await task
+    assert harness.manager.availability("ws_a").status is RuntimeStatus.READY
+    await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_stop_reports_stopped_not_restarting() -> None:
+    harness = Harness()
+    await harness.manager.ensure_started(_spec("ws_a", 4100))
+    harness.sandbox.cleanup_gate = threading.Event()
+    task = asyncio.create_task(harness.manager.stop("ws_a"))
+    await _wait_until(
+        lambda: harness.manager.get_state("ws_a").phase is RuntimePhase.STOPPING
+    )
+    assert harness.manager.availability("ws_a").status is RuntimeStatus.STOPPED
+
+    harness.sandbox.cleanup_gate.set()
+    await task
+    assert harness.manager.availability("ws_a").status is RuntimeStatus.STOPPED
+    await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_publish_keeps_runtime_readable() -> None:
+    harness = Harness(published=False)
+    harness.port.verify_error = RuntimeError("location verification failed")
+    with pytest.raises(RuntimePublishUnavailableError):
+        await harness.manager.acquire_turn_permit(_spec("ws_a", 4100), turn_id="turn-1")
+
+    assert harness.manager.publication_state("ws_a").phase is PublicationPhase.FAILED
+    assert harness.manager.availability("ws_a").status is RuntimeStatus.READY
     await harness.close()
