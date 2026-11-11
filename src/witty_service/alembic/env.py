@@ -3,10 +3,10 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, event, pool
 
 from witty_service.config import get_settings
-from witty_service.persistence.orm import Base
+from witty_service.persistence.entities import Base
 
 config = context.config
 
@@ -36,6 +36,15 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _run_migrations(connection) -> None:
+    context.configure(connection=connection, target_metadata=target_metadata)
+    with context.begin_transaction():
+        context.run_migrations()
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"foreign key violations after migration: {violations}")
+
+
 def run_migrations_online() -> None:
     """在线模式执行迁移。
 
@@ -44,24 +53,23 @@ def run_migrations_online() -> None:
     """
     connectable = config.attributes.get("connection")
     if connectable is not None:
-        # 程序化调用：直接复用传入的连接
-        context.configure(
-            connection=connectable,
-            target_metadata=target_metadata,
-        )
-        with context.begin_transaction():
-            context.run_migrations()
-    else:
-        # CLI 调用：从配置文件创建引擎
-        connectable = engine_from_config(
-            config.get_section(config.config_ini_section, {}),
-            prefix="sqlalchemy.",
-            poolclass=pool.NullPool,
-        )
-        with connectable.connect() as connection:
-            context.configure(connection=connection, target_metadata=target_metadata)
-            with context.begin_transaction():
-                context.run_migrations()
+        _run_migrations(connectable)
+        return
+
+    connectable = engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+
+    @event.listens_for(connectable, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    with connectable.connect() as connection:
+        _run_migrations(connection)
 
 
 if context.is_offline_mode():
