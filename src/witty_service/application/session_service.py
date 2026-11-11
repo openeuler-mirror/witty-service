@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from witty_service.application.pagination import decode_cursor, encode_cursor
 from witty_service.domain.enums import SessionOrigin
@@ -11,6 +12,7 @@ from witty_service.domain.records import (
     ModelRecord,
     SessionRecord,
     TurnRecord,
+    WorkspaceRecord,
 )
 from witty_service.persistence.entities.base import utc_ms_now
 from witty_service.persistence.repository.agent import AgentRepository
@@ -46,7 +48,7 @@ class SessionService:
         agents: AgentRepository,
         catalog: CatalogRepository,
         runtime_manager: WorkspaceRuntimeManager,
-        clock=utc_ms_now,
+        clock: Callable[[], int] = utc_ms_now,
     ) -> None:
         self._sessions = sessions
         self._workspaces = workspaces
@@ -67,14 +69,13 @@ class SessionService:
         agent = self._load_agent(
             agent_id if agent_id is not None else workspace.default_agent_id
         )
-        explicit_model = model_id is not None
-        model = (
-            self._catalog.get_model(model_id if explicit_model else workspace.default_model_id)
-            if (explicit_model or workspace.default_model_id is not None)
-            else None
-        )
-        if explicit_model and model is None:
-            raise _model_not_found(model_id)
+        model = None
+        if model_id is not None:
+            model = self._catalog.get_model(model_id)
+            if model is None:
+                raise _model_not_found(model_id)
+        elif workspace.default_model_id is not None:
+            model = self._catalog.get_model(workspace.default_model_id)
         if agent.archived_at is not None:
             raise DomainError(
                 code=ErrorCode.AGENT_ARCHIVED,
@@ -82,7 +83,7 @@ class SessionService:
                 status_code=409,
                 details={"agent_id": agent.id},
             )
-        if explicit_model and model is not None and not model.enabled:
+        if model_id is not None and model is not None and not model.enabled:
             raise DomainError(
                 code=ErrorCode.MODEL_DISABLED,
                 message="Model is disabled.",
@@ -230,7 +231,7 @@ class SessionService:
             runtime_status=_runtime_status(self._runtime_manager, session.workspace_id),
         )
 
-    def _require_workspace(self, workspace_id: str):
+    def _require_workspace(self, workspace_id: str) -> WorkspaceRecord:
         workspace = self._workspaces.get(workspace_id)
         if workspace is None:
             raise DomainError(

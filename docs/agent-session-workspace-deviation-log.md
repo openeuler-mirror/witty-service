@@ -82,3 +82,12 @@
 - `require_ready()` 是 Runtime 读入口的最后一道门禁：400/404/409 校验完成后调用，非 ready 抛 `RuntimeUnavailableError`（503 / `RUNTIME_UNAVAILABLE`），错误优先级沿用 `api.errors.ERROR_PRIORITY` 的 400→404→409→503，不新增错误码。
 - 该门禁只适用于确已有 `runtime_session_id` 的历史与产物读取；未建立 Runtime Session 的会话应返回空历史，不因 Runtime 未启动被判 503（由 B 线在调用门禁前判定）。
 - 单 Workspace 故障不扩散：`availability()` 只做单键内存读取、未知 Workspace 返回 stopped，不抛异常；故障 Workspace 的 unavailable 不影响其他 Workspace 的 ready 判定，纯 DB 列表可照常返回。
+
+## T01～T04 Session 与 Turn 准入
+
+- T01 只建立 Session 行（`runtime_session_id=NULL`），不启动 Runtime Server；列表/详情从 Manager 的 `availability()` 读取权威 `RuntimeStatus`，与 R09 保持单一来源，不再自行由 `RuntimePhase` 映射（发布在飞显示 `restarting`）。
+- Session 列表游标绑定 Workspace 身份，Turn 列表游标绑定 Session 身份；非法或跨作用域游标统一 400，分页键使用 `(pinned,last_activity_at,id)` 与 `turn_seq`，不解析 v2 游标。
+- T02 的选择更新只写 `current_agent_id/current_model_id`，仓库层按非空列部分更新；不触碰 `runtime_session_id`、历史 Turn 快照，也不启动 Runtime。
+- T03 保留唯一准入路径 `SessionRepository.start_turn`：Session 当前选择在插入事务内重新读取并校验，调用方传值不一致时拒绝，避免 TOCTOU 归因；seq 分配与 running 插入同事务，冲突映射 409 `ACTIVE_TURN_CONFLICT`。
+- T04 归因快照在准入事务内写入，历史只读 Turn 快照；未用快照重建执行环境。Turn 列表按 `turn_seq` 倒序分页。
+- R06/R07 已合入本分支；T05 起经 Manager 的 `acquire_turn_permit/release_turn_permit/bind_turn_runtime_session`、单条事件链与历史门面接入，不以 Fake 放行。R09 的 `runtime_status` 与 503 `RUNTIME_UNAVAILABLE` 在 T07 接入时校验。

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import Response
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
 def _service(request: Request) -> SessionService:
-    return request.app.state.services.session_service
+    return cast(SessionService, request.app.state.services.session_service)
 
 
 Service = Annotated[SessionService, Depends(_service)]

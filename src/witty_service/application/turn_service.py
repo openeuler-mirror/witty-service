@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from sqlalchemy.exc import IntegrityError
 
@@ -40,7 +41,7 @@ class TurnService:
         sessions: SessionRepository,
         agents: AgentRepository,
         catalog: CatalogRepository,
-        clock=utc_ms_now,
+        clock: Callable[[], int] = utc_ms_now,
     ) -> None:
         self._sessions = sessions
         self._agents = agents

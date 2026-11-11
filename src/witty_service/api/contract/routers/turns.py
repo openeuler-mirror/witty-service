@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, Query, Request, status
 
@@ -19,7 +19,7 @@ router = APIRouter(tags=["turns"])
 
 
 def _service(request: Request) -> TurnService:
-    return request.app.state.services.turn_service
+    return cast(TurnService, request.app.state.services.turn_service)
 
 
 Service = Annotated[TurnService, Depends(_service)]
