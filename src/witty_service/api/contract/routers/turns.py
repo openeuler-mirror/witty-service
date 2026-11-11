@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query, Request, status
 from witty_service.api.contract.dto.turn import (
     AbortTurnResponse,
     CreateTurnRequest,
+    TextInputPart,
     TurnListResponse,
     TurnResponse,
 )
@@ -14,6 +15,11 @@ from witty_service.api.contract.presenters import turn_response
 from witty_service.api.contract.routers._stub import not_implemented
 from witty_service.api.errors import error_responses
 from witty_service.application.turn_service import TurnService
+from witty_service.runtime.contracts import (
+    RuntimeFilePart,
+    RuntimeInputPart,
+    RuntimeTextPart,
+)
 
 router = APIRouter(tags=["turns"])
 
@@ -31,8 +37,23 @@ Service = Annotated[TurnService, Depends(_service)]
     status_code=status.HTTP_201_CREATED,
     responses=error_responses(400, 404, 409, 503),
 )
-def create_turn(session_id: str, payload: CreateTurnRequest) -> TurnResponse:
-    not_implemented()
+async def create_turn(
+    session_id: str, payload: CreateTurnRequest, service: Service
+) -> TurnResponse:
+    parts: list[RuntimeInputPart] = []
+    for part in payload.parts:
+        if isinstance(part, TextInputPart):
+            parts.append(RuntimeTextPart(text=part.text))
+        else:
+            parts.append(
+                RuntimeFilePart(
+                    relative_path=part.relative_path,
+                    mime=part.mime,
+                    filename=part.filename,
+                )
+            )
+    turn = await service.execute_turn(session_id, parts=tuple(parts))
+    return turn_response(turn)
 
 
 @router.get(

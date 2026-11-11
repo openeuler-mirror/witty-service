@@ -91,3 +91,15 @@
 - T03 保留唯一准入路径 `SessionRepository.start_turn`：Session 当前选择在插入事务内重新读取并校验，调用方传值不一致时拒绝，避免 TOCTOU 归因；seq 分配与 running 插入同事务，冲突映射 409 `ACTIVE_TURN_CONFLICT`。
 - T04 归因快照在准入事务内写入，历史只读 Turn 快照；未用快照重建执行环境。Turn 列表按 `turn_seq` 倒序分页。
 - R06/R07 已合入本分支；T05 起经 Manager 的 `acquire_turn_permit/release_turn_permit/bind_turn_runtime_session`、单条事件链与历史门面接入，不以 Fake 放行。R09 的 `runtime_status` 与 503 `RUNTIME_UNAVAILABLE` 在 T07 接入时校验。
+
+## T05 Turn 执行管线
+
+- A 线 R04/R06/R07 的 `WorkspaceRuntimeManager` 只暴露 Permit/事件订阅，未暴露 `ensure_session/admit_turn` 公共门面；T05 在 Manager 补齐 `ensure_runtime_session` 与 `admit_turn` 两个纯委托方法（不写 adapter/sandbox/projection/publication/事件链），否则 Turn Service 只能绕过 Manager 直连 Port。
+- 固定顺序：短事务读取并校验 Session 当前选择 → `ensure_started` → `acquire_turn_permit`（发布与 location 就绪在此门禁，失败不插 running）→ 最终短事务 `start_turn` 复核并插 running → `ensure_runtime_session` 并持久化 Runtime Session ID → `bind_turn_runtime_session` → `admit_turn`。`admit_turn` 的 200 只表示 accepted，Turn 保持 running，不把 admitted 当 started。
+- Permit 在失败/取消出口 `finally` 释放；成功准入后 Permit 由 Turn 事件泵在终态事件到达时释放，覆盖整个在飞回合，避免 R06 发布把仍在执行的 Turn 当成已排空。
+- 每个 Workspace 一条内部事件泵（复用 Manager 单条事件链，不新增 SSE）；只处理 `turn.completed`/`turn.failed`/`session.error` 写终态并释放 Permit，其它事件留给 T06/T07。事件到达时若 Turn 已是终态，`finish_turn` 的条件更新不会复活它。
+- 事件泵用 ready 事件保证队列注册完成后才准入；`runtime_restarted`/`runtime_exited`/`subscriber_lagged`/`runtime_stopped` 说明事件可能已丢或 Runtime 已退出，先把该 Workspace 仍持有 Permit 的 Turn 落 `interrupted` 并释放 Permit，不再假装仍在 running；`runtime_exited` 与 `runtime_stopped` 后直接结束事件泵，`runtime_restarted`/`subscriber_lagged` 仅在 Runtime healthy 时重订阅，避免对已停止的 Runtime 空转。
+- admission 失败发生在 running 插入之后时，Turn 立即落 `error`（错误码取 DomainError，否则 `INTERNAL_ERROR`），再释放 Permit；Runtime Session 持久化失败同样落 `error` 且不写 Runtime Session ID。
+- 文本 Parts 由 API DTO 转成 Runtime Parts；文件 Parts 在 T05 不支持，在拉起 Runtime 与插入 running 之前直接 400，避免留下 error Turn 与消耗 `turn_seq`。`message_id` 固定为 `msg_<turn_id>`，同一 Turn 重试保持稳定。
+- Runtime Session 每回合都经 `ensure_runtime_session` 复核并覆盖为返回的 ID，兼容 Runtime 重启后旧 ID 失效；单 Session 唯一 running Turn 保证并发覆盖不会发生。
+- 新增 `TurnService.close()`：先置 closing 标志让在途请求在下一个 await 后退出，再取消事件泵，把仍持有 Permit 的 running Turn 落 `interrupted` 并逐个隔离释放 Permit，最后关闭 Manager。

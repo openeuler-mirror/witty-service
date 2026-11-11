@@ -73,11 +73,6 @@ def test_generated_contract_is_valid_openapi(spec: dict[str, Any]) -> None:
         ("GET", "/api/workspaces/ws_01", None),
         ("PATCH", "/api/workspaces/ws_01", {"name": "renamed"}),
         ("DELETE", "/api/sessions/ses_01", None),
-        (
-            "POST",
-            "/api/sessions/ses_01/turns",
-            {"parts": [{"type": "text", "text": "hi"}]},
-        ),
         ("POST", "/api/sessions/ses_01/turns/trn_01/abort", None),
         ("POST", "/api/sessions/ses_01/turns/trn_01/regenerate", None),
         ("GET", "/api/sessions/ses_01/messages", None),
@@ -240,7 +235,8 @@ def test_workspace_paths_allow_colon_names_and_reject_empty(
         headers=auth,
     )
 
-    assert accepted.status_code == 501
+    assert accepted.status_code == 404
+    assert accepted.json()["error"]["code"] == "SESSION_NOT_FOUND"
     assert empty.status_code == 400
     error = empty.json()["error"]["details"]["errors"][0]
     assert error["field"] == "parts.0.file.relative_path"

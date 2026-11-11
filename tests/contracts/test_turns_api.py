@@ -11,6 +11,7 @@ from witty_service.api.services import build_default_services
 from witty_service.config import get_settings
 from witty_service.domain.enums import SessionOrigin, TurnStatus
 from witty_service.main import create_app
+from witty_service.runtime.contracts import RuntimeTextPart
 
 
 @pytest.fixture()
@@ -39,7 +40,14 @@ def _session(container, *, model_id: str | None) -> str:
     primary = container.agents.get_primary()
     assert workspace is not None and primary is not None
     return container.sessions.create(
-        workspace.id, primary.id, model_id, SessionOrigin.web, "Session", None, None, 1_000
+        workspace.id,
+        primary.id,
+        model_id,
+        SessionOrigin.web,
+        "Session",
+        None,
+        None,
+        1_000,
     ).id
 
 
@@ -47,6 +55,30 @@ def _model(container, name: str):
     return container.catalog_repository.create_model(
         name, "openai", f"model-{name}", None, None, None, 1024, 0.2, 1_000
     )
+
+
+def test_create_turn_maps_text_parts_into_pipeline(api, monkeypatch) -> None:
+    client, container = api
+    model = _model(container, "pipeline")
+    session_id = _session(container, model_id=model.id)
+    turn = container.turn_service.start_turn(session_id)
+    calls: list[tuple[str, tuple[RuntimeTextPart, ...]]] = []
+
+    async def execute_turn(session: str, *, parts: tuple[RuntimeTextPart, ...]):
+        calls.append((session, parts))
+        return turn
+
+    monkeypatch.setattr(container.turn_service, "execute_turn", execute_turn)
+
+    response = client.post(
+        f"/api/sessions/{session_id}/turns",
+        json={"parts": [{"type": "text", "text": "hello"}]},
+        headers=_auth(),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["id"] == turn.id
+    assert calls == [(session_id, (RuntimeTextPart(text="hello"),))]
 
 
 def test_turn_attribution_uses_admission_snapshots(api) -> None:
