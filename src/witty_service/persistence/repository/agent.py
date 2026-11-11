@@ -13,11 +13,12 @@ class AgentRepository(RepositoryBase):
         self,
         name: str,
         kind: AgentKind,
-        description: str,
-        system_prompt: str,
-        source_type: AgentSourceType,
-        source_ref: str | None,
         now: int,
+        *,
+        description: str = "",
+        system_prompt: str = "",
+        source_type: AgentSourceType = AgentSourceType.local,
+        source_ref: str | None = None,
     ) -> AgentDefinitionRecord:
         with self._transaction() as session:
             row = AgentDefinitionORM(

@@ -106,10 +106,11 @@ class CatalogRepository(RepositoryBase):
         self,
         repo_name: str,
         source_type: str,
-        branch: str | None,
-        url: str | None,
-        local_path: str | None,
         now: int,
+        *,
+        branch: str | None = None,
+        url: str | None = None,
+        local_path: str | None = None,
     ) -> SkillRepoRecord:
         with self._transaction() as session:
             row = SkillRepoORM(
