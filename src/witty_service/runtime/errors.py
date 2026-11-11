@@ -7,6 +7,18 @@ class RuntimeContractError(DomainError):
     """Runtime seam error with stable API mapping semantics."""
 
 
+class RuntimeContractValidationError(RuntimeContractError):
+    """seam DTO 字段不合法（400）；避免裸 ``ValueError`` 在 API 层退化为 500。"""
+
+    def __init__(self, *, field: str, reason: str) -> None:
+        super().__init__(
+            code="VALIDATION_ERROR",
+            message="runtime contract value is invalid",
+            status_code=400,
+            details={"field": field, "reason": reason},
+        )
+
+
 class InvalidHistoryCursorError(RuntimeContractError):
     def __init__(self, *, runtime_session_id: str) -> None:
         super().__init__(
@@ -37,13 +49,26 @@ class RuntimeUnavailableError(RuntimeContractError):
         )
 
 
-class RuntimeLeaseConflictError(RuntimeContractError):
-    def __init__(self, *, lease_id: str, reason: str) -> None:
+class RuntimeAdmissionConflictError(RuntimeContractError):
+    def __init__(self, *, runtime_session_id: str, message_id: str) -> None:
         super().__init__(
-            code="RUNTIME_LEASE_CONFLICT",
-            message=reason,
+            code="INVALID_TURN_OPERATION",
+            message="runtime rejected a conflicting prompt admission",
             status_code=409,
-            details={"lease_id": lease_id},
+            details={
+                "runtime_session_id": runtime_session_id,
+                "message_id": message_id,
+            },
+        )
+
+
+class RuntimePublishUnavailableError(RuntimeContractError):
+    def __init__(self, *, workspace_id: str, detail: str | None = None) -> None:
+        super().__init__(
+            code="CONFIG_PUBLISH_UNAVAILABLE",
+            message=detail or "runtime configuration publish is unavailable",
+            status_code=503,
+            details={"workspace_id": workspace_id},
         )
 
 
