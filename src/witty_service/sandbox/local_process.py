@@ -25,6 +25,8 @@ from witty_service.sandbox.base import (
 )
 from witty_service.sandbox.ports import find_free_port, port_is_bindable
 
+AGENT_SERVER_MARKER = "witty_agent_server.app:create_app"
+
 
 def read_proc_stat(pid: int, *, strict: bool = False) -> tuple[str, str, str] | None:
     """读取 ``/proc/<pid>/stat``，返回 ``(状态字符, 进程组 id, 启动时间)``。
@@ -138,11 +140,36 @@ class LocalProcessSandboxBackend(SandboxBackend):
         else:
             port = find_free_port()
         logger.info(f"[LocalProcessSandbox] Using port: {port}")
-        app_dir = self._resolve_agent_server_app_dir()
-        logger.info(f"[LocalProcessSandbox] Agent server app dir: {app_dir}")
-        command = self._build_command(port=port, app_dir=app_dir)
+        command_override = kwargs.get("command")
+        if command_override is not None:
+            app_dir: str | None = None
+            command = [str(part) for part in command_override]
+            if not command:
+                raise sandbox_start_failed(
+                    sandbox_type=self.sandbox_type,
+                    message="Local process sandbox command must not be empty.",
+                )
+            command = [
+                part.replace("{port}", str(port)).replace(
+                    "{workspace_path}", workspace_path
+                )
+                for part in command
+            ]
+        else:
+            app_dir = self._resolve_agent_server_app_dir()
+            logger.info(f"[LocalProcessSandbox] Agent server app dir: {app_dir}")
+            command = self._build_command(port=port, app_dir=app_dir)
+        process_marker = str(
+            kwargs.get("process_marker")
+            or (Path(command[0]).name if app_dir is None else AGENT_SERVER_MARKER)
+        )
         logger.info(f"[LocalProcessSandbox] Command: {' '.join(command)}")
-        stderr_log_path = self._build_stderr_log_path(workspace_path)
+        configured_log_path = kwargs.get("stderr_log_path")
+        stderr_log_path = (
+            Path(str(configured_log_path))
+            if configured_log_path is not None
+            else self._build_stderr_log_path(workspace_path)
+        )
         stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info(f"[LocalProcessSandbox] Stderr log path: {stderr_log_path}")
 
@@ -223,6 +250,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
                 "port": port,
                 "base_url": base_url,
                 "command": command,
+                "process_marker": process_marker,
                 "agent_server_app_dir": app_dir,
                 "stderr_log_path": str(stderr_log_path),
             },
@@ -380,7 +408,8 @@ class LocalProcessSandboxBackend(SandboxBackend):
         cmdline = read_proc_cmdline(pid)
         if not cmdline:
             return False
-        if "witty_agent_server.app:create_app" not in cmdline:
+        marker = str(metadata.get("process_marker") or AGENT_SERVER_MARKER)
+        if marker not in cmdline:
             return False
         port = metadata.get("port")
         return port is None or self._port_in_cmdline(cmdline, port)
