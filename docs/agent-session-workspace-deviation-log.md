@@ -38,3 +38,14 @@
 - 历史投影只保留 `user`/`assistant`/`agent-switched`/`model-switched`，`system` 等消息直接过滤；assistant 只映射 text/reasoning part，tool/file part 留待产物链路接入时再补。
 - 本阶段 prompt 只接受文本 part，遇到 file part 显式返回 400；文件输入在 C04/R05 的产物链路里另行设计。
 - `interrupt_session`/`revert`/`delete_session`/`inspect_session` 仍返回 501，按任务计划留到 T08 扩展操作时实现，不在 R04 扩大范围。
+
+## R06 Turn Permit 与唯一后台发布
+
+- 发布编排放在 Manager 内，投影渲染是注入的纯函数（`OpenCodeProjectionRenderer`），渲染结果的相对路径以 `XDG_CONFIG_HOME` 为根；凭据由 `RuntimeCredentialResolver` 在发布开始时解析，只写进 `opencode.json`，不进入投影与 hash。
+- Runtime Home 的写入统一走 `SandboxBackend.write_runtime_files`：逐文件临时写 + `os.replace` 原子替换，拒绝绝对路径、`..` 与逃逸 Runtime Home 的目标；Docker backend 暂不实现，发布失败即 503，留待 R10 对等改造。
+- `acquire_turn_permit` 先在 `permit_lock` 内确认“最新投影 hash 已发布”，再登记活动 Turn；发布任务在后台单飞，后到请求 join 同一 task。等待上限 10s 只约束请求本身，超时不取消后台任务、不插入 running Turn。
+- 发布期间新 Permit 被暂停（join 发布 task），发布先等 `drained` 事件排空活动 Turn 再写配置与重启；发布成功后重新读取投影，若期间又变更则当前请求 503，由下一 Turn 再触发，不自动连续重启。
+- 配置隔离检查不读宿主 `$HOME` 哨兵，改为强约束 `XDG_CONFIG_HOME == HOME/config` 且 HOME 指向 Runtime Home，配合 R03 的环境白名单与 `replace_env=True`；哨兵断言仍由 `test_runtime_home_isolation.py` 覆盖。
+- location 预热会创建真实 warm-up session 并提交一轮真实 prompt，等待 durable 历史中出现 `session.next.step.started`；OpenCode 1.17.13 要求 message id 以 `msg_` 开头，否则 prompt 直接 400。warm-up 会话当前无法删除（T08 才提供 delete），会残留在 Runtime data 中且产生一次真实模型调用。
+- 预热只执行投影中第一个 agent/model 的回合，其余 agent、model、skill 仅做 location 可见性核对，避免每次发布对所有组合发起真实调用。
+- 已发布 hash 的读取与保存由 `WorkspaceProjectionStore` 落在 Workspace 聚合（`published_projection_hash`），Manager 不 import persistence，也不新增配置版本表/`publish_id`/`config_generation`。

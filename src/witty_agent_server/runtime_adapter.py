@@ -177,7 +177,7 @@ class OpenCodeRuntimeAdapter:
         try:
             await client.prompt(
                 runtime_session_id,
-                message_id=f"warmup_{uuid4().hex}",
+                message_id=f"msg_warmup_{uuid4().hex}",
                 text="warm up",
             )
             while True:
