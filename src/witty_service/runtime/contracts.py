@@ -495,7 +495,7 @@ RUNTIME_EVENT_PAYLOAD_TYPES: dict[RuntimeEventType, type[_WireValue]] = {
 
 @dataclass(frozen=True, slots=True)
 class RuntimeEventEnvelope:
-    """``durable_seq`` 是重放与去重键；``event_id`` 只用于诊断。
+    """``durable_seq`` 是重放与去重键，ephemeral 增量事件为 ``None``；``event_id`` 只用于诊断。
 
     ``payload`` 必须是事件类型对应的规范化 DTO，adapter 不得透传上游原始 dict；
     Manager 通过 ``payload.to_dict()`` 生成 C03 事件载荷。
@@ -505,14 +505,15 @@ class RuntimeEventEnvelope:
     runtime_session_id: str
     event_id: str
     type: RuntimeEventType
-    durable_seq: int
+    durable_seq: int | None
     occurred_at: int
     payload: RuntimeEventPayload
     runtime_message_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_text_fields(self, "workspace_id", "runtime_session_id", "event_id")
-        _require_non_negative(self.durable_seq, "durable_seq")
+        if self.durable_seq is not None:
+            _require_non_negative(self.durable_seq, "durable_seq")
         _require_non_negative(self.occurred_at, "occurred_at")
         if self.runtime_message_id is not None:
             _require_text(self.runtime_message_id, "runtime_message_id")
@@ -550,7 +551,7 @@ class ReplayQuery:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeEventReplay:
-    """``events`` 按 ``durable_seq`` 升序返回。"""
+    """``events`` 只含 durable 事件，按 ``durable_seq`` 升序返回。"""
 
     events: tuple[RuntimeEventEnvelope, ...]
     has_more: bool
