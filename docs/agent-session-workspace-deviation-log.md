@@ -63,3 +63,13 @@
 - 背压：内部 pump 队列上限 256，订阅者队列上限 64。delta 满则丢；非 delta 最多等 5s，超时即发 `subscriber_lagged` 并关闭该订阅，保证慢消费不阻塞其它订阅者与健康探测，终态通过重同步兜底而不是静默丢失。
 - 链重建的固定重连间隔为 0.5s，且运行时非 healthy 时不再重试，等下一次显式启动重建，避免 runtime 已退出时形成重连风暴。
 - 已知边界：`session_seq` 不按空闲 Session 淘汰（每个会话仅一个整数，重连时会对每个已见 Session 发一次 history）；活动 Turn 释放后其 Session 的断连重放仍会覆盖，但已无 UI 消费方，最终以 `event_stream_interrupted` 重同步为准。
+
+## R08 空闲停止与进程生命周期对账
+
+- 生命周期对账只有一条链路：`reconcile()` 遍历所有已登记 Workspace，逐个 `sandbox.status` 判定“已退出 / 仍运行”，再决定标记不可用或空闲停止；同一函数既是后台 monitor 的周期动作，也是测试与运维手动触发的入口。monitor 由首次成功启动触发惰性创建，`shutdown` 先取消 monitor 再停执行体。
+- 进程退出判定统一为 `stopped`/`error`（`_has_exited`），`starting` 不算退出，避免把仍在启动的执行体误标不可用；`health()` 与 `reconcile()` 共用同一判定，保证读路径与后台对账结论一致，不会出现“读模型可用但后台已关链”的分裂。
+- 崩溃即标记不可用：停事件链、清空 base_url/sandbox_id、置 `unhealthy` 并写入 `sandbox is <status>`，随后回收 sandbox 句柄（`cleanup`），不自动重启、不自动 resume。回收失败只记日志，句柄留待下一次显式启动时重试清理。
+- 空闲停止以 `last_activity` 为准，更新点覆盖启动成功、Permit 获取/释放、发布成功、以及事件投递；`active_turns` 非空、存在在飞发布任务、或发布状态不是 `idle`/`failed` 时一律不空闲。发布失败进入 `failed` 后仍允许空闲停止，避免一次发布失败让进程与端口永久常驻。
+- 空闲停止在 `permit_lock` 内二次确认后置 `stopping`，再停链、断连、`sandbox.cleanup`；停止完成置 `stopped` 并向订阅者发 `runtime_stopped` 关闭流，因此重复对账无副作用、端口立即释放、下一次 `ensure_started` 复用 `preferred_port`。
+- 停止失败置 `error` 并保留句柄，下一轮对账直接重试回收（幂等），不会因一次沙箱抖动永久泄漏进程与端口。
+- 空闲超时默认 900s、对账间隔默认 30s，均为构造参数；配置化空闲策略属 I04，本阶段不引入设置项。
