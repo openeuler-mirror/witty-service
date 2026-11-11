@@ -90,3 +90,13 @@ class RuntimeMessageNotFoundError(RuntimeContractError):
             status_code=404,
             details={"runtime_message_id": runtime_message_id},
         )
+
+
+class RuntimeOperationNotImplementedError(RuntimeContractError):
+    def __init__(self, *, operation: str) -> None:
+        super().__init__(
+            code="RUNTIME_OPERATION_NOT_IMPLEMENTED",
+            message="runtime operation is not implemented",
+            status_code=501,
+            details={"operation": operation},
+        )
