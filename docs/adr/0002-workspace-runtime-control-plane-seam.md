@@ -15,7 +15,7 @@ ADR 0001 已确定每个活动 Workspace 至多一个 OpenCode Server，但没�
 3. sandbox 以 Agent 为 owner，句柄、端口、进程组和清理都以 `agent_id` 为键。
 4. agent-server 拥有 Agent/Session/Skill/MCP 的装配与 HTTP 入口，控制面无法独占领域规则。
 
-首版只有 OpenCode 一种 Runtime。需要固定的是依赖方向和职责，不是 `runtime_type` 分支或通用插件层。C04 的 Port/DTO 仍在 Draft，本 ADR 不冻结签名，只冻结落位、职责、调用方向、删除清单和 M1 最薄链路。
+首版只有 OpenCode 一种 Runtime。需要固定的是依赖方向和职责，不是 `runtime_type` 分支或通用插件层。C04 的 Port/DTO 已按本 ADR 落位为 Draft；本 ADR 不冻结签名，只冻结落位、职责、调用方向、删除清单和 M1 最薄链路。
 
 ## Decision
 
@@ -58,8 +58,8 @@ ADR 0001 已确定每个活动 Workspace 至多一个 OpenCode Server，但没�
 - Manager 以 `workspace_id` 为键维护至多一个 Server。进程状态为 `stopped → starting → healthy → stopping → stopped`；发布状态为 `healthy → publishing → draining → restarting → healthy`；失败进入 `unavailable` 并记录原因。
 - 每个 healthy Server 恰好一条 SSE 消费任务，由 Manager 在健康检查通过后建立、进程停止时取消。Turn Service、History、Channel、Scheduler 不得自行订阅 OpenCode。
 - prompt 只等待 HTTP 接受结果，事件异步到达。Port 不提供 per-turn 事件流，也不以 turn 为订阅单位。
-- `RuntimeEventEnvelope` 携带 `workspace_id`、`runtime_session_id`、`event_id`、`type`、`occurred_at`、`payload` 和 Runtime message id。字段以 C04 DTO 为准；本 ADR 只固定“身份字段必须可由 Runtime 证明”。
-- `turn_id` 由 Manager 的活动执行登记与消息映射解析，adapter 不理解 Witty Turn。重复事件按 `event_id` 幂等；事件 id 在重连后是否稳定由 C05 探针确认。
+- `RuntimeEventEnvelope` 携带 `workspace_id`、`runtime_session_id`、`event_id`、`type`、`durable_seq`、`occurred_at`、`payload` 和 Runtime message id。字段以 C04 DTO 为准；本 ADR 只固定“身份字段必须可由 Runtime 证明”。
+- `turn_id` 由 Manager 的活动执行登记与消息映射解析，adapter 不理解 Witty Turn。重复事件按 `(runtime_session_id, durable_seq)` 幂等；`event_id` 只用于诊断，不依赖其跨重连稳定。
 - 进程重启后向消费者发 `runtime_restarted` / `resync_required`，要求全量重读，不重放 Delta。
 - 每步 usage 由 adapter 原样映射为事件；聚合策略归展示层，不在 adapter 内按轮累计。
 
@@ -118,7 +118,7 @@ M1 只验证一条真实垂直切片，Fake 与真实 adapter 跑同一套 seam 
 2. 测试 Workspace 使用临时 `host_directory`，投影输入只含一个模型和一个 Primary Agent，不含 Skill/MCP。
 3. R05 只验证投影内容确定性；测试用固定产物让 sandbox 启动一个 `opencode serve`，端口由 sandbox 分配，adapter 健康检查通过。
 4. 通过 Manager 创建 Runtime Session，取得 `runtime_session_id`；M1 只在测试内持有，不写业务表。
-5. 提交 prompt，显式携带 `runtime_directory`、稳定 Agent 内部名、provider/model、Parts 与本轮完整 tools map，断言 HTTP 接受。
+5. 提交 prompt，显式携带稳定 Agent 内部名、provider/model 与文本/文件 Parts；`runtime_directory` 只在 ensure session 时固定，prompt 不含 tools map。首次提交必须省略 `resume`（或对同一 message_id 显式传 `true` 恢复执行）；断言 HTTP 接受，且 `resume:false` 的 admission 只表示已接受、不代表执行开始。
 6. Manager 的单条 SSE 收到事件并映射为 envelope，断言消息增量、完成和 idle 可到达；M1 不写 Turn 终态。
 7. 读取历史，返回与 provider 输出一致的 assistant 消息。
 8. 启动第二个 Workspace，验证目录、进程、端口、健康互不影响；停止并重启第一个 Workspace 后历史仍可读。
