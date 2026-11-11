@@ -232,7 +232,8 @@ class ModelCatalogService:
                         self._credentials.delete(new_file_ref)
                     except DomainError:
                         logger.exception(
-                            "Failed to remove credential file %s", new_file_ref
+                            "Failed to remove a new credential file for provider %s",
+                            provider_id,
                         )
             raise
 
