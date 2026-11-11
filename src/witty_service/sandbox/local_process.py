@@ -6,9 +6,10 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
-from collections.abc import Callable
-from pathlib import Path
+from collections.abc import Callable, Mapping
+from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 from uuid import uuid4
 
@@ -402,6 +403,40 @@ class LocalProcessSandboxBackend(SandboxBackend):
         self.stop(sandbox_handle, **kwargs)
         self._processes.pop(sandbox_handle.sandbox_id, None)
         self._handles.pop(sandbox_handle.sandbox_id, None)
+
+    def write_runtime_files(
+        self, *, runtime_home: str, files: Mapping[str, str]
+    ) -> None:
+        """逐文件临时写 + 原子替换，避免执行体读到半截配置。"""
+        root = Path(runtime_home).expanduser()
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for relative_path, content in files.items():
+            relative = PurePosixPath(relative_path)
+            if (
+                relative.is_absolute()
+                or "\\" in relative_path
+                or ".." in relative.parts
+                or not relative.parts
+            ):
+                raise ValueError(f"Invalid runtime file path: {relative_path!r}")
+            target = root / relative_path
+            if root != target and root not in target.resolve(strict=False).parents:
+                raise ValueError(
+                    f"Runtime file escapes runtime home: {relative_path!r}"
+                )
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(
+                dir=target.parent, prefix=f".{target.name}."
+            )
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    stream.write(content)
+                os.chmod(temporary, 0o600)
+                os.replace(temporary, target)
+            except BaseException:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(temporary)
+                raise
 
     # ======================================================================
     # 进程树收敛：按进程组停止，并能在服务重启后清理残留
