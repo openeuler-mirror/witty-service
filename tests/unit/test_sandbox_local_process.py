@@ -52,6 +52,43 @@ class TimeoutOnWaitProcess(FakeProcess):
         return self._poll_result
 
 
+def test_local_runtime_honors_workspace_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    popen_calls: dict[str, object] = {}
+    fake_process = FakeProcess(pid=9876)
+    workspace = tmp_path / "workspace"
+    log_path = tmp_path / "runtime" / "server.stderr.log"
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        popen_calls["command"] = command
+        popen_calls["kwargs"] = kwargs
+        return fake_process
+
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.find_free_port", lambda: 43123
+    )
+    monkeypatch.setattr(
+        "witty_service.sandbox.local_process.subprocess.Popen", fake_popen
+    )
+
+    backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path / "unused"))
+
+    handle = backend.start(
+        agent_id="ws_a",
+        workspace_path=str(workspace),
+        command=("opencode", "serve", "--port", "{port}"),
+        stderr_log_path=str(log_path),
+    )
+
+    assert popen_calls["command"] == ["opencode", "serve", "--port", "43123"]
+    assert popen_calls["kwargs"]["cwd"] == str(workspace)
+    assert handle.metadata["process_marker"] == "opencode"
+    assert handle.metadata["stderr_log_path"] == str(log_path)
+    assert log_path.exists()
+
+
 def test_local_runtime_start_builds_expected_command_and_handle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pytest.TempPathFactory,
