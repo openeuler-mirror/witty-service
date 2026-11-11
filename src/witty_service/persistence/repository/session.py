@@ -339,6 +339,20 @@ class SessionRepository(RepositoryBase):
             session.flush()
             return record_of(TurnRecord, row)
 
+    def list_turns_page(
+        self, session_id: str, before_seq: int | None, limit: int
+    ) -> list[TurnRecord]:
+        with self._read() as session:
+            query = session.query(TurnORM).filter(TurnORM.session_id == session_id)
+            if before_seq is not None:
+                query = query.filter(TurnORM.turn_seq < before_seq)
+            rows = (
+                query.order_by(TurnORM.turn_seq.desc())
+                .limit(limit)
+                .all()
+            )
+            return [record_of(TurnRecord, row) for row in rows]
+
     def get_turn(self, turn_id: str) -> TurnRecord | None:
         with self._read() as session:
             row = session.get(TurnORM, turn_id)
