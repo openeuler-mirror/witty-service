@@ -229,13 +229,14 @@ class WorkspaceRuntimeManager:
                     workspace_id=entry.spec.workspace.workspace_id,
                     detail="workspace configuration changed during publish",
                 )
-            entry.active_turns[turn_id] = _ActiveTurn(
+            permit_id = f"permit_{uuid4().hex}"
+            entry.active_turns[permit_id] = _ActiveTurn(
                 turn_id=turn_id, runtime_session_id=runtime_session_id
             )
             entry.drained.clear()
             entry.last_activity = self._clock()
             return TurnPermit(
-                permit_id=f"permit_{uuid4().hex}",
+                permit_id=permit_id,
                 workspace_id=entry.spec.workspace.workspace_id,
                 turn_id=turn_id,
                 published_projection_hash=projection.projection_hash,
@@ -248,16 +249,16 @@ class WorkspaceRuntimeManager:
         if entry is None:
             return
         async with entry.permit_lock:
-            turn = entry.active_turns.get(turn_id)
-            if turn is not None:
-                turn.runtime_session_id = runtime_session_id
+            for turn in entry.active_turns.values():
+                if turn.turn_id == turn_id:
+                    turn.runtime_session_id = runtime_session_id
 
     async def release_turn_permit(self, permit: TurnPermit) -> None:
         entry = self._entries.get(permit.workspace_id)
         if entry is None:
             return
         async with entry.permit_lock:
-            entry.active_turns.pop(permit.turn_id, None)
+            entry.active_turns.pop(permit.permit_id, None)
             if not entry.active_turns:
                 entry.drained.set()
             entry.last_activity = self._clock()
@@ -283,7 +284,7 @@ class WorkspaceRuntimeManager:
         async with entry.permit_lock:
             task = entry.publish_task
             if task is None or task.done():
-                task = asyncio.create_task(self._publish(entry, projection))
+                task = asyncio.create_task(self._publish(entry, projection, deadline))
                 entry.publish_task = task
                 task.add_done_callback(lambda done: self._on_publish_done(entry, done))
         remaining = max(0.001, deadline - time.monotonic())
@@ -312,7 +313,10 @@ class WorkspaceRuntimeManager:
         return latest
 
     async def _publish(
-        self, entry: _ManagedWorkspace, projection: RuntimeProjection
+        self,
+        entry: _ManagedWorkspace,
+        projection: RuntimeProjection,
+        deadline: float,
     ) -> None:
         workspace_id = entry.spec.workspace.workspace_id
         renderer = self._renderer
@@ -336,8 +340,9 @@ class WorkspaceRuntimeManager:
             )
             await self.restart(entry.spec)
             entry.publication = PublicationPhase.VERIFYING
+            remaining = max(0.001, deadline - time.monotonic())
             readiness = await self._port.verify_location(
-                self._verification_request(workspace_id, projection)
+                self._verification_request(workspace_id, projection, timeout=remaining)
             )
             if not readiness.ready:
                 raise RuntimeUnavailableError(
@@ -408,7 +413,7 @@ class WorkspaceRuntimeManager:
 
     @staticmethod
     def _verification_request(
-        workspace_id: str, projection: RuntimeProjection
+        workspace_id: str, projection: RuntimeProjection, *, timeout: float
     ) -> RuntimeLocationVerification:
         document = projection.document
         return RuntimeLocationVerification(
@@ -422,6 +427,7 @@ class WorkspaceRuntimeManager:
                 for model in document["models"]
             ),
             skills=tuple(str(skill["name"]) for skill in document["skills"]),
+            timeout=timeout,
         )
 
     @staticmethod

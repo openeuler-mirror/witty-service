@@ -249,6 +249,7 @@ async def test_first_permit_materializes_restarts_and_verifies() -> None:
     assert len(harness.sandbox.started) == 2
     assert harness.port.verify_calls[0].agents == ("ag_agent-1",)
     assert harness.port.verify_calls[0].skills == ()
+    assert harness.port.verify_calls[0].timeout <= 5.0
     state = harness.manager.publication_state("ws_a")
     assert state.phase is PublicationPhase.IDLE
     assert state.active_turns == 1
@@ -267,6 +268,23 @@ async def test_published_hash_is_reused_without_restarting() -> None:
     assert second.published_projection_hash == permit.published_projection_hash
     assert len(harness.sandbox.started) == 2
     assert len(harness.store.saved) == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_turn_id_keeps_each_permit_registered() -> None:
+    harness = Harness()
+    spec = _spec()
+    await harness.manager.ensure_started(spec)
+
+    first = await harness.manager.acquire_turn_permit(spec, turn_id="turn-1")
+    second = await harness.manager.acquire_turn_permit(spec, turn_id="turn-1")
+    assert harness.manager.publication_state("ws_a").active_turns == 2
+
+    await harness.manager.release_turn_permit(first)
+    assert harness.manager.publication_state("ws_a").active_turns == 1
+
+    await harness.manager.release_turn_permit(second)
+    assert harness.manager.publication_state("ws_a").active_turns == 0
 
 
 @pytest.mark.asyncio
