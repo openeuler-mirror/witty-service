@@ -365,6 +365,41 @@ def test_provider_credential_replacement_rolls_back_on_count_mismatch(
     assert repos.catalog.get_provider_credential("provider") == (None, 0)
 
 
+def test_provider_credential_replacement_rejects_expected_count_when_no_rows(
+    repos: Repos,
+) -> None:
+    with pytest.raises(ProviderCredentialConflict):
+        repos.catalog.replace_provider_credential(
+            "missing", "mdl_new", 1, 1_100, expected_count=1
+        )
+
+
+def test_update_model_moves_the_default_marker_to_a_single_row(repos: Repos) -> None:
+    first = repos.catalog.create_model(
+        "First", "provider", "first", None, None, None, 1024, 0.2, 1_000
+    )
+    second = repos.catalog.create_model(
+        "Second", "provider", "second", None, None, None, 1024, 0.2, 1_001
+    )
+    assert repos.catalog.set_default_model(first.id, 1_002) is not None
+
+    updated = repos.catalog.update_model(
+        second.id,
+        display_name="Second",
+        max_tokens=2048,
+        temperature=0.3,
+        enabled=1,
+        is_default=1,
+        now=1_003,
+    )
+
+    assert updated is not None and updated.is_default == 1
+    models = repos.catalog.list_models(include_disabled=True)
+    assert [model.id for model in models if model.is_default == 1] == [second.id]
+    default = repos.catalog.get_default_model()
+    assert default is not None and default.id == second.id
+
+
 def test_count_model_references_covers_all_consumers(repos: Repos) -> None:
     agent_id, workspace_id = _workspace(repos)
     model = repos.catalog.create_model(

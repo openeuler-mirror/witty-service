@@ -627,6 +627,28 @@ class RuntimeRevertResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeLocationVerification:
+    """发布后必须验证的目标 location 输入；空 agents/models 视为不可用。"""
+
+    workspace_id: str
+    agents: tuple[str, ...] = ()
+    models: tuple[RuntimeModelRef, ...] = ()
+    skills: tuple[str, ...] = ()
+    timeout: float = 30.0
+
+    def __post_init__(self) -> None:
+        _require_text(self.workspace_id, "workspace_id")
+        if self.timeout <= 0:
+            raise RuntimeContractValidationError(
+                field="timeout", reason="must be positive"
+            )
+        for agent in self.agents:
+            _require_text(agent, "agents")
+        for skill in self.skills:
+            _require_text(skill, "skills")
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeLocationReadiness:
     """目标 location 的可见性与可执行性；进程健康与全局 catalog 不算就绪。"""
 
@@ -684,6 +706,10 @@ class WorkspaceRuntimePort(Protocol):
     async def inspect_workspace(
         self, workspace_id: str
     ) -> RuntimeWorkspaceSnapshot: ...
+
+    async def verify_location(
+        self, request: RuntimeLocationVerification
+    ) -> RuntimeLocationReadiness: ...
 
     async def ensure_session(self, request: EnsureSessionRequest) -> RuntimeSession: ...
 

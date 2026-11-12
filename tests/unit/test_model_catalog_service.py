@@ -55,6 +55,29 @@ def test_create_removes_new_file_when_insert_fails() -> None:
     credentials.delete.assert_called_once_with(credentials.write.call_args.args[0])
 
 
+def test_create_removes_new_file_when_group_credential_conflicts() -> None:
+    existing = _model()
+    catalog = MagicMock()
+    catalog.list_provider_models.return_value = [existing]
+    catalog.replace_provider_credential.side_effect = ProviderCredentialConflict(
+        "openai"
+    )
+    credentials = MagicMock()
+    service = _service(catalog, credentials)
+
+    with pytest.raises(DomainError) as excinfo:
+        service.create_model(
+            display_name="Model",
+            provider_id="openai",
+            provider_model_id="gpt-5",
+            api_key="sk-secret",
+        )
+
+    assert excinfo.value.code == ErrorCode.MODEL_CREDENTIAL_CONFLICT
+    credentials.write.assert_called_once()
+    credentials.delete.assert_called_once_with(credentials.write.call_args.args[0])
+
+
 def test_create_reverts_group_credential_when_insert_fails() -> None:
     existing = _model()
     catalog = MagicMock()

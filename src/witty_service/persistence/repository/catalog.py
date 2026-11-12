@@ -149,6 +149,12 @@ class CatalogRepository(RepositoryBase):
             row.max_tokens = max_tokens
             row.temperature = temperature
             row.enabled = enabled
+            if enabled and is_default:
+                session.query(ModelORM).filter(
+                    ModelORM.is_default == 1, ModelORM.id != model_id
+                ).update(
+                    {"is_default": 0, "updated_at": now}, synchronize_session=False
+                )
             row.is_default = is_default if enabled else 0
             row.updated_at = now
             session.flush()
@@ -208,6 +214,8 @@ class CatalogRepository(RepositoryBase):
         with self._transaction() as session:
             query = session.query(ModelORM).filter(ModelORM.provider_id == provider_id)
             total = query.count()
+            if expected_count is not None and total != expected_count:
+                raise ProviderCredentialConflict(provider_id)
             if total == 0:
                 return 0
             if expected_revision is not None:
@@ -216,7 +224,7 @@ class CatalogRepository(RepositoryBase):
                 ).count()
                 if matching != total:
                     raise ProviderCredentialConflict(provider_id)
-            affected = query.update(
+            return query.update(
                 {
                     "credential_ref": new_ref,
                     "secret_revision": new_revision,
@@ -224,9 +232,6 @@ class CatalogRepository(RepositoryBase):
                 },
                 synchronize_session=False,
             )
-            if expected_count is not None and affected != expected_count:
-                raise ProviderCredentialConflict(provider_id)
-            return affected
 
     def count_model_references(self, model_id: str) -> dict[str, int]:
         references = {

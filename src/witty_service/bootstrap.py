@@ -3,6 +3,11 @@ from __future__ import annotations
 from witty_service.runtime.contracts import RuntimeWorkspace
 from witty_service.runtime.manager import WorkspaceRuntimeManager, WorkspaceRuntimeSpec
 from witty_service.runtime.paths import WorkspaceRuntimePaths
+from witty_service.runtime.publication import (
+    RuntimeCredentialResolver,
+    RuntimeProjectionSource,
+    RuntimeProjectionStore,
+)
 from witty_service.sandbox.base import SandboxBackend
 from witty_service.sandbox.factory import create_sandbox_backend
 
@@ -44,8 +49,12 @@ def build_workspace_runtime_manager(
     *,
     sandbox_type: str = "local_process",
     sandbox: SandboxBackend | None = None,
+    projection_source: RuntimeProjectionSource | None = None,
+    projection_store: RuntimeProjectionStore | None = None,
+    credential_resolver: RuntimeCredentialResolver | None = None,
 ) -> WorkspaceRuntimeManager:
     """组合根：控制面只通过这里接触执行面实现。"""
+    from witty_agent_server.projection_renderer import OpenCodeProjectionRenderer
     from witty_agent_server.runtime_adapter import OpenCodeRuntimeAdapter
 
     return WorkspaceRuntimeManager(
@@ -53,4 +62,8 @@ def build_workspace_runtime_manager(
         sandbox=sandbox
         if sandbox is not None
         else create_sandbox_backend(sandbox_type),
+        projection_source=projection_source,
+        projection_store=projection_store,
+        projection_renderer=OpenCodeProjectionRenderer(),
+        credential_resolver=credential_resolver,
     )
