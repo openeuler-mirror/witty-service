@@ -80,11 +80,20 @@ _SEQ_OPTIONAL_EVENT_TYPES = _DELTA_EVENT_TYPES | {
 }
 _CLOSING_RESYNC_REASONS = frozenset(
     {
+        RuntimeResyncReason.RUNTIME_EXITED,
         RuntimeResyncReason.SUBSCRIBER_LAGGED,
         RuntimeResyncReason.RUNTIME_STOPPED,
     }
 )
 _EVENT_BUFFER_SIZE = 256
+_IN_FLIGHT_PUBLICATIONS = frozenset(
+    {
+        PublicationPhase.PUBLISHING,
+        PublicationPhase.DRAINING,
+        PublicationPhase.RESTARTING,
+        PublicationPhase.VERIFYING,
+    }
+)
 
 
 class RuntimePhase(StrEnum):
@@ -94,6 +103,35 @@ class RuntimePhase(StrEnum):
     UNHEALTHY = "unhealthy"
     STOPPING = "stopping"
     ERROR = "error"
+
+
+class RuntimeStatus(StrEnum):
+    """对外 ``runtime_status``；只有 ``ready`` 允许读 Runtime 历史与产物。"""
+
+    STOPPED = "stopped"
+    STARTING = "starting"
+    READY = "ready"
+    RESTARTING = "restarting"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceAvailability:
+    workspace_id: str
+    status: RuntimeStatus
+    detail: str | None = None
+
+    @property
+    def ready(self) -> bool:
+        return self.status is RuntimeStatus.READY
+
+
+_STATUS_DETAILS = {
+    RuntimeStatus.STARTING: "workspace runtime is starting",
+    RuntimeStatus.RESTARTING: "workspace runtime is restarting",
+    RuntimeStatus.STOPPED: "workspace runtime is stopped",
+    RuntimeStatus.UNAVAILABLE: "workspace runtime is unavailable",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +246,8 @@ class WorkspaceRuntimeManager:
         subscriber_queue_size: int = 64,
         subscriber_timeout: float = 5.0,
         event_reconnect_delay: float = 0.5,
+        idle_timeout: float = 900.0,
+        lifecycle_interval: float = 30.0,
     ) -> None:
         self._port = port
         self._sandbox = sandbox
@@ -220,6 +260,9 @@ class WorkspaceRuntimeManager:
         self._subscriber_queue_size = subscriber_queue_size
         self._subscriber_timeout = subscriber_timeout
         self._event_reconnect_delay = event_reconnect_delay
+        self._idle_timeout = idle_timeout
+        self._lifecycle_interval = lifecycle_interval
+        self._lifecycle_task: asyncio.Task[None] | None = None
         self._entries: dict[str, _ManagedWorkspace] = {}
         self._registry_lock = threading.Lock()
 
@@ -260,6 +303,39 @@ class WorkspaceRuntimeManager:
                 workspace_id=workspace_id, phase=PublicationPhase.IDLE
             )
         return entry.publication_state()
+
+    def availability(self, workspace_id: str) -> WorkspaceAvailability:
+        """纯内存读模型：不探测进程、不 await，可安全用于列表标注。
+
+        崩溃后到下一次对账（``lifecycle_interval``）之前仍可能返回 ``ready``；
+        ``detail`` 只给固定非密原因，底层错误留在 ``get_state().last_error``。
+        """
+        entry = self._entries.get(workspace_id)
+        if entry is None:
+            return WorkspaceAvailability(
+                workspace_id=workspace_id,
+                status=RuntimeStatus.STOPPED,
+                detail=_STATUS_DETAILS[RuntimeStatus.STOPPED],
+            )
+        status = _status_of(entry)
+        return WorkspaceAvailability(
+            workspace_id=workspace_id,
+            status=status,
+            detail=_STATUS_DETAILS.get(status),
+        )
+
+    def require_ready(self, workspace_id: str) -> WorkspaceAvailability:
+        """Runtime 读入口的最后一道门禁：先完成 400/404/409 校验再调用。
+
+        仅用于确已有 ``runtime_session_id`` 的历史与产物读取；未建立 Runtime
+        Session 的会话不应因为 Runtime 未启动而被判为不可用。
+        """
+        availability = self.availability(workspace_id)
+        if not availability.ready:
+            raise RuntimeUnavailableError(
+                workspace_id=workspace_id, detail=availability.detail
+            )
+        return availability
 
     async def acquire_turn_permit(
         self,
@@ -605,6 +681,100 @@ class WorkspaceRuntimeManager:
             )
         )
 
+    async def reconcile(self) -> None:
+        """对账一次：发现已退出的执行体并执行空闲停止；不自动重启任何执行体。"""
+        for entry in tuple(self._entries.values()):
+            try:
+                await self._reconcile(entry)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _logger.exception(
+                    "failed to reconcile workspace runtime %s",
+                    entry.spec.workspace.workspace_id,
+                )
+
+    async def _reconcile(self, entry: _ManagedWorkspace) -> None:
+        async with entry.lock:
+            handle = entry.handle
+            if handle is None:
+                return
+            if entry.phase is RuntimePhase.ERROR:
+                await self._stop_runtime_locked(entry)
+                return
+            if entry.phase is not RuntimePhase.HEALTHY:
+                return
+            status = await asyncio.to_thread(self._sandbox.status, handle)
+            if entry.handle is not handle or entry.phase is not RuntimePhase.HEALTHY:
+                return
+            if _has_exited(status):
+                await self._mark_exited(entry, status)
+                try:
+                    await self._cleanup_handle(entry)
+                except RuntimeUnavailableError as exc:
+                    entry.reset(RuntimePhase.ERROR)
+                    entry.last_error = exc.message
+                    _logger.warning(
+                        "failed to reclaim workspace runtime %s",
+                        entry.spec.workspace.workspace_id,
+                    )
+                return
+            await self._stop_idle_locked(entry)
+
+    async def _mark_exited(
+        self, entry: _ManagedWorkspace, status: SandboxStatus
+    ) -> None:
+        await self._stop_event_chain(entry)
+        entry.reset(RuntimePhase.UNHEALTHY)
+        entry.last_error = f"sandbox is {status.value}"
+        for queue in tuple(entry.subscribers):
+            self._close_subscriber(entry, queue, RuntimeResyncReason.RUNTIME_EXITED)
+
+    def _is_idle(self, entry: _ManagedWorkspace) -> bool:
+        if entry.active_turns or entry.publish_task is not None:
+            return False
+        if entry.publication not in (PublicationPhase.IDLE, PublicationPhase.FAILED):
+            return False
+        return self._clock() - entry.last_activity >= self._idle_timeout
+
+    async def _stop_idle_locked(self, entry: _ManagedWorkspace) -> None:
+        async with entry.permit_lock:
+            if entry.phase is not RuntimePhase.HEALTHY or not self._is_idle(entry):
+                return
+            entry.phase = RuntimePhase.STOPPING
+        await self._stop_runtime_locked(entry)
+
+    async def _stop_runtime_locked(self, entry: _ManagedWorkspace) -> None:
+        """停掉执行体并清空句柄；失败置 ERROR，下一轮对账重试回收。"""
+        if entry.handle is None:
+            entry.reset(RuntimePhase.STOPPED)
+            return
+        try:
+            await self._cleanup_handle(entry)
+        except RuntimeUnavailableError as exc:
+            entry.reset(RuntimePhase.ERROR)
+            entry.last_error = exc.message
+            _logger.warning(
+                "failed to stop workspace runtime %s",
+                entry.spec.workspace.workspace_id,
+            )
+            return
+        entry.reset(RuntimePhase.STOPPED)
+        for queue in tuple(entry.subscribers):
+            self._close_subscriber(entry, queue, RuntimeResyncReason.RUNTIME_STOPPED)
+
+    def _ensure_lifecycle_monitor(self) -> None:
+        if self._lifecycle_task is not None and not self._lifecycle_task.done():
+            return
+        self._lifecycle_task = asyncio.get_running_loop().create_task(
+            self._lifecycle_loop()
+        )
+
+    async def _lifecycle_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._lifecycle_interval)
+            await self.reconcile()
+
     def _require_publication_configured(self, workspace_id: str) -> None:
         if (
             self._projection_source is None
@@ -762,9 +932,8 @@ class WorkspaceRuntimeManager:
             if entry.handle is None:
                 return entry.snapshot()
             status = await asyncio.to_thread(self._sandbox.status, entry.handle)
-            if status is not SandboxStatus.running:
-                entry.phase = RuntimePhase.UNHEALTHY
-                entry.last_error = f"sandbox is {status.value}"
+            if _has_exited(status):
+                await self._mark_exited(entry, status)
                 return entry.snapshot()
             health = await self._probe(entry)
             if not health.ready:
@@ -773,6 +942,8 @@ class WorkspaceRuntimeManager:
                 return entry.snapshot()
             entry.phase = RuntimePhase.HEALTHY
             entry.last_error = None
+            if entry.event_task is None:
+                await self._start_event_chain(entry)
             return entry.snapshot()
 
     async def stop(self, workspace_id: str) -> WorkspaceRuntimeState:
@@ -804,6 +975,11 @@ class WorkspaceRuntimeManager:
             return entry.snapshot()
 
     async def shutdown(self) -> None:
+        lifecycle = self._lifecycle_task
+        self._lifecycle_task = None
+        if lifecycle is not None:
+            lifecycle.cancel()
+            await asyncio.gather(lifecycle, return_exceptions=True)
         for workspace_id, entry in tuple(self._entries.items()):
             task = entry.publish_task
             if task is not None and not task.done():
@@ -883,6 +1059,8 @@ class WorkspaceRuntimeManager:
         entry.sandbox_id = handle.sandbox_id
         entry.started_at = self._clock()
         entry.last_error = None
+        entry.last_activity = self._clock()
+        self._ensure_lifecycle_monitor()
         await self._start_event_chain(entry)
         return entry.snapshot()
 
@@ -976,3 +1154,19 @@ class WorkspaceRuntimeManager:
 def _error_text(exc: BaseException) -> str:
     message = getattr(exc, "message", None)
     return message if isinstance(message, str) and message else str(exc)
+
+
+def _has_exited(status: SandboxStatus) -> bool:
+    return status is SandboxStatus.stopped or status is SandboxStatus.error
+
+
+def _status_of(entry: _ManagedWorkspace) -> RuntimeStatus:
+    if entry.phase is RuntimePhase.UNHEALTHY or entry.phase is RuntimePhase.ERROR:
+        return RuntimeStatus.UNAVAILABLE
+    if entry.publish_task is not None or entry.publication in _IN_FLIGHT_PUBLICATIONS:
+        return RuntimeStatus.RESTARTING
+    if entry.phase is RuntimePhase.STARTING:
+        return RuntimeStatus.STARTING
+    if entry.phase is RuntimePhase.HEALTHY:
+        return RuntimeStatus.READY
+    return RuntimeStatus.STOPPED

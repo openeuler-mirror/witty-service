@@ -63,3 +63,22 @@
 - 背压：内部 pump 队列上限 256，订阅者队列上限 64。delta 满则丢；非 delta 最多等 5s，超时即发 `subscriber_lagged` 并关闭该订阅，保证慢消费不阻塞其它订阅者与健康探测，终态通过重同步兜底而不是静默丢失。
 - 链重建的固定重连间隔为 0.5s，且运行时非 healthy 时不再重试，等下一次显式启动重建，避免 runtime 已退出时形成重连风暴。
 - 已知边界：`session_seq` 不按空闲 Session 淘汰（每个会话仅一个整数，重连时会对每个已见 Session 发一次 history）；活动 Turn 释放后其 Session 的断连重放仍会覆盖，但已无 UI 消费方，最终以 `event_stream_interrupted` 重同步为准。
+
+## R08 空闲停止与进程生命周期对账
+
+- 生命周期对账只有一条链路：`reconcile()` 遍历所有已登记 Workspace，逐个 `sandbox.status` 判定“已退出 / 仍运行”，再决定标记不可用或空闲停止；同一函数既是后台 monitor 的周期动作，也是测试与运维手动触发的入口。monitor 由首次成功启动触发惰性创建，`shutdown` 先取消 monitor 再停执行体。
+- 进程退出判定统一为 `stopped`/`error`（`_has_exited`），`starting` 不算退出，避免把仍在启动的执行体误标不可用；`health()` 与 `reconcile()` 共用同一判定，保证读路径与后台对账结论一致，不会出现“读模型可用但后台已关链”的分裂。
+- 崩溃即标记不可用：停事件链、清空 base_url/sandbox_id、置 `unhealthy` 并写入 `sandbox is <status>`，随后回收 sandbox 句柄（`cleanup`），不自动重启、不自动 resume。回收失败只记日志，句柄留待下一次显式启动时重试清理。
+- 空闲停止以 `last_activity` 为准，更新点覆盖启动成功、Permit 获取/释放、发布成功、以及事件投递；`active_turns` 非空、存在在飞发布任务、或发布状态不是 `idle`/`failed` 时一律不空闲。发布失败进入 `failed` 后仍允许空闲停止，避免一次发布失败让进程与端口永久常驻。
+- 空闲停止在 `permit_lock` 内二次确认后置 `stopping`，再停链、断连、`sandbox.cleanup`；停止完成置 `stopped` 并向订阅者发 `runtime_stopped` 关闭流，因此重复对账无副作用、端口立即释放、下一次 `ensure_started` 复用 `preferred_port`。
+- 停止失败置 `error` 并保留句柄，下一轮对账直接重试回收（幂等），不会因一次沙箱抖动永久泄漏进程与端口。
+- 空闲超时默认 900s、对账间隔默认 30s，均为构造参数；配置化空闲策略属 I04，本阶段不引入设置项。
+
+## R09 健康、故障隔离与可用性读模型
+
+- `runtime_status` 读模型由 Manager 独占：`RuntimeStatus`（stopped/starting/ready/restarting/unavailable）是 `RuntimePhase` 与 `PublicationPhase` 的投影，`availability()` 同步、纯内存、不探测进程，可被纯 DB 列表逐条调用；明细错误只留在 `get_state().last_error`，对外 `detail` 是固定非密文案，避免绝对路径、命令行或上游错误文本外泄。
+- 映射优先级：`unhealthy`/`error` → unavailable；发布在飞（`publish_task` 或 publishing/draining/restarting/verifying）→ restarting，即使此时进程正处于 stopping/starting 也对外统一显示 restarting；`starting` → starting；`healthy` → ready；其余（含显式停止中的 stopping）→ stopped。发布 `failed` 不算在飞，仍为 ready，历史可读。
+- 崩溃发现依赖 R08 对账，`availability()` 不阻塞探测，因此在下次对账（默认 30s）前可能仍报 ready；这是纯内存读模型的已知滞后，读请求失败会由 Port 侧返回 503 兜底。
+- `require_ready()` 是 Runtime 读入口的最后一道门禁：400/404/409 校验完成后调用，非 ready 抛 `RuntimeUnavailableError`（503 / `RUNTIME_UNAVAILABLE`），错误优先级沿用 `api.errors.ERROR_PRIORITY` 的 400→404→409→503，不新增错误码。
+- 该门禁只适用于确已有 `runtime_session_id` 的历史与产物读取；未建立 Runtime Session 的会话应返回空历史，不因 Runtime 未启动被判 503（由 B 线在调用门禁前判定）。
+- 单 Workspace 故障不扩散：`availability()` 只做单键内存读取、未知 Workspace 返回 stopped，不抛异常；故障 Workspace 的 unavailable 不影响其他 Workspace 的 ready 判定，纯 DB 列表可照常返回。

@@ -8,6 +8,7 @@ from witty_service.runtime.contracts import RuntimeEventEnvelope
 
 class RuntimeResyncReason(StrEnum):
     RUNTIME_RESTARTED = "runtime_restarted"
+    RUNTIME_EXITED = "runtime_exited"
     EVENT_STREAM_INTERRUPTED = "event_stream_interrupted"
     SUBSCRIBER_LAGGED = "subscriber_lagged"
     RUNTIME_STOPPED = "runtime_stopped"
