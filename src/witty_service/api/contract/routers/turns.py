@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, cast
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 
 from witty_service.api.contract.dto.turn import (
     AbortTurnResponse,
@@ -10,10 +10,19 @@ from witty_service.api.contract.dto.turn import (
     TurnListResponse,
     TurnResponse,
 )
+from witty_service.api.contract.presenters import turn_response
 from witty_service.api.contract.routers._stub import not_implemented
 from witty_service.api.errors import error_responses
+from witty_service.application.turn_service import TurnService
 
 router = APIRouter(tags=["turns"])
+
+
+def _service(request: Request) -> TurnService:
+    return cast(TurnService, request.app.state.services.turn_service)
+
+
+Service = Annotated[TurnService, Depends(_service)]
 
 
 @router.post(
@@ -33,10 +42,15 @@ def create_turn(session_id: str, payload: CreateTurnRequest) -> TurnResponse:
 )
 def list_session_turns(
     session_id: str,
+    service: Service,
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> TurnListResponse:
-    not_implemented()
+    page = service.list_turns(session_id, cursor=cursor, limit=limit)
+    return TurnListResponse(
+        items=[turn_response(turn) for turn in page.items],
+        next_cursor=page.next_cursor,
+    )
 
 
 @router.post(

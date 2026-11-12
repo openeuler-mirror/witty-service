@@ -4,7 +4,13 @@ from datetime import UTC, datetime
 
 from witty_service.api.contract.dto.common import AgentRef, ModelRef
 from witty_service.api.contract.dto.session import SessionResponse
-from witty_service.api.contract.dto.turn import TurnSummary
+from witty_service.api.contract.dto.turn import (
+    TurnAgentAttribution,
+    TurnError,
+    TurnModelAttribution,
+    TurnResponse,
+    TurnSummary,
+)
 from witty_service.application.session_service import SessionView
 from witty_service.domain.records import AgentDefinitionRecord, ModelRecord, TurnRecord
 
@@ -34,6 +40,30 @@ def model_ref(model: ModelRecord) -> ModelRef:
 
 def turn_summary(turn: TurnRecord) -> TurnSummary:
     return TurnSummary(id=turn.id, turn_seq=turn.turn_seq, status=turn.status.value)
+
+
+def turn_response(turn: TurnRecord) -> TurnResponse:
+    return TurnResponse(
+        id=turn.id,
+        session_id=turn.session_id,
+        turn_seq=turn.turn_seq,
+        status=turn.status.value,
+        agent=TurnAgentAttribution(id=turn.agent_id, name=turn.agent_name_snapshot),
+        model=TurnModelAttribution(
+            id=turn.model_id, display_name=turn.model_name_snapshot
+        ),
+        usage=None,
+        error=(
+            TurnError(code=turn.error_code, message=turn.error_message or "")
+            if turn.error_code
+            else None
+        ),
+        started_at=utc_datetime(turn.started_at),
+        finished_at=(
+            utc_datetime(turn.finished_at) if turn.finished_at is not None else None
+        ),
+        created_at=utc_datetime(turn.created_at),
+    )
 
 
 def session_response(view: SessionView) -> SessionResponse:
