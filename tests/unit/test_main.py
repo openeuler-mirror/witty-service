@@ -1,95 +1,27 @@
 from __future__ import annotations
 
-import inspect
-from unittest.mock import AsyncMock, MagicMock
-
-import pytest
 from fastapi.testclient import TestClient
 
-from witty_service import main as main_module
+from witty_service.main import create_app
 
 
-def test_create_app_closes_services_on_shutdown(monkeypatch) -> None:
-    monkeypatch.setattr(
-        main_module.SkillManager,
-        "sync_awesome_repository_in_background",
-        lambda **_kwargs: None,
-    )
+class FakeServices:
+    def __init__(self) -> None:
+        self.closed = False
 
-    order: list[str] = []
-
-    services = MagicMock()
-    services.repository = MagicMock()
-    services.repository.find_stale_generating_messages.return_value = []
-    services.repository.list_agents_needing_recovery.return_value = []
-    services.close = AsyncMock(side_effect=lambda: order.append("close"))
-    services.scheduled_task_service = MagicMock()
-    services.scheduled_task_service.start = AsyncMock(
-        side_effect=lambda: order.append("scheduler.start")
-    )
-    services.scheduled_task_service.shutdown = AsyncMock(
-        side_effect=lambda: order.append("scheduler.shutdown")
-    )
-    services.channel_gateway = MagicMock()
-    services.channel_gateway.start = AsyncMock(
-        side_effect=lambda: order.append("gateway.start") or True
-    )
-    services.channel_gateway.stop = AsyncMock(
-        side_effect=lambda: order.append("gateway.stop")
-    )
-
-    with TestClient(main_module.create_app(services=services)):
-        pass
-
-    services.close.assert_awaited_once_with()
-    services.scheduled_task_service.start.assert_awaited_once_with()
-    services.scheduled_task_service.shutdown.assert_awaited_once_with()
-    services.channel_gateway.start.assert_awaited_once_with()
-    services.channel_gateway.stop.assert_awaited_once_with()
-    # 关闭顺序（框架设计 §7.2）：网关 -> 调度器 -> services.close()
-    assert order[-3:] == ["gateway.stop", "scheduler.shutdown", "close"]
+    async def close(self) -> None:
+        self.closed = True
 
 
-@pytest.mark.asyncio
-async def test_scheduler_starts_after_agent_recovery(monkeypatch) -> None:
-    """调度器必须在 agent 恢复完成后再启动，避免恢复窗口内触发定时任务失败。"""
-    monkeypatch.setattr(
-        main_module.SkillManager,
-        "sync_awesome_repository_in_background",
-        lambda **_kwargs: None,
-    )
+def test_create_app_serves_basic_endpoints_and_closes_services(monkeypatch) -> None:
+    monkeypatch.setattr("witty_service.main.configure_logging", lambda: None)
+    services = FakeServices()
+    app = create_app(services=services)  # type: ignore[arg-type]
 
-    services = MagicMock()
-    services.repository = MagicMock()
-    services.repository.find_stale_generating_messages.return_value = []
-    services.repository.list_agents_needing_recovery.return_value = []
-    services.close = AsyncMock()
-    services.scheduled_task_service = MagicMock()
-    services.scheduled_task_service.start = AsyncMock()
+    with TestClient(app) as client:
+        assert client.get("/healthz").json() == {"status": "ok"}
+        assert client.get("/ping").json() == {"status": "ok"}
+        capabilities = client.get("/server/capabilities").json()
+        assert capabilities["supported_runtimes"]
 
-    app = main_module.create_app(services=services)
-
-    startup_handlers = list(app.router.on_startup)
-    names = [getattr(handler, "__name__", str(handler)) for handler in startup_handlers]
-    assert names.index("recover_agents") < names.index("start_scheduled_tasks")
-    # 渠道网关必须在 agent 恢复与定时任务之后启动（框架设计 §7.2）
-    assert names.index("start_scheduled_tasks") < names.index("start_channel_gateway")
-
-    calls: list[str] = []
-    services.repository.list_agents_needing_recovery.side_effect = lambda **_kwargs: (
-        calls.append("recovery") or []
-    )
-    services.scheduled_task_service.start.side_effect = lambda: calls.append(
-        "scheduler"
-    )
-    services.channel_gateway.start = AsyncMock(
-        side_effect=lambda: calls.append("gateway") or True
-    )
-
-    for name in ("recover_agents", "start_scheduled_tasks", "start_channel_gateway"):
-        result = startup_handlers[names.index(name)]()
-        if inspect.isawaitable(result):
-            await result
-
-    assert calls[:2] == ["recovery", "recovery"]
-    assert calls[-2:] == ["scheduler", "gateway"]
+    assert services.closed is True

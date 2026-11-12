@@ -12,7 +12,7 @@ config = context.config
 
 # 仅在通过 alembic CLI 调用（有配置文件）时才使用 fileConfig
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # 仅当 sqlalchemy.url 未通过程序化方式设置时，从配置中获取
 if not config.get_main_option("sqlalchemy.url"):

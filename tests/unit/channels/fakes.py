@@ -22,7 +22,6 @@ from witty_service.channels.contracts import (
     Route,
     TurnEvent,
 )
-from witty_service.domain.enums import AgentStatus
 
 # ==============================================================================
 # 假仓储
@@ -33,7 +32,7 @@ from witty_service.domain.enums import AgentStatus
 class FakeAgent:
     id: str
     name: str = "demo-agent"
-    status: AgentStatus = AgentStatus.running
+    status: str = "running"
 
 
 @dataclass
@@ -171,7 +170,7 @@ class FakeAgentManager:
     async def resume_agent(self, agent_id: str) -> FakeAgent:
         self.resumed.append(agent_id)
         agent = self.repository.agents[agent_id]
-        agent.status = AgentStatus.running
+        agent.status = "running"
         return agent
 
     async def send_message_stream(
