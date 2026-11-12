@@ -241,9 +241,9 @@ def test_catalog_provider_credential_is_shared_across_models(repos: Repos) -> No
         1024,
         0.2,
         1_001,
-        secret_revision=1,
     )
 
+    assert second.secret_revision == 1
     assert [model.id for model in repos.catalog.list_provider_models("provider")] == [
         first.id,
         second.id,
@@ -263,6 +263,7 @@ def test_catalog_provider_credential_is_shared_across_models(repos: Repos) -> No
         )
         == 0
     )
+    assert repos.catalog.get_provider_credential("provider") == ("mdl_rotated", 2)
     other = repos.catalog.create_model(
         "Other",
         "other-provider",
@@ -289,6 +290,44 @@ def test_catalog_provider_credential_is_shared_across_models(repos: Repos) -> No
         "channel_instances": 0,
         "channel_provisionings": 0,
     }
+
+
+def test_replace_provider_credential_refuses_a_torn_provider(repos: Repos) -> None:
+    repos.catalog.create_model(
+        "First",
+        "provider",
+        "m1",
+        "openai",
+        "https://example.com/v1",
+        "mdl_shared",
+        1024,
+        0.2,
+        1_000,
+        secret_revision=1,
+    )
+    repos.catalog.create_model(
+        "Torn",
+        "provider",
+        "m2",
+        "openai",
+        "https://example.com/v1",
+        "mdl_shared",
+        1024,
+        0.2,
+        1_001,
+        secret_revision=0,
+    )
+
+    assert (
+        repos.catalog.replace_provider_credential(
+            "provider", "mdl_rotated", 2, 1_002, expected_revision=1
+        )
+        == 0
+    )
+    assert [
+        (model.credential_ref, model.secret_revision)
+        for model in repos.catalog.list_provider_models("provider")
+    ] == [("mdl_shared", 1), ("mdl_shared", 0)]
 
 
 def test_list_enabled_skills_excludes_disabled_and_sorts_stably(repos: Repos) -> None:
