@@ -38,9 +38,24 @@ class CatalogRepository(RepositoryBase):
         temperature: float,
         now: int,
         *,
-        secret_revision: int = 0,
+        secret_revision: int | None = None,
     ) -> ModelRecord:
         with self._transaction() as session:
+            if credential_ref is None or secret_revision is None:
+                existing = (
+                    session.query(ModelORM)
+                    .filter(
+                        ModelORM.provider_id == provider_id,
+                        ModelORM.credential_ref.isnot(None),
+                    )
+                    .order_by(ModelORM.created_at, ModelORM.id)
+                    .first()
+                )
+                if existing is not None:
+                    if credential_ref is None:
+                        credential_ref = existing.credential_ref
+                    if secret_revision is None:
+                        secret_revision = existing.secret_revision
             row = ModelORM(
                 id=new_id(),
                 display_name=display_name,
@@ -53,7 +68,7 @@ class CatalogRepository(RepositoryBase):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 is_default=0,
-                secret_revision=secret_revision,
+                secret_revision=0 if secret_revision is None else secret_revision,
                 created_at=now,
                 updated_at=now,
             )
@@ -154,8 +169,15 @@ class CatalogRepository(RepositoryBase):
     ) -> int:
         with self._transaction() as session:
             query = session.query(ModelORM).filter(ModelORM.provider_id == provider_id)
+            total = query.count()
+            if total == 0:
+                return 0
             if expected_revision is not None:
-                query = query.filter(ModelORM.secret_revision == expected_revision)
+                matching = query.filter(
+                    ModelORM.secret_revision == expected_revision
+                ).count()
+                if matching != total:
+                    return 0
             return query.update(
                 {
                     "credential_ref": new_ref,

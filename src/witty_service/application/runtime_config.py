@@ -5,7 +5,12 @@ from typing import Any, Protocol
 
 from witty_service.domain.model_providers import DEFAULT_API_BASE_URLS
 
-__all__ = ["DEFAULT_API_BASE_URLS", "RuntimeConfig", "UnsupportedModelProviderError"]
+__all__ = [
+    "DEFAULT_API_BASE_URLS",
+    "OpencodeConfig",
+    "RuntimeConfig",
+    "UnsupportedModelProviderError",
+]
 
 
 class UnsupportedModelProviderError(ValueError):

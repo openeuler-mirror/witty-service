@@ -54,6 +54,7 @@ def _utcnow_iso() -> str:
 
 class FileCredentialStore:
     kind_by_prefix: ClassVar[dict[str, str]] = {}
+    prunable_prefix: ClassVar[str | None] = None
 
     def __init__(self, directory: str | os.PathLike[str]) -> None:
         raw = str(directory).strip()
@@ -164,7 +165,10 @@ class FileCredentialStore:
             ) from exc
         return True
 
-    def prune_expired(self, *, prefix: str, now: datetime | None = None) -> int:
+    def prune_expired(self, *, now: datetime | None = None) -> int:
+        prefix = self.prunable_prefix
+        if prefix is None:
+            return 0
         moment = now or datetime.now(UTC)
         if not self._directory.is_dir():
             return 0

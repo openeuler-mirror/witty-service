@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -29,6 +28,7 @@ class ChannelCredentialStore(FileCredentialStore):
         INSTANCE_REF_PREFIX: "instance",
         PROVISIONING_REF_PREFIX: "provisioning",
     }
+    prunable_prefix: ClassVar[str | None] = PROVISIONING_REF_PREFIX
 
     @classmethod
     def from_settings(cls, settings: ChannelSettings) -> ChannelCredentialStore:
@@ -41,9 +41,6 @@ class ChannelCredentialStore(FileCredentialStore):
     @staticmethod
     def ref_for_provisioning(attempt_id: str) -> str:
         return f"{PROVISIONING_REF_PREFIX}_{_digest(attempt_id)}"
-
-    def prune_expired(self, *, now: datetime | None = None) -> int:
-        return super().prune_expired(prefix=PROVISIONING_REF_PREFIX, now=now)
 
     def _unavailable(self, *, path: str, reason: str) -> DomainError:
         return err.channel_credential_store_unavailable(path=path, reason=reason)
