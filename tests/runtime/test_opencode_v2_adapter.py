@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 import httpx
@@ -13,6 +14,8 @@ from witty_agent_server.runtime_adapter import OpenCodeRuntimeAdapter
 from witty_service.runtime.contracts import (
     EnsureSessionRequest,
     RuntimeConnection,
+    RuntimeLocationVerification,
+    RuntimeModelRef,
     RuntimeWorkspace,
 )
 from witty_service.runtime.errors import RuntimeUnavailableError
@@ -192,6 +195,169 @@ async def test_inspect_workspace_checks_location_catalog() -> None:
     assert snapshot.location.ready is True
     assert snapshot.location.agents == ("build",)
     assert snapshot.location.models[0].provider_id == "p1"
+
+
+@pytest.mark.asyncio
+async def test_verify_location_rejects_empty_requirements_and_unconnected() -> None:
+    adapter = OpenCodeRuntimeAdapter()
+
+    empty = await adapter.verify_location(RuntimeLocationVerification("ws_a"))
+    assert empty.ready is False
+    assert empty.detail == "projection has no agents or models"
+
+    disconnected = await adapter.verify_location(
+        RuntimeLocationVerification(
+            "ws_a", agents=("build",), models=(RuntimeModelRef("p1", "m1"),)
+        )
+    )
+    assert disconnected.ready is False
+    assert disconnected.detail == "workspace runtime is not connected"
+
+
+@pytest.mark.asyncio
+async def test_verify_location_waits_for_step_started() -> None:
+    started = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal started
+        path = request.url.path
+        if path == "/api/health":
+            return _json(200, {"healthy": True})
+        if path == "/api/location":
+            return _json(200, {"directory": "/srv/ws_a"})
+        if path == "/api/agent":
+            return _json(200, {"location": {}, "data": [{"name": "build"}]})
+        if path == "/api/model":
+            return _json(
+                200, {"location": {}, "data": [{"id": "m1", "providerID": "p1"}]}
+            )
+        if path == "/api/skill":
+            return _json(200, {"location": {}, "data": []})
+        if path == "/api/session" and request.method == "POST":
+            return _json(200, {"data": {"id": "ses_1"}})
+        if path == "/api/session/ses_1/prompt":
+            started = True
+            return _json(200, {"data": {}})
+        if path == "/api/session/ses_1/history":
+            if not started:
+                return _json(200, {"data": [], "hasMore": False})
+            return _json(
+                200,
+                {
+                    "data": [
+                        {
+                            "id": "evt_1",
+                            "type": "session.next.step.started",
+                            "data": {
+                                "sessionID": "ses_1",
+                                "assistantMessageID": "msg_1",
+                                "timestamp": 1,
+                            },
+                            "durable": {"seq": 1},
+                        }
+                    ],
+                    "hasMore": False,
+                },
+            )
+        raise AssertionError(f"unexpected request {request.method} {path}")
+
+    adapter = _adapter(handler, poll_interval=0.01)
+    await adapter.connect(_connection())
+
+    readiness = await adapter.verify_location(
+        RuntimeLocationVerification(
+            "ws_a",
+            agents=("build",),
+            models=(RuntimeModelRef(provider_id="p1", model_id="m1"),),
+            timeout=1.0,
+        )
+    )
+
+    assert readiness.ready is True
+    assert readiness.agents == ("build",)
+
+
+@pytest.mark.asyncio
+async def test_verify_location_times_out_without_step_started() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/health":
+            return _json(200, {"healthy": True})
+        if path == "/api/location":
+            return _json(200, {"directory": "/srv/ws_a"})
+        if path == "/api/agent":
+            return _json(200, {"location": {}, "data": [{"name": "build"}]})
+        if path == "/api/model":
+            return _json(
+                200, {"location": {}, "data": [{"id": "m1", "providerID": "p1"}]}
+            )
+        if path == "/api/skill":
+            return _json(200, {"location": {}, "data": []})
+        if path == "/api/session" and request.method == "POST":
+            return _json(200, {"data": {"id": "ses_1"}})
+        if path == "/api/session/ses_1/prompt":
+            return _json(200, {"data": {}})
+        if path == "/api/session/ses_1/history":
+            return _json(200, {"data": [], "hasMore": False})
+        raise AssertionError(f"unexpected request {request.method} {path}")
+
+    adapter = _adapter(handler, poll_interval=0.01)
+    await adapter.connect(_connection())
+
+    readiness = await adapter.verify_location(
+        RuntimeLocationVerification(
+            "ws_a",
+            agents=("build",),
+            models=(RuntimeModelRef(provider_id="p1", model_id="m1"),),
+            timeout=0.05,
+        )
+    )
+
+    assert readiness.ready is False
+    assert readiness.detail == "warm-up turn did not start at the location"
+
+
+@pytest.mark.asyncio
+async def test_verify_location_times_out_while_history_keeps_paging() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/health":
+            return _json(200, {"healthy": True})
+        if path == "/api/location":
+            return _json(200, {"directory": "/srv/ws_a"})
+        if path == "/api/agent":
+            return _json(200, {"location": {}, "data": [{"name": "build"}]})
+        if path == "/api/model":
+            return _json(
+                200, {"location": {}, "data": [{"id": "m1", "providerID": "p1"}]}
+            )
+        if path == "/api/skill":
+            return _json(200, {"location": {}, "data": []})
+        if path == "/api/session" and request.method == "POST":
+            return _json(200, {"data": {"id": "ses_1"}})
+        if path == "/api/session/ses_1/prompt":
+            return _json(200, {"data": {}})
+        if path == "/api/session/ses_1/history":
+            return _json(200, {"data": [], "hasMore": True})
+        raise AssertionError(f"unexpected request {request.method} {path}")
+
+    adapter = _adapter(handler, poll_interval=0.01)
+    await adapter.connect(_connection())
+
+    readiness = await asyncio.wait_for(
+        adapter.verify_location(
+            RuntimeLocationVerification(
+                "ws_a",
+                agents=("build",),
+                models=(RuntimeModelRef(provider_id="p1", model_id="m1"),),
+                timeout=0.05,
+            )
+        ),
+        timeout=1.0,
+    )
+
+    assert readiness.ready is False
+    assert readiness.detail == "warm-up turn did not start at the location"
 
 
 @pytest.mark.asyncio

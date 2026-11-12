@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 
 import pytest
 
 from witty_service.runtime.contracts import (
+    ReplayQuery,
     RuntimeConnection,
+    RuntimeEventEnvelope,
+    RuntimeEventReplay,
     RuntimeHealth,
     RuntimeLocationReadiness,
     RuntimeLocationVerification,
     RuntimeWorkspace,
 )
 from witty_service.runtime.errors import RuntimePublishUnavailableError
-from witty_service.runtime.manager import WorkspaceRuntimeManager, WorkspaceRuntimeSpec
+from witty_service.runtime.manager import (
+    RuntimePhase,
+    WorkspaceRuntimeManager,
+    WorkspaceRuntimeSpec,
+)
 from witty_service.runtime.projection import (
     ProjectionAgent,
     ProjectionInputs,
@@ -105,6 +112,7 @@ class FakePort:
         self.verify_calls: list[RuntimeLocationVerification] = []
         self.verify_ready = True
         self.verify_detail: str | None = None
+        self.streams: dict[str, asyncio.Queue[RuntimeEventEnvelope]] = {}
 
     async def connect(self, connection: RuntimeConnection) -> RuntimeHealth:
         self.connections.append(connection)
@@ -115,6 +123,22 @@ class FakePort:
 
     async def health(self, workspace_id: str) -> RuntimeHealth:
         return RuntimeHealth(workspace_id=workspace_id, ready=True)
+
+    def subscribe(self, workspace_id: str) -> AsyncIterator[RuntimeEventEnvelope]:
+        return self._stream(workspace_id)
+
+    async def _stream(self, workspace_id: str) -> AsyncIterator[RuntimeEventEnvelope]:
+        queue: asyncio.Queue[RuntimeEventEnvelope] = asyncio.Queue()
+        self.streams[workspace_id] = queue
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            if self.streams.get(workspace_id) is queue:
+                del self.streams[workspace_id]
+
+    async def replay_events(self, query: ReplayQuery) -> RuntimeEventReplay:
+        return RuntimeEventReplay(events=(), has_more=False)
 
     async def verify_location(
         self, request: RuntimeLocationVerification
@@ -412,6 +436,82 @@ async def test_permit_requires_publication_ports() -> None:
 
     with pytest.raises(RuntimePublishUnavailableError, match="not configured"):
         await manager.acquire_turn_permit(_spec(), turn_id="turn-1")
+
+
+@pytest.mark.asyncio
+async def test_acquires_are_blocked_while_publish_drains() -> None:
+    harness = Harness()
+    spec = _spec()
+    await harness.manager.ensure_started(spec)
+    first = await harness.manager.acquire_turn_permit(spec, turn_id="turn-1")
+    harness.change_projection("Changed prompt.")
+
+    publishing = asyncio.create_task(
+        harness.manager.acquire_turn_permit(spec, turn_id="turn-2")
+    )
+    await asyncio.sleep(0.05)
+    late = asyncio.create_task(
+        harness.manager.acquire_turn_permit(spec, turn_id="turn-3")
+    )
+    await asyncio.sleep(0.05)
+
+    assert not publishing.done()
+    assert not late.done()
+    assert harness.manager.publication_state("ws_a").active_turns == 1
+    assert len(harness.sandbox.started) == 2
+
+    await harness.manager.release_turn_permit(first)
+    await asyncio.gather(publishing, late)
+
+    assert harness.manager.publication_state("ws_a").active_turns == 2
+    assert len(harness.sandbox.started) == 3
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_inflight_publish_before_it_restarts() -> None:
+    harness = Harness()
+    spec = _spec()
+    await harness.manager.ensure_started(spec)
+    first = await harness.manager.acquire_turn_permit(spec, turn_id="turn-1")
+    harness.change_projection("Changed prompt.")
+    publisher = asyncio.create_task(
+        harness.manager.acquire_turn_permit(spec, turn_id="turn-2")
+    )
+    await asyncio.sleep(0.05)
+    started_before = len(harness.sandbox.started)
+
+    await harness.manager.stop("ws_a")
+    await harness.manager.release_turn_permit(first)
+
+    with pytest.raises(asyncio.CancelledError):
+        await publisher
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+    assert len(harness.sandbox.started) == started_before
+    assert harness.manager.get_state("ws_a").phase is RuntimePhase.STOPPED
+    assert harness.manager.publication_state("ws_a").phase is PublicationPhase.IDLE
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_publish_and_stops_runtime() -> None:
+    harness = Harness()
+    spec = _spec()
+    await harness.manager.ensure_started(spec)
+    first = await harness.manager.acquire_turn_permit(spec, turn_id="turn-1")
+    harness.change_projection("Changed prompt.")
+    publisher = asyncio.create_task(
+        harness.manager.acquire_turn_permit(spec, turn_id="turn-2")
+    )
+    await asyncio.sleep(0.05)
+
+    await harness.manager.shutdown()
+
+    assert harness.sandbox.cleaned
+    assert harness.manager.get_state("ws_a").phase is RuntimePhase.STOPPED
+    assert harness.manager.publication_state("ws_a").phase is PublicationPhase.IDLE
+    with pytest.raises(asyncio.CancelledError):
+        await publisher
+    await harness.manager.release_turn_permit(first)
 
 
 @pytest.mark.asyncio

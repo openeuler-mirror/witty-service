@@ -287,6 +287,32 @@ def test_local_runtime_status_endpoint_and_cleanup(
     assert handle.sandbox_id not in backend._processes
 
 
+def test_write_runtime_files_is_atomic_and_private(tmp_path) -> None:
+    backend = LocalProcessSandboxBackend()
+    root = tmp_path / "runtime" / "config"
+
+    backend.write_runtime_files(
+        runtime_home=str(root), files={"opencode/opencode.json": '{"agent": {}}'}
+    )
+
+    target = root / "opencode" / "opencode.json"
+    assert target.read_text(encoding="utf-8") == '{"agent": {}}'
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert [entry.name for entry in target.parent.iterdir()] == ["opencode.json"]
+
+
+def test_write_runtime_files_rejects_escaping_paths(tmp_path) -> None:
+    backend = LocalProcessSandboxBackend()
+    root = tmp_path / "runtime" / "config"
+    root.mkdir(parents=True)
+    (tmp_path / "outside").mkdir()
+    (root / "link").symlink_to(tmp_path / "outside")
+
+    for relative in ("../escape.json", "/etc/passwd", "link/escape.json", "a\\b.json"):
+        with pytest.raises(ValueError):
+            backend.write_runtime_files(runtime_home=str(root), files={relative: "{}"})
+
+
 def test_local_runtime_cleanup_keeps_handle_when_stop_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pytest.TempPathFactory,

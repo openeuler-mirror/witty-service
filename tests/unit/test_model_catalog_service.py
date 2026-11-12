@@ -155,3 +155,24 @@ def test_rotation_updates_group_and_removes_old_file() -> None:
         catalog.replace_provider_credential.call_args.kwargs["expected_revision"] == 1
     )
     credentials.delete.assert_called_once_with("mdl_old")
+
+
+def test_update_keeps_the_existing_default_marker() -> None:
+    current = _model(is_default=1)
+    catalog = MagicMock()
+    catalog.get_model.return_value = current
+    catalog.update_model.return_value = current
+    service = _service(catalog, MagicMock())
+
+    service.update_model(
+        current.id,
+        display_name="Renamed",
+        max_tokens=4096,
+        temperature=0.5,
+        enabled=True,
+        is_default=False,
+    )
+
+    catalog.update_model.assert_called_once()
+    assert catalog.update_model.call_args.kwargs["is_default"] == 1
+    catalog.set_default_model.assert_not_called()

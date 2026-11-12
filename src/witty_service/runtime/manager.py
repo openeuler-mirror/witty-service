@@ -5,14 +5,17 @@ import contextlib
 import logging
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from uuid import uuid4
 
 from witty_service.runtime.contracts import (
+    ReplayQuery,
     RuntimeConnection,
+    RuntimeEventEnvelope,
+    RuntimeEventType,
     RuntimeHealth,
     RuntimeLocationVerification,
     RuntimeModelRef,
@@ -22,7 +25,14 @@ from witty_service.runtime.contracts import (
 )
 from witty_service.runtime.errors import (
     RuntimePublishUnavailableError,
+    RuntimeSessionNotFoundError,
     RuntimeUnavailableError,
+)
+from witty_service.runtime.events import (
+    RuntimeResyncReason,
+    RuntimeResyncRequired,
+    RuntimeStreamItem,
+    RuntimeTurnEvent,
 )
 from witty_service.runtime.projection import RuntimeProjection
 from witty_service.runtime.publication import (
@@ -41,6 +51,40 @@ from witty_service.sandbox.base import (
 )
 
 _logger = logging.getLogger(__name__)
+
+_DELTA_EVENT_TYPES = frozenset(
+    {
+        RuntimeEventType.MESSAGE_DELTA,
+        RuntimeEventType.THINKING_DELTA,
+        RuntimeEventType.TOOL_CALL_DELTA,
+        RuntimeEventType.ARTIFACT_DELTA,
+    }
+)
+_TERMINAL_EVENT_TYPES = frozenset(
+    {
+        RuntimeEventType.TURN_COMPLETED,
+        RuntimeEventType.TURN_FAILED,
+        RuntimeEventType.SESSION_ERROR,
+    }
+)
+_SESSION_EVENT_TYPES = frozenset(
+    {
+        RuntimeEventType.SESSION_USAGE,
+        RuntimeEventType.SESSION_ERROR,
+        RuntimeEventType.SESSION_IDLE,
+    }
+)
+_SEQ_OPTIONAL_EVENT_TYPES = _DELTA_EVENT_TYPES | {
+    RuntimeEventType.SESSION_ERROR,
+    RuntimeEventType.SESSION_IDLE,
+}
+_CLOSING_RESYNC_REASONS = frozenset(
+    {
+        RuntimeResyncReason.SUBSCRIBER_LAGGED,
+        RuntimeResyncReason.RUNTIME_STOPPED,
+    }
+)
+_EVENT_BUFFER_SIZE = 256
 
 
 class RuntimePhase(StrEnum):
@@ -113,6 +157,10 @@ class _ManagedWorkspace:
     drained: asyncio.Event = field(default_factory=_drained_event)
     permit_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_activity: float = 0.0
+    subscribers: set[asyncio.Queue[RuntimeStreamItem]] = field(default_factory=set)
+    event_task: asyncio.Task[None] | None = None
+    event_chain_started: bool = False
+    session_seq: dict[str, int] = field(default_factory=dict)
 
     def snapshot(self) -> WorkspaceRuntimeState:
         return WorkspaceRuntimeState(
@@ -157,6 +205,9 @@ class WorkspaceRuntimeManager:
         projection_renderer: RuntimeProjectionRenderer | None = None,
         credential_resolver: RuntimeCredentialResolver | None = None,
         publish_timeout: float = 10.0,
+        subscriber_queue_size: int = 64,
+        subscriber_timeout: float = 5.0,
+        event_reconnect_delay: float = 0.5,
     ) -> None:
         self._port = port
         self._sandbox = sandbox
@@ -166,6 +217,9 @@ class WorkspaceRuntimeManager:
         self._renderer = projection_renderer
         self._credentials = credential_resolver
         self._publish_timeout = publish_timeout
+        self._subscriber_queue_size = subscriber_queue_size
+        self._subscriber_timeout = subscriber_timeout
+        self._event_reconnect_delay = event_reconnect_delay
         self._entries: dict[str, _ManagedWorkspace] = {}
         self._registry_lock = threading.Lock()
 
@@ -215,32 +269,72 @@ class WorkspaceRuntimeManager:
         runtime_session_id: str | None = None,
     ) -> TurnPermit:
         """在同一临界区确认投影已发布并登记活动 Turn；发布期间暂停放行。"""
-        self._require_publication_configured(spec.workspace.workspace_id)
+        workspace_id = spec.workspace.workspace_id
+        self._require_publication_configured(workspace_id)
         entry = self._ensure_entry(spec)
-        projection = await self._ensure_published(entry)
-        async with entry.permit_lock:
-            if entry.phase is not RuntimePhase.HEALTHY:
-                raise RuntimeUnavailableError(
-                    workspace_id=entry.spec.workspace.workspace_id,
-                    detail=entry.last_error or "workspace runtime is not healthy",
-                )
-            if entry.published_hash != projection.projection_hash:
+        deadline = time.monotonic() + self._publish_timeout
+        await self._published_hash(entry)
+        waited = False
+        while True:
+            async with entry.permit_lock:
+                task = entry.publish_task
+                if task is not None and not task.done():
+                    publish = task
+                else:
+                    projection = await self._load_projection(entry)
+                    if (
+                        entry.publication is PublicationPhase.IDLE
+                        and entry.published_hash == projection.projection_hash
+                    ):
+                        self._check_config_isolation(entry)
+                        if entry.phase is not RuntimePhase.HEALTHY:
+                            raise RuntimeUnavailableError(
+                                workspace_id=workspace_id,
+                                detail=entry.last_error
+                                or "workspace runtime is not healthy",
+                            )
+                        permit_id = f"permit_{uuid4().hex}"
+                        entry.active_turns[permit_id] = _ActiveTurn(
+                            turn_id=turn_id, runtime_session_id=runtime_session_id
+                        )
+                        entry.drained.clear()
+                        entry.last_activity = self._clock()
+                        return TurnPermit(
+                            permit_id=permit_id,
+                            workspace_id=workspace_id,
+                            turn_id=turn_id,
+                            published_projection_hash=projection.projection_hash,
+                        )
+                    if waited:
+                        raise RuntimePublishUnavailableError(
+                            workspace_id=workspace_id,
+                            detail="workspace configuration changed during publish",
+                        )
+                    publish = asyncio.create_task(
+                        self._publish(entry, projection, deadline)
+                    )
+                    entry.publish_task = publish
+                    publish.add_done_callback(
+                        lambda done: self._on_publish_done(entry, done)
+                    )
+            remaining = max(0.001, deadline - time.monotonic())
+            try:
+                await asyncio.wait_for(asyncio.shield(publish), remaining)
+            except TimeoutError as exc:
                 raise RuntimePublishUnavailableError(
-                    workspace_id=entry.spec.workspace.workspace_id,
-                    detail="workspace configuration changed during publish",
-                )
-            permit_id = f"permit_{uuid4().hex}"
-            entry.active_turns[permit_id] = _ActiveTurn(
-                turn_id=turn_id, runtime_session_id=runtime_session_id
-            )
-            entry.drained.clear()
-            entry.last_activity = self._clock()
-            return TurnPermit(
-                permit_id=permit_id,
-                workspace_id=entry.spec.workspace.workspace_id,
-                turn_id=turn_id,
-                published_projection_hash=projection.projection_hash,
-            )
+                    workspace_id=workspace_id,
+                    detail="workspace configuration publish is still running",
+                ) from exc
+            except RuntimeUnavailableError as exc:
+                raise RuntimePublishUnavailableError(
+                    workspace_id=workspace_id, detail=exc.message
+                ) from exc
+            except Exception as exc:
+                raise RuntimePublishUnavailableError(
+                    workspace_id=workspace_id,
+                    detail="workspace configuration publish failed",
+                ) from exc
+            waited = True
 
     async def bind_turn_runtime_session(
         self, *, workspace_id: str, turn_id: str, runtime_session_id: str
@@ -263,6 +357,254 @@ class WorkspaceRuntimeManager:
                 entry.drained.set()
             entry.last_activity = self._clock()
 
+    async def subscribe_events(
+        self, workspace_id: str
+    ) -> AsyncIterator[RuntimeStreamItem]:
+        """订阅该 Workspace 的唯一事件链；消费方断开即注销，不建立每 Session SSE。"""
+        entry = self._entries.get(workspace_id)
+        if entry is None:
+            return
+        queue: asyncio.Queue[RuntimeStreamItem] = asyncio.Queue(
+            maxsize=self._subscriber_queue_size
+        )
+        entry.subscribers.add(queue)
+        try:
+            while True:
+                item = await queue.get()
+                yield item
+                if (
+                    isinstance(item, RuntimeResyncRequired)
+                    and item.reason in _CLOSING_RESYNC_REASONS
+                ):
+                    return
+        finally:
+            entry.subscribers.discard(queue)
+
+    async def _start_event_chain(self, entry: _ManagedWorkspace) -> None:
+        await self._stop_event_chain(entry)
+        reason = (
+            RuntimeResyncReason.RUNTIME_RESTARTED if entry.event_chain_started else None
+        )
+        entry.event_chain_started = True
+        entry.event_task = asyncio.create_task(
+            self._run_event_chain(entry, resync=reason)
+        )
+
+    async def _stop_event_chain(self, entry: _ManagedWorkspace) -> None:
+        task = entry.event_task
+        entry.event_task = None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _run_event_chain(
+        self, entry: _ManagedWorkspace, *, resync: RuntimeResyncReason | None
+    ) -> None:
+        if resync is not None:
+            self._notify_resync(entry, resync)
+        interrupted = False
+        while True:
+            processed = False
+            try:
+                processed = await self._stream_once(entry)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _logger.warning(
+                    "workspace runtime %s event stream failed: %s",
+                    entry.spec.workspace.workspace_id,
+                    exc,
+                )
+            if entry.phase is not RuntimePhase.HEALTHY:
+                return
+            if processed:
+                interrupted = False
+            if not interrupted:
+                self._notify_resync(entry, RuntimeResyncReason.EVENT_STREAM_INTERRUPTED)
+                interrupted = True
+            await asyncio.sleep(self._event_reconnect_delay)
+
+    async def _stream_once(self, entry: _ManagedWorkspace) -> bool:
+        queue: asyncio.Queue[RuntimeEventEnvelope] = asyncio.Queue(
+            maxsize=_EVENT_BUFFER_SIZE
+        )
+        pump = asyncio.create_task(self._pump_events(entry, queue))
+        getter: asyncio.Task[RuntimeEventEnvelope] | None = None
+        processed = False
+        try:
+            await self._replay_gap(entry)
+            while True:
+                getter = asyncio.create_task(queue.get())
+                done, _ = await asyncio.wait(
+                    {getter, pump}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if getter in done:
+                    envelope = getter.result()
+                    getter = None
+                    await self._route_event(entry, envelope)
+                    processed = True
+                    continue
+                getter.cancel()
+                await asyncio.gather(getter, return_exceptions=True)
+                getter = None
+                pump.result()
+                return processed
+        finally:
+            if getter is not None:
+                getter.cancel()
+                await asyncio.gather(getter, return_exceptions=True)
+            pump.cancel()
+            await asyncio.gather(pump, return_exceptions=True)
+
+    async def _pump_events(
+        self, entry: _ManagedWorkspace, queue: asyncio.Queue[RuntimeEventEnvelope]
+    ) -> None:
+        async for envelope in self._port.subscribe(entry.spec.workspace.workspace_id):
+            await queue.put(envelope)
+
+    async def _replay_gap(self, entry: _ManagedWorkspace) -> None:
+        workspace_id = entry.spec.workspace.workspace_id
+        sessions = set(entry.session_seq)
+        sessions.update(
+            turn.runtime_session_id
+            for turn in entry.active_turns.values()
+            if turn.runtime_session_id is not None
+        )
+        for runtime_session_id in sessions:
+            after = entry.session_seq.get(runtime_session_id, 0)
+            while True:
+                try:
+                    replay = await self._port.replay_events(
+                        ReplayQuery(
+                            workspace_id=workspace_id,
+                            runtime_session_id=runtime_session_id,
+                            after_seq=after,
+                        )
+                    )
+                except RuntimeSessionNotFoundError:
+                    entry.session_seq.pop(runtime_session_id, None)
+                    break
+                except Exception as exc:
+                    _logger.warning(
+                        "failed to replay runtime session %s: %s",
+                        runtime_session_id,
+                        exc,
+                    )
+                    break
+                for envelope in replay.events:
+                    await self._route_event(entry, envelope)
+                last = max((item.durable_seq or 0 for item in replay.events), default=0)
+                if not replay.has_more or last <= after:
+                    break
+                after = last
+
+    async def _route_event(
+        self, entry: _ManagedWorkspace, envelope: RuntimeEventEnvelope
+    ) -> None:
+        if envelope.durable_seq is None:
+            if envelope.type not in _SEQ_OPTIONAL_EVENT_TYPES:
+                return
+        elif envelope.durable_seq <= entry.session_seq.get(
+            envelope.runtime_session_id, 0
+        ):
+            return
+
+        turn = self._active_turn(entry, envelope.runtime_session_id)
+        if turn is not None:
+            if turn.terminal:
+                if envelope.type in _TERMINAL_EVENT_TYPES:
+                    return
+                if envelope.type not in _SESSION_EVENT_TYPES:
+                    return
+            elif envelope.type in _TERMINAL_EVENT_TYPES:
+                turn.terminal = True
+
+        entry.last_activity = self._clock()
+        await self._deliver(
+            entry,
+            RuntimeTurnEvent(
+                workspace_id=entry.spec.workspace.workspace_id,
+                turn_id=None if turn is None else turn.turn_id,
+                event=envelope,
+            ),
+        )
+        if envelope.durable_seq is not None:
+            entry.session_seq[envelope.runtime_session_id] = envelope.durable_seq
+
+    @staticmethod
+    def _active_turn(
+        entry: _ManagedWorkspace, runtime_session_id: str
+    ) -> _ActiveTurn | None:
+        for turn in reversed(tuple(entry.active_turns.values())):
+            if turn.runtime_session_id == runtime_session_id:
+                return turn
+        return None
+
+    async def _deliver(self, entry: _ManagedWorkspace, item: RuntimeStreamItem) -> None:
+        is_delta = isinstance(item, RuntimeTurnEvent) and (
+            item.event.type in _DELTA_EVENT_TYPES
+        )
+        for queue in tuple(entry.subscribers):
+            if is_delta:
+                try:
+                    queue.put_nowait(item)
+                except asyncio.QueueFull:
+                    _logger.warning(
+                        "dropping slow event subscriber for workspace %s",
+                        entry.spec.workspace.workspace_id,
+                    )
+                    self._close_subscriber(
+                        entry, queue, RuntimeResyncReason.SUBSCRIBER_LAGGED
+                    )
+                continue
+            try:
+                await asyncio.wait_for(queue.put(item), self._subscriber_timeout)
+            except TimeoutError:
+                _logger.warning(
+                    "dropping slow event subscriber for workspace %s",
+                    entry.spec.workspace.workspace_id,
+                )
+                self._close_subscriber(
+                    entry, queue, RuntimeResyncReason.SUBSCRIBER_LAGGED
+                )
+
+    def _notify_resync(
+        self, entry: _ManagedWorkspace, reason: RuntimeResyncReason
+    ) -> None:
+        item = RuntimeResyncRequired(
+            workspace_id=entry.spec.workspace.workspace_id,
+            reason=reason,
+            last_durable_seq=max(entry.session_seq.values(), default=0),
+        )
+        for queue in tuple(entry.subscribers):
+            try:
+                queue.put_nowait(item)
+            except asyncio.QueueFull:
+                self._close_subscriber(
+                    entry, queue, RuntimeResyncReason.SUBSCRIBER_LAGGED
+                )
+
+    def _close_subscriber(
+        self,
+        entry: _ManagedWorkspace,
+        queue: asyncio.Queue[RuntimeStreamItem],
+        reason: RuntimeResyncReason,
+    ) -> None:
+        entry.subscribers.discard(queue)
+        while True:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        queue.put_nowait(
+            RuntimeResyncRequired(
+                workspace_id=entry.spec.workspace.workspace_id,
+                reason=reason,
+                last_durable_seq=max(entry.session_seq.values(), default=0),
+            )
+        )
+
     def _require_publication_configured(self, workspace_id: str) -> None:
         if (
             self._projection_source is None
@@ -274,43 +616,6 @@ class WorkspaceRuntimeManager:
                 workspace_id=workspace_id,
                 detail="workspace projection publication is not configured",
             )
-
-    async def _ensure_published(self, entry: _ManagedWorkspace) -> RuntimeProjection:
-        workspace_id = entry.spec.workspace.workspace_id
-        deadline = time.monotonic() + self._publish_timeout
-        projection = await self._load_projection(entry)
-        if await self._published_hash(entry) == projection.projection_hash:
-            return projection
-        async with entry.permit_lock:
-            task = entry.publish_task
-            if task is None or task.done():
-                task = asyncio.create_task(self._publish(entry, projection, deadline))
-                entry.publish_task = task
-                task.add_done_callback(lambda done: self._on_publish_done(entry, done))
-        remaining = max(0.001, deadline - time.monotonic())
-        try:
-            await asyncio.wait_for(asyncio.shield(task), remaining)
-        except TimeoutError as exc:
-            raise RuntimePublishUnavailableError(
-                workspace_id=workspace_id,
-                detail="workspace configuration publish is still running",
-            ) from exc
-        except RuntimeUnavailableError as exc:
-            raise RuntimePublishUnavailableError(
-                workspace_id=workspace_id, detail=exc.message
-            ) from exc
-        except Exception as exc:
-            raise RuntimePublishUnavailableError(
-                workspace_id=workspace_id,
-                detail="workspace configuration publish failed",
-            ) from exc
-        latest = await self._load_projection(entry)
-        if entry.published_hash != latest.projection_hash:
-            raise RuntimePublishUnavailableError(
-                workspace_id=workspace_id,
-                detail="workspace configuration changed during publish",
-            )
-        return latest
 
     async def _publish(
         self,
@@ -474,6 +779,14 @@ class WorkspaceRuntimeManager:
         entry = self._entries.get(workspace_id)
         if entry is None:
             return self.get_state(workspace_id)
+        task = entry.publish_task
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            entry.publish_task = None
+            entry.publication = PublicationPhase.IDLE
+            entry.pending_hash = None
         async with entry.lock:
             if entry.handle is None:
                 entry.reset(RuntimePhase.STOPPED)
@@ -495,13 +808,19 @@ class WorkspaceRuntimeManager:
             task = entry.publish_task
             if task is not None and not task.done():
                 task.cancel()
-                with contextlib.suppress(BaseException):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+                entry.publication = PublicationPhase.IDLE
+                entry.pending_hash = None
             try:
                 await self.stop(workspace_id)
             except RuntimeUnavailableError:
                 _logger.warning(
                     "workspace runtime %s did not stop cleanly", workspace_id
+                )
+            for queue in tuple(entry.subscribers):
+                self._close_subscriber(
+                    entry, queue, RuntimeResyncReason.RUNTIME_STOPPED
                 )
 
     async def _start_locked(self, entry: _ManagedWorkspace) -> WorkspaceRuntimeState:
@@ -564,6 +883,7 @@ class WorkspaceRuntimeManager:
         entry.sandbox_id = handle.sandbox_id
         entry.started_at = self._clock()
         entry.last_error = None
+        await self._start_event_chain(entry)
         return entry.snapshot()
 
     async def _connect(
@@ -610,6 +930,7 @@ class WorkspaceRuntimeManager:
             _logger.exception("runtime adapter failed to disconnect %s", workspace_id)
 
     async def _cleanup_handle(self, entry: _ManagedWorkspace) -> None:
+        await self._stop_event_chain(entry)
         handle = entry.handle
         if handle is None:
             return

@@ -138,6 +138,18 @@ class OpenCodeRuntimeAdapter:
         self, request: RuntimeLocationVerification
     ) -> RuntimeLocationReadiness:
         """预热目标 location 直到出现 ``step.started``，并核对可见性。"""
+        if not request.agents or not request.models:
+            return RuntimeLocationReadiness(
+                workspace_id=request.workspace_id,
+                ready=False,
+                detail="projection has no agents or models",
+            )
+        if request.workspace_id not in self._clients:
+            return RuntimeLocationReadiness(
+                workspace_id=request.workspace_id,
+                ready=False,
+                detail="workspace runtime is not connected",
+            )
         deadline = time.monotonic() + request.timeout
         while True:
             snapshot = await self.inspect_workspace(request.workspace_id)
@@ -155,12 +167,8 @@ class OpenCodeRuntimeAdapter:
         location: RuntimeLocationReadiness,
         deadline: float,
     ) -> RuntimeLocationReadiness:
-        if not location.agents or not location.models:
-            return _readiness(
-                location, detail="location catalog has no agents or models"
-            )
-        agent = request.agents[0] if request.agents else location.agents[0]
-        model = request.models[0] if request.models else location.models[0]
+        agent = request.agents[0]
+        model = request.models[0]
         client = self._client(request.workspace_id)
         workspace_id = request.workspace_id
         try:
@@ -177,20 +185,29 @@ class OpenCodeRuntimeAdapter:
         try:
             await client.prompt(
                 runtime_session_id,
-                message_id=f"warmup_{uuid4().hex}",
+                message_id=f"msg_warmup_{uuid4().hex}",
                 text="warm up",
             )
+            after_seq = 0
             while True:
-                events, _ = await client.history(
-                    runtime_session_id, after_seq=0, limit=100
-                )
-                if any(_is_turn_started(workspace_id, raw) for raw in events):
-                    return _readiness(location, ready=True)
                 if time.monotonic() >= deadline:
                     return _readiness(
-                        location, detail="warm-up turn did not start at the location"
+                        location,
+                        detail="warm-up turn did not start at the location",
                     )
-                await asyncio.sleep(self._poll_interval)
+                events, has_more = await client.history(
+                    runtime_session_id, after_seq=after_seq, limit=100
+                )
+                progressed = False
+                for raw in events:
+                    if _is_turn_started(workspace_id, raw):
+                        return _readiness(location, ready=True)
+                    seq = _durable_seq(raw)
+                    if seq is not None and seq > after_seq:
+                        after_seq = seq
+                        progressed = True
+                if not has_more or not progressed:
+                    await asyncio.sleep(self._poll_interval)
         except (OpenCodeV2Error, httpx.HTTPError) as exc:
             return _readiness(location, detail=f"warm-up turn failed: {exc}")
 
@@ -734,6 +751,14 @@ def _readiness(
         models=location.models,
         skills=location.skills,
         detail=None if ready else detail,
+    )
+
+
+def _durable_seq(payload: dict[str, Any]) -> int | None:
+    durable = payload.get("durable")
+    seq = durable.get("seq") if isinstance(durable, dict) else None
+    return (
+        seq if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0 else None
     )
 
 
