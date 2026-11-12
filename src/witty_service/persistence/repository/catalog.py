@@ -11,10 +11,16 @@ from witty_service.domain.records import (
     SkillRepoRecord,
 )
 from witty_service.persistence.entities import (
+    ChannelInstanceORM,
+    ChannelProvisioningORM,
     McpServerORM,
     ModelORM,
+    ScheduledTaskORM,
+    SessionORM,
     SkillORM,
     SkillRepoORM,
+    TurnORM,
+    WorkspaceORM,
 )
 from witty_service.persistence.repository._base import RepositoryBase, new_id, record_of
 
@@ -31,8 +37,25 @@ class CatalogRepository(RepositoryBase):
         max_tokens: int,
         temperature: float,
         now: int,
+        *,
+        secret_revision: int | None = None,
     ) -> ModelRecord:
         with self._transaction() as session:
+            if credential_ref is None or secret_revision is None:
+                existing = (
+                    session.query(ModelORM)
+                    .filter(
+                        ModelORM.provider_id == provider_id,
+                        ModelORM.credential_ref.isnot(None),
+                    )
+                    .order_by(ModelORM.created_at, ModelORM.id)
+                    .first()
+                )
+                if existing is not None:
+                    if credential_ref is None:
+                        credential_ref = existing.credential_ref
+                    if secret_revision is None:
+                        secret_revision = existing.secret_revision
             row = ModelORM(
                 id=new_id(),
                 display_name=display_name,
@@ -45,6 +68,7 @@ class CatalogRepository(RepositoryBase):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 is_default=0,
+                secret_revision=0 if secret_revision is None else secret_revision,
                 created_at=now,
                 updated_at=now,
             )
@@ -101,6 +125,86 @@ class CatalogRepository(RepositoryBase):
             row.updated_at = now
             session.flush()
             return record_of(ModelRecord, row)
+
+    def list_provider_models(self, provider_id: str) -> list[ModelRecord]:
+        with self._read() as session:
+            rows = (
+                session.query(ModelORM)
+                .filter(ModelORM.provider_id == provider_id)
+                .order_by(ModelORM.created_at, ModelORM.id)
+                .all()
+            )
+            return [record_of(ModelRecord, row) for row in rows]
+
+    def count_models_for_provider(self, provider_id: str) -> int:
+        with self._read() as session:
+            return (
+                session.query(func.count())
+                .select_from(ModelORM)
+                .filter(ModelORM.provider_id == provider_id)
+                .scalar()
+                or 0
+            )
+
+    def get_provider_credential(self, provider_id: str) -> tuple[str | None, int]:
+        with self._read() as session:
+            row = (
+                session.query(ModelORM)
+                .filter(ModelORM.provider_id == provider_id)
+                .order_by(ModelORM.created_at, ModelORM.id)
+                .first()
+            )
+            return (
+                (None, 0) if row is None else (row.credential_ref, row.secret_revision)
+            )
+
+    def replace_provider_credential(
+        self,
+        provider_id: str,
+        new_ref: str | None,
+        new_revision: int,
+        now: int,
+        *,
+        expected_revision: int | None = None,
+    ) -> int:
+        with self._transaction() as session:
+            query = session.query(ModelORM).filter(ModelORM.provider_id == provider_id)
+            total = query.count()
+            if total == 0:
+                return 0
+            if expected_revision is not None:
+                matching = query.filter(
+                    ModelORM.secret_revision == expected_revision
+                ).count()
+                if matching != total:
+                    return 0
+            return query.update(
+                {
+                    "credential_ref": new_ref,
+                    "secret_revision": new_revision,
+                    "updated_at": now,
+                },
+                synchronize_session=False,
+            )
+
+    def count_model_references(self, model_id: str) -> dict[str, int]:
+        references = {
+            "workspaces": WorkspaceORM.default_model_id,
+            "sessions": SessionORM.current_model_id,
+            "turns": TurnORM.model_id,
+            "scheduled_tasks": ScheduledTaskORM.model_id,
+            "channel_instances": ChannelInstanceORM.model_id,
+            "channel_provisionings": ChannelProvisioningORM.model_id,
+        }
+        with self._read() as session:
+            return {
+                name: session.query(func.count())
+                .select_from(column.class_)
+                .filter(column == model_id)
+                .scalar()
+                or 0
+                for name, column in references.items()
+            }
 
     def create_skill_repo(
         self,
@@ -217,6 +321,14 @@ class CatalogRepository(RepositoryBase):
                 .all()
             )
             return [record_of(SkillRecord, row) for row in rows]
+
+    def list_enabled_skills(self) -> list[SkillRecord]:
+        with self._read() as session:
+            rows = session.query(SkillORM).filter(SkillORM.enabled == 1).all()
+            return sorted(
+                (record_of(SkillRecord, row) for row in rows),
+                key=lambda skill: (skill.skill_name.casefold(), skill.skill_name),
+            )
 
     def upsert_mcp_server(
         self,

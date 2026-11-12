@@ -82,7 +82,7 @@ PRAGMA busy_timeout = 5000;
 - 部分唯一索引、表达式唯一索引、`COLLATE NOCASE`、`DESC` 索引和 `CHECK` 均为 SQLite 原生语法，不使用 PostgreSQL 专有的 `JSONB`、数组、`ENUM`、部分表达式语法或 `DEFERRABLE` 依赖。
 - `CHECK` 只能引用本行字段，不得包含子查询、非确定性函数或跨表判断；“至多一个”类规则一律用部分唯一索引实现。
 - 部分唯一索引固定为：`uq_agent_definitions_one_primary`、`uq_workspaces_one_default`、`uq_models_single_default`、`uq_turns_one_running`、`uq_turn_operations_one_reverting`、`uq_scheduled_task_runs_one_running`、`uq_channel_provisionings_waiting`；其中 `uq_channel_provisionings_waiting` 同时使用 `COALESCE` 表达式，属于 SQLite 合法的表达式 + 部分唯一索引组合。
-- 表达式唯一索引固定为 `uq_models_provider_endpoint_model(provider_id, COALESCE(api_base_url,''), provider_model_id)` 与 `uq_channel_provisionings_waiting(channel, COALESCE(owner_ref,''))`；表达式必须是确定性的，禁止在索引中调用时间函数或应用函数。
+- 表达式唯一索引固定为 `uq_channel_provisionings_waiting(channel, COALESCE(owner_ref,''))`；表达式必须是确定性的，禁止在索引中调用时间函数或应用函数。
 - 本文 CHECK 只使用 `IN`、`IS NULL`、`>=`、`BETWEEN` 语义与布尔组合，以及 `json_valid/json_type`；不写跨行子查询、窗口函数或触发器式判断。
 - `COLLATE NOCASE` 只折叠 ASCII 大小写；非 ASCII 名称按原值比较。名称统一在应用层 `trim` 后写入，数据库唯一约束负责最终兜底。
 - 所有时间字段只存 `UTC_MS` 整数；禁止 `DATETIME`、本地时区字符串或浮点秒。
@@ -430,6 +430,7 @@ erDiagram
         integer max_tokens
         real temperature
         integer is_default
+        integer secret_revision
         utc_ms created_at
         utc_ms updated_at
     }
@@ -477,15 +478,16 @@ erDiagram
 | --- | --- | --- | --- |
 | `id` | ID | NOT NULL | PK，Session/Turn 引用的 catalog ID |
 | `display_name` | TEXT | NOT NULL | 用户展示名 |
-| `provider_id` | TEXT | NOT NULL | OpenCode providerID |
+| `provider_id` | TEXT | NOT NULL | OpenCode provider 实例键；同一 provider 下所有模型共享 provider 级字段 |
 | `provider_model_id` | TEXT | NOT NULL | OpenCode modelID，与展示名分离 |
-| `compatibility` | TEXT | NULL | `openai/anthropic` 等协议兼容标识 |
-| `api_base_url` | TEXT | NULL | 自定义 Endpoint |
-| `credential_ref` | TEXT | NULL | 0600 Secret Store 引用；不存明文 API Key |
+| `compatibility` | TEXT | NULL | provider 级字段：`openai/anthropic` 等协议兼容标识；同一 `provider_id` 必须一致 |
+| `api_base_url` | TEXT | NULL | provider 级字段：自定义 Endpoint；同一 `provider_id` 必须一致 |
+| `credential_ref` | TEXT | NULL | provider 级共享的 0600 Secret Store 引用；不存明文 API Key |
 | `enabled` | BOOL | NOT NULL `1` | 禁用后禁止普通新 Turn 与重生成 |
 | `max_tokens` | INTEGER | NOT NULL `32768` | `>0` |
 | `temperature` | REAL | NOT NULL `0.7` | 修正旧 Integer 类型，`0.0–2.0` |
 | `is_default` | BOOL | NOT NULL `0` | 全局默认模型 |
+| `secret_revision` | INTEGER | NOT NULL `0` | 凭据修订号，`>=0`，每次凭据写入、替换或移除时递增 |
 | `created_at` | UTC_MS | NOT NULL | 创建时间 |
 | `updated_at` | UTC_MS | NOT NULL | 修改时间 |
 
@@ -495,11 +497,13 @@ erDiagram
 - `ck_models_is_default`：`is_default IN (0,1)`。
 - `ck_models_max_tokens`：`max_tokens > 0`。
 - `ck_models_temperature`：`temperature >= 0.0 AND temperature <= 2.0`。
-- `uq_models_provider_endpoint_model(provider_id, COALESCE(api_base_url,''), provider_model_id)`，使用表达式唯一索引。
+- `ck_models_secret_revision`：`secret_revision >= 0`。
+- `uq_models_provider_model(provider_id, provider_model_id)`，使用唯一约束；`provider_id` 是 provider 实例键。
 - `uq_models_single_default ON is_default WHERE is_default=1`。
 - `ix_models_catalog(enabled, is_default DESC, created_at DESC, id)`。
 - 无外键；被 Workspace/Session/Turn/Scheduler/Channel 引用，自身不引用其他业务表。
 - `compatibility` 是可扩展协议标识，由应用注册表校验，不建 CHECK。
+- 应用不变量：同一 `provider_id` 的所有模型共享 `api_base_url`、`compatibility`、`credential_ref`、`secret_revision`，由仓储事务保证。
 - 被 Workspace/Session/Turn/Scheduler/Channel 引用时禁止硬删除，改为 `enabled=0`。
 - 默认模型必须 enabled，由同一应用事务保证；禁用后的 Workspace 默认值回退见第 10 节。
 
@@ -974,7 +978,8 @@ hash 输入采用确定性规范序列化：对象键排序、集合并按稳定
 - 只有 Runtime 成功接受完整候选投影后，才能把 `published_projection_hash` 更新为实际发布的候选 hash；发布失败保持原值。hash 更新使用独立短事务，网络请求不得在事务内。
 - 如果配置在发布过程中再次变更，已发布 hash 仍只代表实际发布内容。下一轮重新构建全量投影会得到不同 hash，必须再次发布，不能因前一次成功而丢失这次变更。
 - 投影生成在数据库事务外执行且必须幂等；投影失败不回滚已提交配置。修复后依据完整投影 hash 重试，不反向回写 Agent。
-- 模型和 Channel 的凭据值不进入规范 hash 输入或日志；`credential_ref` 只在运行时解析。
+- 模型和 Channel 的凭据值不进入规范 hash 或日志；`credential_ref` 只在运行时解析。
+- `models.secret_revision` 作为凭据变更信号进入规范 hash，用于触发重新发布。
 
 ### 8.3 与 ADR 0002 的持久化边界
 

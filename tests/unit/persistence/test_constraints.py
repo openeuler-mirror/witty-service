@@ -113,25 +113,31 @@ def test_only_one_default_workspace(fixture: Fixture) -> None:
         )
 
 
-def test_model_endpoint_uniqueness_treats_null_and_empty_base_url_equally(
-    fixture: Fixture,
-) -> None:
+def test_model_provider_model_pair_is_unique(fixture: Fixture) -> None:
     catalog = CatalogRepository(fixture.factory)
     catalog.create_model(
-        "Null URL", "provider", "duplicate", None, None, None, 8192, 0.7, fixture.now
+        "First", "provider", "duplicate", None, None, None, 8192, 0.7, fixture.now
     )
 
     with pytest.raises(IntegrityError):
         catalog.create_model(
-            "Empty URL", "provider", "duplicate", None, "", None, 8192, 0.7, fixture.now
+            "Same Pair",
+            "provider",
+            "duplicate",
+            None,
+            "https://example.com",
+            None,
+            8192,
+            0.7,
+            fixture.now,
         )
 
     other = catalog.create_model(
-        "Other URL",
-        "provider",
+        "Other Provider",
+        "another-provider",
         "duplicate",
         None,
-        "https://example.com",
+        None,
         None,
         8192,
         0.7,

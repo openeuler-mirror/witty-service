@@ -121,6 +121,7 @@ class ModelRecord:
     max_tokens: int
     temperature: float
     is_default: int
+    secret_revision: int
     created_at: int
     updated_at: int
 
