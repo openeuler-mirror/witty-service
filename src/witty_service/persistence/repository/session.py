@@ -505,3 +505,23 @@ class SessionRepository(RepositoryBase):
                 .all()
             )
             return [record_of(TurnRuntimeMessageRecord, row) for row in rows]
+
+    def runtime_message_turns(
+        self, session_id: str, message_ids: list[str]
+    ) -> dict[str, TurnRecord]:
+        if not message_ids:
+            return {}
+        with self._read() as session:
+            rows = (
+                session.query(TurnRuntimeMessageORM, TurnORM)
+                .join(TurnORM, TurnORM.id == TurnRuntimeMessageORM.turn_id)
+                .filter(
+                    TurnORM.session_id == session_id,
+                    TurnRuntimeMessageORM.runtime_message_id.in_(message_ids),
+                )
+                .all()
+            )
+            return {
+                message.runtime_message_id: record_of(TurnRecord, turn)
+                for message, turn in rows
+            }

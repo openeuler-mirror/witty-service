@@ -11,7 +11,7 @@ from uuid import uuid4
 from sqlalchemy.exc import IntegrityError
 
 from witty_service.application.pagination import decode_cursor, encode_cursor
-from witty_service.domain.enums import TurnStatus
+from witty_service.domain.enums import MessageRole, TurnStatus
 from witty_service.domain.error_codes import ErrorCode
 from witty_service.domain.errors import DomainError
 from witty_service.domain.records import (
@@ -55,6 +55,12 @@ from witty_service.runtime.projection import agent_internal_name
 logger = logging.getLogger(__name__)
 
 _PUMP_RECONNECT_DELAY = 0.5
+_MESSAGE_BOUNDARY_EVENT_TYPES = frozenset(
+    {
+        RuntimeEventType.MESSAGE_STARTED,
+        RuntimeEventType.MESSAGE_COMPLETED,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +232,9 @@ class TurnService:
                     parts=parts,
                 )
             )
+            self._sessions.add_runtime_message(
+                f"msg_{turn.id}", turn.id, MessageRole.user, 0, self._clock()
+            )
             admitted = True
             return self._sessions.get_turn(turn_id) or turn
         except BaseException as exc:
@@ -277,6 +286,22 @@ class TurnService:
                 await self._runtime.release_turn_permit(permit)
             except Exception:
                 logger.exception("Failed to release turn permit %s", permit.permit_id)
+
+    def _map_runtime_message(self, item: RuntimeTurnEvent) -> None:
+        turn_id = item.turn_id
+        message_id = item.event.runtime_message_id
+        if turn_id is None or message_id is None:
+            return
+        turn = self._sessions.get_turn(turn_id)
+        if turn is None or turn.status is not TurnStatus.running:
+            return
+        messages = self._sessions.list_runtime_messages(turn_id)
+        if any(message.runtime_message_id == message_id for message in messages):
+            return
+        ordinal = max((message.ordinal for message in messages), default=0) + 1
+        self._sessions.add_runtime_message(
+            message_id, turn_id, MessageRole.assistant, ordinal, self._clock()
+        )
 
     def _raise_if_closing(self) -> None:
         if self._closing:
@@ -410,6 +435,9 @@ class TurnService:
         if turn_id is None:
             return
         event_type = item.event.type
+        if event_type in _MESSAGE_BOUNDARY_EVENT_TYPES:
+            self._map_runtime_message(item)
+            return
         if event_type is RuntimeEventType.TURN_COMPLETED:
             status = TurnStatus.completed
             error_code = None

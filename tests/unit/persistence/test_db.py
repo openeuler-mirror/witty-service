@@ -38,6 +38,10 @@ def test_init_db_explicit_flag_overrides_environment(monkeypatch) -> None:
         engine.dispose()
 
 
+def test_schema_has_no_legacy_message_tables() -> None:
+    assert {"messages", "message_events"}.isdisjoint(Base.metadata.tables)
+
+
 def test_init_db_rejects_legacy_schema_without_writing(tmp_path) -> None:
     db_path = tmp_path / "legacy.sqlite3"
     engine = create_engine(f"sqlite:///{db_path}")

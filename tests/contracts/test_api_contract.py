@@ -75,8 +75,6 @@ def test_generated_contract_is_valid_openapi(spec: dict[str, Any]) -> None:
         ("DELETE", "/api/sessions/ses_01", None),
         ("POST", "/api/sessions/ses_01/turns/trn_01/abort", None),
         ("POST", "/api/sessions/ses_01/turns/trn_01/regenerate", None),
-        ("GET", "/api/sessions/ses_01/messages", None),
-        ("GET", "/api/sessions/ses_01/events", None),
         ("GET", "/api/agents", None),
         ("GET", "/api/agents/agt_01", None),
         ("POST", "/api/agents", {"name": "demo"}),

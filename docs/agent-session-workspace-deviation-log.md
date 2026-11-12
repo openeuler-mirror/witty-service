@@ -90,7 +90,7 @@
 - T02 的选择更新只写 `current_agent_id/current_model_id`，仓库层按非空列部分更新；不触碰 `runtime_session_id`、历史 Turn 快照，也不启动 Runtime。
 - T03 保留唯一准入路径 `SessionRepository.start_turn`：Session 当前选择在插入事务内重新读取并校验，调用方传值不一致时拒绝，避免 TOCTOU 归因；seq 分配与 running 插入同事务，冲突映射 409 `ACTIVE_TURN_CONFLICT`。
 - T04 归因快照在准入事务内写入，历史只读 Turn 快照；未用快照重建执行环境。Turn 列表按 `turn_seq` 倒序分页。
-- R06/R07 已合入本分支；T05 起经 Manager 的 `acquire_turn_permit/release_turn_permit/bind_turn_runtime_session`、单条事件链与历史门面接入，不以 Fake 放行。R09 的 `runtime_status` 与 503 `RUNTIME_UNAVAILABLE` 在 T07 接入时校验。
+- R06/R07 已合入本分支；T05 起经 Manager 的 `acquire_turn_permit/release_turn_permit/bind_turn_runtime_session`、单条事件链与历史门面接入，不以 Fake 放行。R09 的 `runtime_status` 与 503 `RUNTIME_UNAVAILABLE` 已在 T07 接入，并由 Session 契约测试与历史 503 契约测试校验。
 
 ## T05 Turn 执行管线
 
@@ -103,3 +103,27 @@
 - 文本 Parts 由 API DTO 转成 Runtime Parts；文件 Parts 在 T05 不支持，在拉起 Runtime 与插入 running 之前直接 400，避免留下 error Turn 与消耗 `turn_seq`。`message_id` 固定为 `msg_<turn_id>`，同一 Turn 重试保持稳定。
 - Runtime Session 每回合都经 `ensure_runtime_session` 复核并覆盖为返回的 ID，兼容 Runtime 重启后旧 ID 失效；单 Session 唯一 running Turn 保证并发覆盖不会发生。
 - 新增 `TurnService.close()`：先置 closing 标志让在途请求在下一个 await 后退出，再取消事件泵，把仍持有 Permit 的 running Turn 落 `interrupted` 并逐个隔离释放 Permit，最后关闭 Manager。
+
+## T06 turn_runtime_messages 消息归属
+
+- 用户消息在 `admit_turn` 返回成功后以固定 ID `msg_<turn_id>`、`user`、ordinal 0 写入；admission 失败不会留下没有 Runtime 对应物的消息映射。
+- Assistant 消息只在 `message.started`/`message.completed` 边界事件映射，`message.delta` 不落库：Delta 只携带增量正文且高频，重复查询会拖慢事件泵；同一 `runtime_message_id` 的边界事件已足够建立唯一归属。
+- 映射只记录 `runtime_message_id/turn_id/role/ordinal/created_at`，不保存正文、Parts、Delta 或 Tool 副本；幂等由 `add_runtime_message` 的 `on_conflict_do_nothing(runtime_message_id)` 加冲突一致性校验兜底，表级 `(turn_id, ordinal)` 唯一约束防止序号错乱。
+- Assistant ordinal 取当前已映射消息的 `max(ordinal)+1` 且最小为 1，把 0 永久预留给用户消息；即使 Assistant 边界事件先于用户消息落库也不会占用 0 或与用户消息冲突。
+- 只有 `TurnStatus.running` 的 Turn 接受消息映射；终态后晚到的 `message.started`/`message.completed` 直接丢弃，不复活 Turn、不新增归属。
+- `agent-switched`/`model-switched` 只存在于 v2 历史消息，不会出现在 live 的 text 事件流；本阶段消息映射只消费带 `runtime_message_id` 的文本边界事件，控制消息过滤与映射留给 T07 History Projection。
+
+## T07 v2 History Projection 与 Session 历史/事件读模型
+
+- 新增 `HistoryService`：消息页只读 v2 Runtime 历史，DB 仅用于把 `runtime_message_id` 合并回 `turn_runtime_messages` 获取 Turn 归因；Session 没有 Runtime Session 时返回空页，不读取 DB 消息表。
+- 消息接口改为 `limit/cursor` 入参、`next_cursor/previous_cursor` 出参；对外游标是带 Session 作用域的 base64 不透明串，内部原样携带 v2 的 `cursor.next/previous`，跨 Session 使用返回 400 `CURSOR_SESSION_MISMATCH`，非法游标返回 400 `INVALID_CURSOR`。
+- `agent_switched/model_switched` 控制消息在投影层过滤，不伪装成 user/assistant；过滤只影响当前页条目数，v2 返回的 next/previous 游标原样保留，翻页边界不因过滤而漂移。
+- Runtime 非 ready（含发布中 `restarting`、进程退出 `unavailable`）时返回 503 `RUNTIME_UNAVAILABLE`，不回退 DB 历史；Session 不存在或已删除返回 404。
+- Session 事件流以 `data: <SessionEvent JSON>` 输出，不写 SSE `id:`/`event:`/`retry:`；Turn/消息事件按 Turn 所属 Session 过滤，session 级事件在订阅后 Runtime Session ID 才落库或重启后变化时会重新读取 Session，避免用订阅瞬间的快照漏事件；`RuntimeResyncRequired` 统一映射为 `resync_required`，payload 标记 `full_reload=true` 并携带 `reason/last_durable_seq`，要求客户端全量重读 Turn 与历史。
+- Manager 增加 `read_history` 纯委托门面，并统一用 R09 的 `require_ready()` 作为最后门禁（400/404 判定后调用）；事件重连与 durable seq 去重仍由 Manager 单 Workspace 事件链负责，API 只消费其重放后的 `RuntimeStreamItem`。
+
+## T10 删除 DB 消息写入与跨源游标残留
+
+- D07 已清理旧 `messages`/`message_events` 表、旧消息 ORM/Repository 和旧入口，本轮符号扫描在 `src/witty_service` 未发现 `MessageRepository`、`message_events`、`next_before`、`compare`、`cross_source` 或 `messages` 表定义残留，因此无代码可删。
+- 新增结构回归测试守住 schema 不重新引入 `messages`/`message_events` 表；新增“Runtime 不可用时即使存在 Turn 消息归属也返回 503”的契约测试，证明历史主路径不存在 DB 正文回退。
+- 消息正文、Parts、Delta、Tool 副本只存在 OpenCode；本服务 DB 仅保留 Session/Turn 元数据、Turn 归因与 `turn_runtime_messages` 的消息 ID 归属。
