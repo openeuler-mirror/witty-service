@@ -127,3 +127,11 @@
 - D07 已清理旧 `messages`/`message_events` 表、旧消息 ORM/Repository 和旧入口，本轮符号扫描在 `src/witty_service` 未发现 `MessageRepository`、`message_events`、`next_before`、`compare`、`cross_source` 或 `messages` 表定义残留，因此无代码可删。
 - 新增结构回归测试守住 schema 不重新引入 `messages`/`message_events` 表；新增“Runtime 不可用时即使存在 Turn 消息归属也返回 503”的契约测试，证明历史主路径不存在 DB 正文回退。
 - 消息正文、Parts、Delta、Tool 副本只存在 OpenCode；本服务 DB 仅保留 Session/Turn 元数据、Turn 归因与 `turn_runtime_messages` 的消息 ID 归属。
+
+## T11 零配置直接对话与模型切换 E2E
+
+- 新增 `tests/e2e/test_zero_config_chat_e2e.py`：生产组合根（SQLite + 真实 OpenCode 1.17.13 serve + 本地 OpenAI 兼容 provider），主业务链路全部走 HTTP API，测试内部直接读取 container 做运行态断言与停机模拟；provider 用 `tests.probes.mock_provider`，不消耗真实 LLM 凭据。
+- 默认 Workspace/Primary 下只创建模型并通过 `model_id` 建 Session 即可完成 Turn，不创建任何 Expert；Turn 与历史消息的 Agent 归因都指向 Primary。
+- 同一 Session PATCH `selection.model_id` 后，下一 Turn 的模型请求与归因快照切到新模型；前一 Turn 的 Turn 记录和历史消息归因保持旧模型，不随 Session 当前选择回写。
+- 保存凭据（`PUT /models/{id}/credential`）后 Runtime 仍为 HEALTHY、sandbox_id 不变且发布状态保持 IDLE/已发布 hash 不变，证明保存不停服；下一次 Turn 后 sandbox_id 与已发布 hash 同时变化，证明“下一 Turn 触发发布”；发布与 Turn Permit 的先后时序由 `tests/runtime/test_runtime_publication.py` 覆盖，E2E 不重复声称验证门禁内部时序。
+- Runtime 显式停止后 `GET /sessions/{id}/messages` 返回 503 `RUNTIME_UNAVAILABLE`，纯 DB 的 Turn 列表仍返回 200，证明历史无 DB 正文回退。
