@@ -547,8 +547,16 @@ class WorkspaceRuntimeManager:
         )
         for queue in tuple(entry.subscribers):
             if is_delta:
-                with contextlib.suppress(asyncio.QueueFull):
+                try:
                     queue.put_nowait(item)
+                except asyncio.QueueFull:
+                    _logger.warning(
+                        "dropping slow event subscriber for workspace %s",
+                        entry.spec.workspace.workspace_id,
+                    )
+                    self._close_subscriber(
+                        entry, queue, RuntimeResyncReason.SUBSCRIBER_LAGGED
+                    )
                 continue
             try:
                 await asyncio.wait_for(queue.put(item), self._subscriber_timeout)

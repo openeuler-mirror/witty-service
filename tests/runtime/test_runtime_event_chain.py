@@ -436,6 +436,38 @@ async def test_slow_subscriber_gets_resync_and_is_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_delta_overflow_closes_subscriber_with_resync() -> None:
+    harness = Harness(subscriber_queue_size=1, subscriber_timeout=0.05)
+    spec = _spec()
+    await harness.manager.ensure_started(spec)
+    await harness.manager.acquire_turn_permit(
+        spec, turn_id="turn-1", runtime_session_id="ses_1"
+    )
+    await harness.port.wait_for_stream("ws_a")
+    stream = harness.manager.subscribe_events("ws_a")
+    first = asyncio.create_task(stream.__anext__())
+    await asyncio.sleep(0)
+    harness.port.emit(
+        "ws_a", _envelope(RuntimeEventType.TURN_STARTED, seq=1, session="ses_1")
+    )
+    assert isinstance(await asyncio.wait_for(first, timeout=1), RuntimeTurnEvent)
+
+    harness.port.emit(
+        "ws_a", _envelope(RuntimeEventType.MESSAGE_DELTA, seq=None, session="ses_1")
+    )
+    harness.port.emit(
+        "ws_a", _envelope(RuntimeEventType.MESSAGE_DELTA, seq=None, session="ses_1")
+    )
+    await asyncio.sleep(0.05)
+
+    item = await asyncio.wait_for(stream.__anext__(), timeout=1)
+    assert isinstance(item, RuntimeResyncRequired)
+    assert item.reason is RuntimeResyncReason.SUBSCRIBER_LAGGED
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(stream.__anext__(), timeout=1)
+
+
+@pytest.mark.asyncio
 async def test_reconnect_replays_active_session_with_pagination() -> None:
     harness = Harness()
     spec = _spec()
