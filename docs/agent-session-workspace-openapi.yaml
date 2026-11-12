@@ -65,9 +65,12 @@ info:
     | 409 | `PRIMARY_AGENT_IMMUTABLE` |
     | 409 | `AGENT_ARCHIVED` |
     | 409 | `MODEL_DISABLED` |
+    | 409 | `MODEL_PROVIDER_CONFLICT` |
+    | 409 | `MODEL_CREDENTIAL_CONFLICT` |
     | 400 | `MODEL_CREDENTIAL_REQUIRED` |
     | 503 | `MODEL_CREDENTIAL_UNAVAILABLE` |
     | 503 | `MODEL_CREDENTIAL_INVALID` |
+    | 409 | `MODEL_IN_USE` |
     | 409 | `INVALID_TURN_OPERATION` |
     | 500 | `INTERNAL_ERROR` |
     | 501 | `ENDPOINT_NOT_IMPLEMENTED` |
@@ -1241,6 +1244,255 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+  /api/models:
+    get:
+      tags:
+      - models
+      summary: List Models
+      operationId: list_models_api_models_get
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: include_disabled
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Include Disabled
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelListResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    post:
+      tags:
+      - models
+      summary: Create Model
+      operationId: create_model_api_models_post
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateModelRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Runtime 或配置发布暂不可用，可稍后重试
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/models/{model_id}:
+    put:
+      tags:
+      - models
+      summary: Update Model
+      operationId: update_model_api_models__model_id__put
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: model_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Model Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateModelRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      tags:
+      - models
+      summary: Delete Model
+      operationId: delete_model_api_models__model_id__delete
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: model_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Model Id
+      responses:
+        '204':
+          description: Successful Response
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/models/{model_id}/credential:
+    put:
+      tags:
+      - models
+      summary: Rotate Model Credential
+      operationId: rotate_model_credential_api_models__model_id__credential_put
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: model_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Model Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateModelCredentialRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelResponse'
+        '400':
+          description: 参数错误：请求体、查询或路径参数不合法，优先级最高
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: 缺少或错误的 Bearer token
+          headers:
+            WWW-Authenticate:
+              description: Bearer challenge
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标资源不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 当前状态不允许该操作
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Runtime 或配置发布暂不可用，可稍后重试
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
 components:
   schemas:
     AbortTurnResponse:
@@ -1461,6 +1713,64 @@ components:
 
         来源（local/market/preset 及引用）是服务端安装事实，由服务端写入，不接受
         客户端指定。
+    CreateModelRequest:
+      properties:
+        display_name:
+          type: string
+          maxLength: 255
+          minLength: 1
+          title: Display Name
+        provider_id:
+          type: string
+          maxLength: 64
+          minLength: 1
+          title: Provider Id
+        provider_model_id:
+          type: string
+          maxLength: 255
+          minLength: 1
+          title: Provider Model Id
+        compatibility:
+          anyOf:
+          - type: string
+            maxLength: 64
+          - type: 'null'
+          title: Compatibility
+        api_base_url:
+          anyOf:
+          - type: string
+            maxLength: 2048
+          - type: 'null'
+          title: Api Base Url
+        api_key:
+          anyOf:
+          - type: string
+            format: password
+            writeOnly: true
+          - type: 'null'
+          title: Api Key
+        max_tokens:
+          type: integer
+          minimum: 1.0
+          title: Max Tokens
+          default: 32768
+        temperature:
+          type: number
+          maximum: 2.0
+          minimum: 0.0
+          title: Temperature
+          default: 0.7
+        is_default:
+          type: boolean
+          title: Is Default
+          default: false
+      additionalProperties: false
+      type: object
+      required:
+      - display_name
+      - provider_id
+      - provider_model_id
+      title: CreateModelRequest
     CreateSessionRequest:
       properties:
         workspace_id:
@@ -1579,9 +1889,12 @@ components:
       - PRIMARY_AGENT_IMMUTABLE
       - AGENT_ARCHIVED
       - MODEL_DISABLED
+      - MODEL_PROVIDER_CONFLICT
+      - MODEL_CREDENTIAL_CONFLICT
       - MODEL_CREDENTIAL_REQUIRED
       - MODEL_CREDENTIAL_UNAVAILABLE
       - MODEL_CREDENTIAL_INVALID
+      - MODEL_IN_USE
       - INVALID_TURN_OPERATION
       - ENDPOINT_NOT_IMPLEMENTED
       - RUNTIME_UNAVAILABLE
@@ -1754,6 +2067,18 @@ components:
       - created_at
       title: MessageResponse
       description: 只投影 text/reasoning/tool/file；Runtime 的 step 等未知 part 由投影层丢弃。
+    ModelListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/ModelResponse'
+          type: array
+          title: Items
+      additionalProperties: false
+      type: object
+      required:
+      - items
+      title: ModelListResponse
     ModelRef:
       properties:
         id:
@@ -1780,6 +2105,72 @@ components:
       - provider_model_id
       - enabled
       title: ModelRef
+    ModelResponse:
+      properties:
+        id:
+          type: string
+          title: Id
+        display_name:
+          type: string
+          title: Display Name
+        provider_id:
+          type: string
+          title: Provider Id
+        provider_model_id:
+          type: string
+          title: Provider Model Id
+        compatibility:
+          type: string
+          title: Compatibility
+        api_base_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Api Base Url
+        enabled:
+          type: boolean
+          title: Enabled
+        max_tokens:
+          type: integer
+          title: Max Tokens
+        temperature:
+          type: number
+          title: Temperature
+        is_default:
+          type: boolean
+          title: Is Default
+        has_credential:
+          type: boolean
+          title: Has Credential
+        secret_revision:
+          type: integer
+          title: Secret Revision
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        updated_at:
+          type: string
+          format: date-time
+          title: Updated At
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - display_name
+      - provider_id
+      - provider_model_id
+      - compatibility
+      - api_base_url
+      - enabled
+      - max_tokens
+      - temperature
+      - is_default
+      - has_credential
+      - secret_revision
+      - created_at
+      - updated_at
+      title: ModelResponse
     ReasoningMessagePart:
       properties:
         type:
@@ -1794,6 +2185,18 @@ components:
       required:
       - text
       title: ReasoningMessagePart
+    RotateModelCredentialRequest:
+      properties:
+        api_key:
+          type: string
+          format: password
+          title: Api Key
+          writeOnly: true
+      additionalProperties: false
+      type: object
+      required:
+      - api_key
+      title: RotateModelCredentialRequest
     SessionListResponse:
       properties:
         items:
@@ -2170,6 +2573,37 @@ components:
       - expected_config_updated_at
       title: UpdateAgentRequest
       description: 整份编辑定义字段；来源是创建事实，编辑不改变来源。
+    UpdateModelRequest:
+      properties:
+        display_name:
+          type: string
+          maxLength: 255
+          minLength: 1
+          title: Display Name
+        max_tokens:
+          type: integer
+          minimum: 1.0
+          title: Max Tokens
+        temperature:
+          type: number
+          maximum: 2.0
+          minimum: 0.0
+          title: Temperature
+        enabled:
+          type: boolean
+          title: Enabled
+        is_default:
+          type: boolean
+          title: Is Default
+      additionalProperties: false
+      type: object
+      required:
+      - display_name
+      - max_tokens
+      - temperature
+      - enabled
+      - is_default
+      title: UpdateModelRequest
     UpdateSessionRequest:
       properties:
         title:
