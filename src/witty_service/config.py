@@ -222,7 +222,7 @@ class WorkspaceSettings:
         WITTY_RECOVERY_MAX_CONCURRENT: 启动时恢复 agent 的最大并发数, 默认 5
         WITTY_STOP_SANDBOXES_ON_SHUTDOWN: 服务关停时是否停止 local_process 沙箱,
             默认 true。关停不停会留下孤儿进程（占端口/内存），是恢复失败的放大器;
-            开发时用 --reload 频繁重启、希望沙箱存活可置为 false
+            下次启动会按 Workspace 根目录回收这些残留，因此它不能用于让沙箱跨重启存活
     """
 
     root: str = "~/.witty"
