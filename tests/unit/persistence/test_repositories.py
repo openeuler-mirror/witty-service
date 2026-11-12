@@ -28,6 +28,7 @@ from witty_service.persistence.repository import (
     SessionRepository,
     WorkspaceRepository,
 )
+from witty_service.persistence.repository.catalog import ProviderCredentialConflict
 
 
 @dataclass
@@ -257,12 +258,10 @@ def test_catalog_provider_credential_is_shared_across_models(repos: Repos) -> No
         == 2
     )
     assert repos.catalog.get_provider_credential("provider") == ("mdl_rotated", 2)
-    assert (
+    with pytest.raises(ProviderCredentialConflict):
         repos.catalog.replace_provider_credential(
             "provider", "mdl_stale", 3, 1_003, expected_revision=1
         )
-        == 0
-    )
     assert repos.catalog.get_provider_credential("provider") == ("mdl_rotated", 2)
     other = repos.catalog.create_model(
         "Other",
@@ -318,12 +317,10 @@ def test_replace_provider_credential_refuses_a_torn_provider(repos: Repos) -> No
         secret_revision=0,
     )
 
-    assert (
+    with pytest.raises(ProviderCredentialConflict):
         repos.catalog.replace_provider_credential(
             "provider", "mdl_rotated", 2, 1_002, expected_revision=1
         )
-        == 0
-    )
     assert [
         (model.credential_ref, model.secret_revision)
         for model in repos.catalog.list_provider_models("provider")
@@ -350,6 +347,87 @@ def test_list_enabled_skills_excludes_disabled_and_sorts_stably(repos: Repos) ->
         "Zeta",
         "中文技能",
     ]
+
+
+def test_provider_credential_replacement_rolls_back_on_count_mismatch(
+    repos: Repos,
+) -> None:
+    for name in ("First", "Second"):
+        repos.catalog.create_model(
+            name, "provider", name, None, None, None, 1024, 0.2, 1_000
+        )
+
+    with pytest.raises(ProviderCredentialConflict):
+        repos.catalog.replace_provider_credential(
+            "provider", "mdl_new", 1, 1_100, expected_count=3
+        )
+
+    assert repos.catalog.get_provider_credential("provider") == (None, 0)
+
+
+def test_count_model_references_covers_all_consumers(repos: Repos) -> None:
+    agent_id, workspace_id = _workspace(repos)
+    model = repos.catalog.create_model(
+        "Model", "provider", "model-1", None, None, None, 8192, 0.7, 1_000
+    )
+    repos.workspace.create(
+        "Referenced",
+        "/work/referenced",
+        SandboxType.local,
+        agent_id,
+        model.id,
+        0,
+        1_000,
+    )
+    session = repos.session.create(
+        workspace_id, agent_id, model.id, SessionOrigin.web, None, None, None, 1_100
+    )
+    repos.session.start_turn(session.id, agent_id, model.id, 1_101)
+    repos.scheduler.create_task(
+        "Task",
+        ScheduledTaskScheduleType.interval,
+        "UTC",
+        "content",
+        workspace_id,
+        agent_id,
+        model.id,
+        None,
+        60,
+        1_200,
+    )
+    repos.channel.create_instance(
+        "telegram",
+        workspace_id,
+        agent_id,
+        model.id,
+        None,
+        None,
+        {},
+        None,
+        None,
+        1_300,
+    )
+    repos.channel.create_provisioning(
+        "telegram",
+        None,
+        workspace_id,
+        agent_id,
+        model.id,
+        2_000,
+        None,
+        2_000,
+        None,
+        1_400,
+    )
+
+    assert repos.catalog.count_model_references(model.id) == {
+        "workspaces": 1,
+        "sessions": 1,
+        "turns": 1,
+        "scheduled_tasks": 1,
+        "channel_instances": 1,
+        "channel_provisionings": 1,
+    }
 
 
 def test_mcp_upsert_increments_secret_revision(repos: Repos) -> None:

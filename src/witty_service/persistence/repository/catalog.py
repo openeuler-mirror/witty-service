@@ -25,6 +25,10 @@ from witty_service.persistence.entities import (
 from witty_service.persistence.repository._base import RepositoryBase, new_id, record_of
 
 
+class ProviderCredentialConflict(Exception):
+    """Provider 凭据的期望修订号或行数与实际不一致。"""
+
+
 class CatalogRepository(RepositoryBase):
     def create_model(
         self,
@@ -126,6 +130,39 @@ class CatalogRepository(RepositoryBase):
             session.flush()
             return record_of(ModelRecord, row)
 
+    def update_model(
+        self,
+        model_id: str,
+        *,
+        display_name: str,
+        max_tokens: int,
+        temperature: float,
+        enabled: int,
+        is_default: int,
+        now: int,
+    ) -> ModelRecord | None:
+        with self._transaction() as session:
+            row = session.get(ModelORM, model_id)
+            if row is None:
+                return None
+            row.display_name = display_name
+            row.max_tokens = max_tokens
+            row.temperature = temperature
+            row.enabled = enabled
+            row.is_default = is_default if enabled else 0
+            row.updated_at = now
+            session.flush()
+            return record_of(ModelRecord, row)
+
+    def delete_model(self, model_id: str) -> bool:
+        with self._transaction() as session:
+            row = session.get(ModelORM, model_id)
+            if row is None:
+                return False
+            session.delete(row)
+            session.flush()
+            return True
+
     def list_provider_models(self, provider_id: str) -> list[ModelRecord]:
         with self._read() as session:
             rows = (
@@ -166,6 +203,7 @@ class CatalogRepository(RepositoryBase):
         now: int,
         *,
         expected_revision: int | None = None,
+        expected_count: int | None = None,
     ) -> int:
         with self._transaction() as session:
             query = session.query(ModelORM).filter(ModelORM.provider_id == provider_id)
@@ -177,8 +215,8 @@ class CatalogRepository(RepositoryBase):
                     ModelORM.secret_revision == expected_revision
                 ).count()
                 if matching != total:
-                    return 0
-            return query.update(
+                    raise ProviderCredentialConflict(provider_id)
+            affected = query.update(
                 {
                     "credential_ref": new_ref,
                     "secret_revision": new_revision,
@@ -186,6 +224,9 @@ class CatalogRepository(RepositoryBase):
                 },
                 synchronize_session=False,
             )
+            if expected_count is not None and affected != expected_count:
+                raise ProviderCredentialConflict(provider_id)
+            return affected
 
     def count_model_references(self, model_id: str) -> dict[str, int]:
         references = {
