@@ -8,6 +8,7 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from witty_service.application.model_catalog_service import ModelCatalogService
+from witty_service.application.session_service import SessionService
 from witty_service.application.workspace_projection import (
     CatalogCredentialResolver,
     WorkspaceProjectionSource,
@@ -48,6 +49,7 @@ class ServiceContainer:
     sessions: SessionRepository
     runtime_manager: WorkspaceRuntimeManager
     model_catalog: ModelCatalogService
+    session_service: SessionService
     sandbox_backends: dict[str, SandboxBackend] = field(default_factory=dict)
 
     def get_sandbox_backend(self, sandbox_type: str) -> SandboxBackend:
@@ -98,7 +100,18 @@ def build_default_services() -> ServiceContainer:
     catalog_repository = CatalogRepository(session_factory)
     agents = AgentRepository(session_factory)
     workspaces = WorkspaceRepository(session_factory)
+    sessions = SessionRepository(session_factory)
     credential_store = ModelCredentialStore(settings.model.credentials_dir)
+    runtime_manager = build_workspace_runtime_manager(
+        sandbox=sandbox,
+        projection_source=WorkspaceProjectionSource(
+            agents=agents, catalog=catalog_repository
+        ),
+        projection_store=WorkspaceProjectionStore(workspaces),
+        credential_resolver=CatalogCredentialResolver(
+            catalog=catalog_repository, store=credential_store
+        ),
+    )
     return ServiceContainer(
         engine=engine,
         session_factory=session_factory,
@@ -106,17 +119,15 @@ def build_default_services() -> ServiceContainer:
         workspace_store=LocalWorkspaceStore(workspace_root),
         agents=agents,
         workspaces=workspaces,
-        sessions=SessionRepository(session_factory),
-        runtime_manager=build_workspace_runtime_manager(
-            sandbox=sandbox,
-            projection_source=WorkspaceProjectionSource(
-                agents=agents, catalog=catalog_repository
-            ),
-            projection_store=WorkspaceProjectionStore(workspaces),
-            credential_resolver=CatalogCredentialResolver(
-                catalog=catalog_repository, store=credential_store
-            ),
-        ),
+        sessions=sessions,
+        runtime_manager=runtime_manager,
         model_catalog=ModelCatalogService(catalog_repository, credential_store),
+        session_service=SessionService(
+            sessions=sessions,
+            workspaces=workspaces,
+            agents=agents,
+            catalog=catalog_repository,
+            runtime_manager=runtime_manager,
+        ),
         sandbox_backends={"local_process": sandbox},
     )

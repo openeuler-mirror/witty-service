@@ -10,14 +10,15 @@ from fastapi.testclient import TestClient
 from openapi_spec_validator import validate
 
 from witty_service.api.contract.openapi import (
-    build_contract_app,
     render_contract_openapi,
     render_contract_openapi_yaml,
 )
 from witty_service.api.errors import ERROR_PRIORITY, ERROR_STATUS
 from witty_service.api.openapi import _finalize
+from witty_service.api.services import build_default_services
 from witty_service.config import get_settings
 from witty_service.domain.error_codes import ErrorCode
+from witty_service.main import create_app
 
 DOCUMENT = (
     Path(__file__).resolve().parents[2]
@@ -32,8 +33,17 @@ def spec() -> dict[str, Any]:
 
 
 @pytest.fixture
-def client() -> TestClient:
-    return TestClient(build_contract_app())
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    monkeypatch.setenv(
+        "WITTY_DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'db.sqlite3'}"
+    )
+    monkeypatch.setenv("WITTY_WORKSPACE_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv(
+        "WITTY_MODEL_CREDENTIALS_DIR", str(tmp_path / "model-credentials")
+    )
+    monkeypatch.setattr("witty_service.config._settings", None)
+    monkeypatch.setattr("witty_service.main.configure_logging", lambda: None)
+    return TestClient(create_app(services=build_default_services()))
 
 
 @pytest.fixture
@@ -62,11 +72,6 @@ def test_generated_contract_is_valid_openapi(spec: dict[str, Any]) -> None:
         ),
         ("GET", "/api/workspaces/ws_01", None),
         ("PATCH", "/api/workspaces/ws_01", {"name": "renamed"}),
-        ("GET", "/api/workspaces/ws_01/sessions", None),
-        ("POST", "/api/sessions", {"workspace_id": "ws_01"}),
-        ("GET", "/api/sessions/ses_01", None),
-        ("PATCH", "/api/sessions/ses_01", {"title": "renamed"}),
-        ("PATCH", "/api/sessions/ses_01/selection", {"agent_id": "agt_01"}),
         ("DELETE", "/api/sessions/ses_01", None),
         (
             "POST",

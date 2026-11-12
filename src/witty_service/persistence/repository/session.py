@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import func, update
+from sqlalchemy import and_, func, or_, update
 from sqlalchemy.dialects.sqlite import insert
 
 from witty_service.domain.enums import (
@@ -89,6 +89,76 @@ class SessionRepository(RepositoryBase):
             ).all()
             return [record_of(SessionRecord, row) for row in rows]
 
+    def list_by_workspace_page(
+        self,
+        workspace_id: str,
+        after: tuple[int, int, str] | None,
+        limit: int,
+    ) -> list[SessionRecord]:
+        with self._read() as session:
+            query = session.query(SessionORM).filter(
+                SessionORM.workspace_id == workspace_id,
+                SessionORM.deleted_at.is_(None),
+            )
+            if after is not None:
+                pinned, last_activity_at, session_id = after
+                query = query.filter(
+                    or_(
+                        SessionORM.pinned < pinned,
+                        and_(
+                            SessionORM.pinned == pinned,
+                            or_(
+                                SessionORM.last_activity_at < last_activity_at,
+                                and_(
+                                    SessionORM.last_activity_at == last_activity_at,
+                                    SessionORM.id < session_id,
+                                ),
+                            ),
+                        ),
+                    )
+                )
+            rows = (
+                query.order_by(
+                    SessionORM.pinned.desc(),
+                    SessionORM.last_activity_at.desc(),
+                    SessionORM.id.desc(),
+                )
+                .limit(limit)
+                .all()
+            )
+            return [record_of(SessionRecord, row) for row in rows]
+
+    def get_running_turn(self, session_id: str) -> TurnRecord | None:
+        with self._read() as session:
+            row = (
+                session.query(TurnORM)
+                .filter(
+                    TurnORM.session_id == session_id,
+                    TurnORM.status == TurnStatus.running.value,
+                )
+                .one_or_none()
+            )
+            return None if row is None else record_of(TurnRecord, row)
+
+    def update_metadata(
+        self,
+        session_id: str,
+        title: str | None,
+        pinned: int | None,
+        now: int,
+    ) -> SessionRecord | None:
+        with self._transaction() as session:
+            row = session.get(SessionORM, session_id)
+            if row is None or row.deleted_at is not None:
+                return None
+            if title is not None:
+                row.title = title
+            if pinned is not None:
+                row.pinned = pinned
+            row.updated_at = now
+            session.flush()
+            return record_of(SessionRecord, row)
+
     def count_open_sessions(self, workspace_id: str) -> int:
         with self._read() as session:
             return (
@@ -101,14 +171,20 @@ class SessionRepository(RepositoryBase):
             )
 
     def update_current_settings(
-        self, session_id: str, agent_id: str, model_id: str | None, now: int
+        self,
+        session_id: str,
+        agent_id: str | None,
+        model_id: str | None,
+        now: int,
     ) -> SessionRecord | None:
         with self._transaction() as session:
             row = session.get(SessionORM, session_id)
-            if row is None:
+            if row is None or row.deleted_at is not None:
                 return None
-            row.current_agent_id = agent_id
-            row.current_model_id = model_id
+            if agent_id is not None:
+                row.current_agent_id = agent_id
+            if model_id is not None:
+                row.current_model_id = model_id
             row.updated_at = now
             session.flush()
             return record_of(SessionRecord, row)
