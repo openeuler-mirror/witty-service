@@ -711,7 +711,9 @@ class WorkspaceRuntimeManager:
                 await self._mark_exited(entry, status)
                 try:
                     await self._cleanup_handle(entry)
-                except RuntimeUnavailableError:
+                except RuntimeUnavailableError as exc:
+                    entry.reset(RuntimePhase.ERROR)
+                    entry.last_error = exc.message
                     _logger.warning(
                         "failed to reclaim workspace runtime %s",
                         entry.spec.workspace.workspace_id,

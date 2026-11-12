@@ -442,6 +442,25 @@ async def test_failed_idle_stop_is_retried_on_next_reconcile() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_reclaim_after_exit_is_retried_on_next_reconcile() -> None:
+    harness = Harness()
+    await harness.manager.ensure_started(_spec("ws_a", 4100))
+    harness.sandbox.crash("ws_a")
+    harness.sandbox.cleanup_failures = 1
+
+    await harness.manager.reconcile()
+    state = harness.manager.get_state("ws_a")
+    assert state.phase is RuntimePhase.ERROR
+    assert state.last_error == "failed to clean workspace runtime"
+    assert harness.sandbox.ports == {"ws_a": 4100}
+
+    await harness.manager.reconcile()
+    assert harness.manager.get_state("ws_a").phase is RuntimePhase.STOPPED
+    assert harness.sandbox.ports == {}
+    await harness.close()
+
+
+@pytest.mark.asyncio
 async def test_availability_reads_memory_and_isolates_workspaces() -> None:
     harness = Harness()
     await harness.manager.ensure_started(_spec("ws_a", 4100))
