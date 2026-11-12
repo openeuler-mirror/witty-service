@@ -580,3 +580,31 @@ def test_status_probes_pid_for_untracked_handle(
         backend, "_pid_is_our_agent_server", lambda pid, metadata: False
     )
     assert backend.status(handle) == SandboxStatus.stopped
+
+
+def test_write_runtime_files_accepts_symlinked_runtime_home(tmp_path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path))
+
+    backend.write_runtime_files(
+        runtime_home=str(link), files={"opencode/opencode.json": "{}"}
+    )
+
+    assert (real / "opencode" / "opencode.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_write_runtime_files_rejects_symlink_escape(tmp_path) -> None:
+    home = tmp_path / "home"
+    outside = tmp_path / "outside"
+    home.mkdir()
+    outside.mkdir()
+    (home / "link").symlink_to(outside, target_is_directory=True)
+    backend = LocalProcessSandboxBackend(agent_server_app_dir=str(tmp_path))
+
+    with pytest.raises(ValueError, match="escapes runtime home"):
+        backend.write_runtime_files(
+            runtime_home=str(home), files={"link/escape.txt": "x"}
+        )

@@ -30,8 +30,19 @@ class OpenCodeProjectionRenderer:
             for agent in document["agents"]
         }
         providers: dict[str, Any] = {}
+        provider_endpoints: dict[str, tuple[str | None, str | None]] = {}
         for model in document["models"]:
             provider_id = model["provider_id"]
+            endpoint = (
+                model["api_base_url"] or None,
+                model["compatibility"] or "openai",
+            )
+            previous = provider_endpoints.setdefault(provider_id, endpoint)
+            if previous != endpoint:
+                raise ValueError(
+                    f"Provider {provider_id!r} has inconsistent "
+                    "api_base_url/compatibility across models"
+                )
             provider = providers.setdefault(provider_id, {})
             if model["api_base_url"]:
                 provider["npm"] = _COMPATIBILITY_TO_NPM.get(

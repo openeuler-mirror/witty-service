@@ -410,6 +410,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
         """逐文件临时写 + 原子替换，避免执行体读到半截配置。"""
         root = Path(runtime_home).expanduser()
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        resolved_root = root.resolve()
         for relative_path, content in files.items():
             relative = PurePosixPath(relative_path)
             if (
@@ -420,7 +421,7 @@ class LocalProcessSandboxBackend(SandboxBackend):
             ):
                 raise ValueError(f"Invalid runtime file path: {relative_path!r}")
             target = root / relative_path
-            if root != target and root not in target.resolve(strict=False).parents:
+            if resolved_root not in target.resolve(strict=False).parents:
                 raise ValueError(
                     f"Runtime file escapes runtime home: {relative_path!r}"
                 )

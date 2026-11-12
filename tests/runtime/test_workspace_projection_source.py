@@ -78,14 +78,10 @@ async def test_projection_source_reads_only_visible_entries(repositories) -> Non
         workspace_id
     )
 
-    assert [agent["name"] for agent in projection.document["agents"]] == [
-        "Primary",
-        "Expert",
-    ]
-    assert [agent["internal_name"] for agent in projection.document["agents"]] == [
-        f"ag_{primary_id}",
-        f"ag_{expert_id}",
-    ]
+    by_name = {agent["name"]: agent for agent in projection.document["agents"]}
+    assert set(by_name) == {"Primary", "Expert"}
+    assert by_name["Primary"]["internal_name"] == f"ag_{primary_id}"
+    assert by_name["Expert"]["internal_name"] == f"ag_{expert_id}"
     assert [model["provider_model_id"] for model in projection.document["models"]] == [
         "model-one"
     ]
@@ -103,6 +99,8 @@ async def test_projection_store_round_trips_workspace_hash(repositories) -> None
     await store.save_published_hash(workspace_id, "hash-1")
 
     assert await store.get_published_hash(workspace_id) == "hash-1"
+    record = workspaces.get(workspace_id)
+    assert record is not None and record.updated_at >= 10**12
     assert await store.get_published_hash("missing") is None
 
 

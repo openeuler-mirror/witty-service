@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from collections.abc import Mapping
 
+from witty_service.persistence.entities.base import utc_ms_now
 from witty_service.persistence.repository.agent import AgentRepository
 from witty_service.persistence.repository.catalog import CatalogRepository
 from witty_service.persistence.repository.workspace import WorkspaceRepository
@@ -86,7 +86,7 @@ class WorkspaceProjectionStore:
             self._workspaces.set_published_projection_hash,
             workspace_id,
             projection_hash,
-            int(time.time()),
+            utc_ms_now(),
         )
 
 
