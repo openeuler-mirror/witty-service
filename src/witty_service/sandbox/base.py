@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -80,6 +81,14 @@ class SandboxBackend(ABC):
     @abstractmethod
     def cleanup(self, handle: SandboxHandle | str, **kwargs: Any) -> None:
         raise NotImplementedError
+
+    def write_runtime_files(
+        self, *, runtime_home: str, files: Mapping[str, str]
+    ) -> None:
+        """原子写入 Runtime Home 内的配置；Runtime Home 的磁盘 I/O 只走沙箱。"""
+        raise sandbox_not_supported(
+            sandbox_type=self.sandbox_type, operation="write_runtime_files"
+        )
 
     def stop_all(self, **kwargs: Any) -> None:
         """停止本 backend 记录的所有沙箱（服务关停时调用）。
