@@ -264,7 +264,7 @@ class ModelCatalogService:
                 max_tokens=max_tokens,
                 temperature=temperature,
                 enabled=1 if enabled else 0,
-                is_default=0,
+                is_default=1 if model.is_default else 0,
                 now=now,
             )
             if updated is None:

@@ -477,6 +477,14 @@ class WorkspaceRuntimeManager:
         entry = self._entries.get(workspace_id)
         if entry is None:
             return self.get_state(workspace_id)
+        task = entry.publish_task
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            entry.publish_task = None
+            entry.publication = PublicationPhase.IDLE
+            entry.pending_hash = None
         async with entry.lock:
             if entry.handle is None:
                 entry.reset(RuntimePhase.STOPPED)

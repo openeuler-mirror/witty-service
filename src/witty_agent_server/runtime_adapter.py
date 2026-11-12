@@ -190,21 +190,23 @@ class OpenCodeRuntimeAdapter:
             )
             after_seq = 0
             while True:
+                if time.monotonic() >= deadline:
+                    return _readiness(
+                        location,
+                        detail="warm-up turn did not start at the location",
+                    )
                 events, has_more = await client.history(
                     runtime_session_id, after_seq=after_seq, limit=100
                 )
+                progressed = False
                 for raw in events:
                     if _is_turn_started(workspace_id, raw):
                         return _readiness(location, ready=True)
                     seq = _durable_seq(raw)
-                    if seq is not None:
-                        after_seq = max(after_seq, seq)
-                if not has_more:
-                    if time.monotonic() >= deadline:
-                        return _readiness(
-                            location,
-                            detail="warm-up turn did not start at the location",
-                        )
+                    if seq is not None and seq > after_seq:
+                        after_seq = seq
+                        progressed = True
+                if not has_more or not progressed:
                     await asyncio.sleep(self._poll_interval)
         except (OpenCodeV2Error, httpx.HTTPError) as exc:
             return _readiness(location, detail=f"warm-up turn failed: {exc}")

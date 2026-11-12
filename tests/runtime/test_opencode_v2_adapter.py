@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 import httpx
@@ -310,6 +311,49 @@ async def test_verify_location_times_out_without_step_started() -> None:
             models=(RuntimeModelRef(provider_id="p1", model_id="m1"),),
             timeout=0.05,
         )
+    )
+
+    assert readiness.ready is False
+    assert readiness.detail == "warm-up turn did not start at the location"
+
+
+@pytest.mark.asyncio
+async def test_verify_location_times_out_while_history_keeps_paging() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/health":
+            return _json(200, {"healthy": True})
+        if path == "/api/location":
+            return _json(200, {"directory": "/srv/ws_a"})
+        if path == "/api/agent":
+            return _json(200, {"location": {}, "data": [{"name": "build"}]})
+        if path == "/api/model":
+            return _json(
+                200, {"location": {}, "data": [{"id": "m1", "providerID": "p1"}]}
+            )
+        if path == "/api/skill":
+            return _json(200, {"location": {}, "data": []})
+        if path == "/api/session" and request.method == "POST":
+            return _json(200, {"data": {"id": "ses_1"}})
+        if path == "/api/session/ses_1/prompt":
+            return _json(200, {"data": {}})
+        if path == "/api/session/ses_1/history":
+            return _json(200, {"data": [], "hasMore": True})
+        raise AssertionError(f"unexpected request {request.method} {path}")
+
+    adapter = _adapter(handler, poll_interval=0.01)
+    await adapter.connect(_connection())
+
+    readiness = await asyncio.wait_for(
+        adapter.verify_location(
+            RuntimeLocationVerification(
+                "ws_a",
+                agents=("build",),
+                models=(RuntimeModelRef(provider_id="p1", model_id="m1"),),
+                timeout=0.05,
+            )
+        ),
+        timeout=1.0,
     )
 
     assert readiness.ready is False

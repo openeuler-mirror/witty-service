@@ -448,6 +448,31 @@ async def test_acquires_are_blocked_while_publish_drains() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_cancels_inflight_publish_before_it_restarts() -> None:
+    harness = Harness()
+    spec = _spec()
+    await harness.manager.ensure_started(spec)
+    first = await harness.manager.acquire_turn_permit(spec, turn_id="turn-1")
+    harness.change_projection("Changed prompt.")
+    publisher = asyncio.create_task(
+        harness.manager.acquire_turn_permit(spec, turn_id="turn-2")
+    )
+    await asyncio.sleep(0.05)
+    started_before = len(harness.sandbox.started)
+
+    await harness.manager.stop("ws_a")
+    await harness.manager.release_turn_permit(first)
+
+    with pytest.raises(asyncio.CancelledError):
+        await publisher
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+    assert len(harness.sandbox.started) == started_before
+    assert harness.manager.get_state("ws_a").phase is RuntimePhase.STOPPED
+    assert harness.manager.publication_state("ws_a").phase is PublicationPhase.IDLE
+
+
+@pytest.mark.asyncio
 async def test_shutdown_cancels_publish_and_stops_runtime() -> None:
     harness = Harness()
     spec = _spec()
