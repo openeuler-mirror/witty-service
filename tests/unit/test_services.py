@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -52,6 +52,8 @@ def _container(events: list[str], *, failing_runtime: bool = False) -> ServiceCo
         def stop_all(self) -> None:
             events.append("backend")
 
+    turns = AsyncMock()
+    turns.close.side_effect = lambda: events.append("turns")
     engine = MagicMock()
     engine.dispose.side_effect = lambda: events.append("engine")
     return ServiceContainer(
@@ -65,7 +67,7 @@ def _container(events: list[str], *, failing_runtime: bool = False) -> ServiceCo
         runtime_manager=Runtime(),  # type: ignore[arg-type]
         model_catalog=MagicMock(),
         session_service=MagicMock(),
-        turn_service=MagicMock(),
+        turn_service=turns,  # type: ignore[arg-type]
         sandbox_backends={"local_process": Backend()},  # type: ignore[dict-item]
     )
 
@@ -73,7 +75,7 @@ def _container(events: list[str], *, failing_runtime: bool = False) -> ServiceCo
 def test_close_order_is_runtime_backends_engine(settings_env: None) -> None:
     events: list[str] = []
     asyncio.run(_container(events).close())
-    assert events == ["runtime", "backend", "engine"]
+    assert events == ["turns", "runtime", "backend", "engine"]
 
 
 def test_close_still_disposes_engine_when_runtime_shutdown_fails(
@@ -82,7 +84,7 @@ def test_close_still_disposes_engine_when_runtime_shutdown_fails(
     events: list[str] = []
     with pytest.raises(RuntimeError):
         asyncio.run(_container(events, failing_runtime=True).close())
-    assert events == ["runtime", "backend", "engine"]
+    assert events == ["turns", "runtime", "backend", "engine"]
 
 
 def test_close_skips_extra_backends_when_configured(
@@ -92,4 +94,4 @@ def test_close_skips_extra_backends_when_configured(
     monkeypatch.setattr("witty_service.config._settings", None)
     events: list[str] = []
     asyncio.run(_container(events).close())
-    assert events == ["runtime", "engine"]
+    assert events == ["turns", "runtime", "engine"]

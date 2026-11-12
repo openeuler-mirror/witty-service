@@ -224,7 +224,7 @@ class SessionRepository(RepositoryBase):
     ) -> SessionRecord | None:
         with self._transaction() as session:
             row = session.get(SessionORM, session_id)
-            if row is None:
+            if row is None or row.deleted_at is not None:
                 return None
             row.runtime_session_id = runtime_session_id
             row.updated_at = now
@@ -346,11 +346,7 @@ class SessionRepository(RepositoryBase):
             query = session.query(TurnORM).filter(TurnORM.session_id == session_id)
             if before_seq is not None:
                 query = query.filter(TurnORM.turn_seq < before_seq)
-            rows = (
-                query.order_by(TurnORM.turn_seq.desc())
-                .limit(limit)
-                .all()
-            )
+            rows = query.order_by(TurnORM.turn_seq.desc()).limit(limit).all()
             return [record_of(TurnRecord, row) for row in rows]
 
     def get_turn(self, turn_id: str) -> TurnRecord | None:

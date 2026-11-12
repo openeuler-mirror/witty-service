@@ -15,7 +15,10 @@ from witty_service.application.workspace_projection import (
     WorkspaceProjectionSource,
     WorkspaceProjectionStore,
 )
-from witty_service.bootstrap import build_workspace_runtime_manager
+from witty_service.bootstrap import (
+    build_workspace_runtime_manager,
+    build_workspace_runtime_spec,
+)
 from witty_service.config import get_settings
 from witty_service.persistence.consistency import verify_structure
 from witty_service.persistence.db import (
@@ -70,13 +73,16 @@ class ServiceContainer:
 
     async def close(self) -> None:
         try:
-            await self.runtime_manager.shutdown()
+            await self.turn_service.close()
         finally:
             try:
-                if get_settings().workspace.stop_sandboxes_on_shutdown:
-                    self._stop_sandbox_backends()
+                await self.runtime_manager.shutdown()
             finally:
-                self.engine.dispose()
+                try:
+                    if get_settings().workspace.stop_sandboxes_on_shutdown:
+                        self._stop_sandbox_backends()
+                finally:
+                    self.engine.dispose()
 
 
 def _ensure_database_directory(database_url: str) -> None:
@@ -133,8 +139,11 @@ def build_default_services() -> ServiceContainer:
         ),
         turn_service=TurnService(
             sessions=sessions,
+            workspaces=workspaces,
             agents=agents,
             catalog=catalog_repository,
+            runtime=runtime_manager,
+            runtime_spec_factory=build_workspace_runtime_spec,
         ),
         sandbox_backends={"local_process": sandbox},
     )

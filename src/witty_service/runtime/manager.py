@@ -12,6 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from witty_service.runtime.contracts import (
+    EnsureSessionRequest,
     ReplayQuery,
     RuntimeConnection,
     RuntimeEventEnvelope,
@@ -19,7 +20,10 @@ from witty_service.runtime.contracts import (
     RuntimeHealth,
     RuntimeLocationVerification,
     RuntimeModelRef,
+    RuntimeSession,
     RuntimeWorkspace,
+    TurnAdmission,
+    TurnExecutionRequest,
     TurnPermit,
     WorkspaceRuntimePort,
 )
@@ -432,6 +436,33 @@ class WorkspaceRuntimeManager:
             if not entry.active_turns:
                 entry.drained.set()
             entry.last_activity = self._clock()
+
+    async def ensure_runtime_session(
+        self, *, workspace_id: str, session_id: str, runtime_session_id: str | None
+    ) -> RuntimeSession:
+        """惰性创建或复用 Runtime Session；directory 由 Workspace 固定。"""
+        entry = self._require_healthy(workspace_id)
+        return await self._port.ensure_session(
+            EnsureSessionRequest(
+                workspace=entry.spec.workspace,
+                session_id=session_id,
+                runtime_session_id=runtime_session_id,
+            )
+        )
+
+    async def admit_turn(self, request: TurnExecutionRequest) -> TurnAdmission:
+        """显式携带 Agent/model/Parts 提交 admission；adapter 内部先做 prepare。"""
+        self._require_healthy(request.workspace_id)
+        return await self._port.admit_turn(request)
+
+    def _require_healthy(self, workspace_id: str) -> _ManagedWorkspace:
+        entry = self._entries.get(workspace_id)
+        if entry is None or entry.phase is not RuntimePhase.HEALTHY:
+            raise RuntimeUnavailableError(
+                workspace_id=workspace_id,
+                detail=None if entry is None else entry.last_error,
+            )
+        return entry
 
     async def subscribe_events(
         self, workspace_id: str

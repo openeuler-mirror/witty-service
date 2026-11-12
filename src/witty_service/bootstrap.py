@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from witty_service.domain.records import WorkspaceRecord
 from witty_service.runtime.contracts import RuntimeWorkspace
 from witty_service.runtime.manager import WorkspaceRuntimeManager, WorkspaceRuntimeSpec
 from witty_service.runtime.paths import WorkspaceRuntimePaths
@@ -42,6 +43,16 @@ def build_local_opencode_spec(
         env=env,
         preferred_port=preferred_port,
         stderr_log_path=str(paths.runtime_home / "opencode-serve.log"),
+    )
+
+
+def build_workspace_runtime_spec(workspace: WorkspaceRecord) -> WorkspaceRuntimeSpec:
+    """从 Workspace 聚合生成 Runtime 启动输入；目录只由 Workspace 决定。"""
+    return build_local_opencode_spec(
+        workspace=RuntimeWorkspace(
+            workspace_id=workspace.id,
+            runtime_directory=workspace.host_directory,
+        )
     )
 
 
