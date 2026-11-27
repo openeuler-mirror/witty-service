@@ -47,7 +47,7 @@ dependencies = [
   "docker>=7.0",
   "apscheduler>=3.11,<4",
   # dsh runtime（developer preview：锁精确版本，升级需独立评估兼容性）
-  "deepseek-harness-sdk==0.2.1rc2",
+  "deepseek-harness-sdk==0.2.2rc2",
 ]
 
 [project.optional-dependencies]
